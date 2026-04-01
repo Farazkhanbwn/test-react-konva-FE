@@ -257,29 +257,57 @@ export default function DesignCanvasSection({
         draggable
         onDragMove={(e) => {
           const node = e.target
-          const nx = (node.x() + HANDLE_SIZE / 2 - PLAN_OFFSET_X) / SCALE
-          const ny = (node.y() + HANDLE_SIZE / 2 - PLAN_OFFSET_Y) / SCALE
+          const rawNx = (node.x() + HANDLE_SIZE / 2 - PLAN_OFFSET_X) / SCALE
+          const rawNy = (node.y() + HANDLE_SIZE / 2 - PLAN_OFFSET_Y) / SCALE
+          const nx = snapEnabled ? Math.round(rawNx * 2) / 2 : rawNx
+          const ny = snapEnabled ? Math.round(rawNy * 2) / 2 : rawNy
 
           let newX = room.x
           let newY = room.y
           let newW = room.width
           let newH = room.height
 
-          if (h.id.includes('l')) {
-            newW = room.x + room.width - nx
-            newX = nx
+          const right = room.x + room.width
+          const bottom = room.y + room.height
+
+          switch (h.id) {
+            case 'tl':
+              newX = nx
+              newY = ny
+              newW = right - nx
+              newH = bottom - ny
+              break
+            case 'tr':
+              newY = ny
+              newW = nx - room.x
+              newH = bottom - ny
+              break
+            case 'bl':
+              newX = nx
+              newW = right - nx
+              newH = ny - room.y
+              break
+            case 'br':
+              newW = nx - room.x
+              newH = ny - room.y
+              break
+            case 'tm':
+              newY = ny
+              newH = bottom - ny
+              break
+            case 'bm':
+              newH = ny - room.y
+              break
+            case 'ml':
+              newX = nx
+              newW = right - nx
+              break
+            case 'mr':
+              newW = nx - room.x
+              break
+            default:
+              break
           }
-          if (h.id.includes('r') && h.id !== 'tr' || h.id === 'mr') newW = nx - room.x
-          if (h.id === 'tr') {
-            newW = nx - room.x
-            newY = ny
-            newH = room.y + room.height - ny
-          }
-          if (h.id.includes('t') && h.id !== 'tr') {
-            newH = room.y + room.height - ny
-            newY = ny
-          }
-          if (h.id.includes('b')) newH = ny - room.y
 
           if (newW < 0.5 || newH < 0.5) return
           canvas.resizeRoom(room.id, newW, newH, newX, newY)
@@ -477,6 +505,8 @@ export default function DesignCanvasSection({
 
                 {canvas.state.rooms.map((room) => {
                   const isSelected = canvas.selectedId === room.id && canvas.selectedType === 'room'
+                  const innerWallThicknessM = canvas.state.meta?.defaultInnerWallThickness ?? 0.1
+                  const roomStrokePx = m(innerWallThicknessM)
                   return (
                     <Group key={`room-${room.id}`}>
                       <Rect
@@ -486,7 +516,7 @@ export default function DesignCanvasSection({
                         height={m(room.height)}
                         fill={isSelected ? 'rgba(59, 130, 246, 0.08)' : 'transparent'}
                         stroke={isSelected ? '#3b82f6' : '#111827'}
-                        strokeWidth={isSelected ? 1.5 : 1}
+                        strokeWidth={roomStrokePx}
                         draggable={canvas.tool === 'select'}
                         onClick={(ev) => {
                           ev.cancelBubble = true
@@ -539,7 +569,8 @@ export default function DesignCanvasSection({
                   )
                 })}
 
-                {canvas.state.walls.map((wall) => {
+                {/* Hide default inner walls; rely on room outlines for interior partitions */}
+                {canvas.state.walls.filter((wall) => wall.isOuter !== false).map((wall) => {
                   const isHorizontal = wall.y1 === wall.y2
                   const px1 = PLAN_OFFSET_X + m(wall.x1)
                   const py1 = PLAN_OFFSET_Y + m(wall.y1)
@@ -547,9 +578,16 @@ export default function DesignCanvasSection({
                   const py2 = PLAN_OFFSET_Y + m(wall.y2)
                   const isSelected = canvas.selectedId === wall.id
 
+                  const metaOuter = canvas.state.meta?.defaultWallThickness ?? 0.2
+                  const metaInner = canvas.state.meta?.defaultInnerWallThickness ?? 0.1
+                  let thicknessM = wall.wallThickness3d ?? (wall.isOuter ? metaOuter : metaInner)
+                  // Some older data stores thickness in pixels; clamp anything > 1m back to meta defaults.
+                  if (thicknessM > 1) thicknessM = wall.isOuter ? metaOuter : metaInner
+                  const renderThickness = m(thicknessM)
+
                   const wallRect = isHorizontal
-                    ? { x: Math.min(px1, px2), y: py1 - wall.thickness / 2, w: Math.abs(px2 - px1), h: wall.thickness }
-                    : { x: px1 - wall.thickness / 2, y: Math.min(py1, py2), w: wall.thickness, h: Math.abs(py2 - py1) }
+                    ? { x: Math.min(px1, px2), y: py1 - renderThickness / 2, w: Math.abs(px2 - px1), h: renderThickness }
+                    : { x: px1 - renderThickness / 2, y: Math.min(py1, py2), w: renderThickness, h: Math.abs(py2 - py1) }
 
                   return (
                     <Group key={`wall-${wall.id}`}>
@@ -566,9 +604,9 @@ export default function DesignCanvasSection({
                           let newY1: number
                           if (isHorizontal) {
                             newX1 = (node.x() - PLAN_OFFSET_X) / SCALE
-                            newY1 = (node.y() + wall.thickness / 2 - PLAN_OFFSET_Y) / SCALE
+                            newY1 = (node.y() + renderThickness / 2 - PLAN_OFFSET_Y) / SCALE
                           } else {
-                            newX1 = (node.x() + wall.thickness / 2 - PLAN_OFFSET_X) / SCALE
+                            newX1 = (node.x() + renderThickness / 2 - PLAN_OFFSET_X) / SCALE
                             newY1 = (node.y() - PLAN_OFFSET_Y) / SCALE
                           }
                           canvas.moveWallTo(wall.id, newX1, newY1)
@@ -676,6 +714,8 @@ export default function DesignCanvasSection({
                   const doorW = m(door.width)
                   const isSelected = canvas.selectedId === door.id
                   const doorLabel = door.label ?? door.purpose ?? ''
+                  const metaWallThicknessM = canvas.state.meta?.defaultWallThickness ?? 0.2
+                  const wallPx = m(metaWallThicknessM)
                   return (
                     <Group
                       key={`door-${door.id}`}
@@ -701,7 +741,10 @@ export default function DesignCanvasSection({
                         }
                       }}
                     >
-                      <Line points={[0, 0, doorW, 0]} stroke={isSelected ? '#3b82f6' : '#1a1a1a'} strokeWidth={1.5} />
+                      {/* "Cut" the wall behind the door opening */}
+                      <Line points={[0, 0, doorW, 0]} stroke="#ffffff" strokeWidth={wallPx + 4} />
+                      {/* Door panel line */}
+                      <Line points={[0, 0, 0, doorW]} stroke={isSelected ? '#3b82f6' : '#1a1a1a'} strokeWidth={1.5} />
                       <Arc
                         x={0}
                         y={0}
@@ -709,9 +752,8 @@ export default function DesignCanvasSection({
                         outerRadius={doorW}
                         angle={90}
                         rotation={0}
-                        stroke={isSelected ? '#3b82f6' : '#888888'}
-                        strokeWidth={0.8}
-                        dash={[3, 3]}
+                        stroke={isSelected ? '#3b82f6' : '#1a1a1a'}
+                        strokeWidth={1}
                       />
                       {doorLabel ? (
                         <Text
