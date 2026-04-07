@@ -22,6 +22,7 @@ import {
   PanelLeft,
   RotateCw,
   Armchair,
+  Download,
 } from 'lucide-react'
 import {
   useDesignCanvasState,
@@ -262,13 +263,20 @@ export default function DesignCanvasSection({
           const nx = snapEnabled ? Math.round(rawNx * 2) / 2 : rawNx
           const ny = snapEnabled ? Math.round(rawNy * 2) / 2 : rawNy
 
-          let newX = room.x
-          let newY = room.y
-          let newW = room.width
-          let newH = room.height
+          // Important: use the latest room from state during drag.
+          // Otherwise, corner handles can behave inconsistently because React closures may lag behind Konva drag updates.
+          const liveRoom = canvas.state.rooms.find((r) => r.id === room.id)
+          if (!liveRoom) return
 
-          const right = room.x + room.width
-          const bottom = room.y + room.height
+          const left = liveRoom.x
+          const top = liveRoom.y
+          const right = liveRoom.x + liveRoom.width
+          const bottom = liveRoom.y + liveRoom.height
+
+          let newX = left
+          let newY = top
+          let newW = liveRoom.width
+          let newH = liveRoom.height
 
           switch (h.id) {
             case 'tl':
@@ -279,31 +287,31 @@ export default function DesignCanvasSection({
               break
             case 'tr':
               newY = ny
-              newW = nx - room.x
+              newW = nx - left
               newH = bottom - ny
               break
             case 'bl':
               newX = nx
               newW = right - nx
-              newH = ny - room.y
+              newH = ny - top
               break
             case 'br':
-              newW = nx - room.x
-              newH = ny - room.y
+              newW = nx - left
+              newH = ny - top
               break
             case 'tm':
               newY = ny
               newH = bottom - ny
               break
             case 'bm':
-              newH = ny - room.y
+              newH = ny - top
               break
             case 'ml':
               newX = nx
               newW = right - nx
               break
             case 'mr':
-              newW = nx - room.x
+              newW = nx - left
               break
             default:
               break
@@ -427,6 +435,23 @@ export default function DesignCanvasSection({
                   <Trash2 size={14} /> Delete
                 </Button>
               )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const json = JSON.stringify(canvas.state, null, 2)
+                  const blob = new Blob([json], { type: 'application/json' })
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = `${canvas.state.meta?.projectName || 'floor-plan'}.json`
+                  a.click()
+                  URL.revokeObjectURL(url)
+                }}
+                type="button"
+              >
+                <Download size={14} /> Export JSON
+              </Button>
             </div>
           </div>
 
@@ -484,8 +509,8 @@ export default function DesignCanvasSection({
               ref={stageRef}
               // width={canvasW}
               // height={canvasH}
-              width={1200}
-              height={1200}
+              width={2000}
+              height={2000}
               scaleX={scale}
               scaleY={scale}
               x={stagePos.x}

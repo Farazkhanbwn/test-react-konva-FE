@@ -2,6 +2,9 @@ import { BrowserRouter, Routes, Route, Link } from 'react-router-dom'
 import { FloorPlan3D } from './FloorPlan3D'
 import { DxfUpload } from './DxfUpload'
 import { DesignerPage } from './DesignerPage'
+import { CadViewPage } from './CadViewPage'
+import { DxfJsonViewPage } from './DxfJsonViewPage'
+import { MxCadAppPage } from './MxCadAppPage'
 import './App.css'
 
 function Home() {
@@ -19,6 +22,15 @@ function Home() {
         <Link to="/designer" className="secondary-button">
           2D Editor (Advanced)
         </Link>
+        <Link to="/cad-view" className="secondary-button">
+          CAD view (DXF)
+        </Link>
+        <Link to="/dxf-json-view" className="secondary-button">
+          DXF JSON Viewer
+        </Link>
+        <Link to="/mxcad-app" className="secondary-button">
+          MxCAD App
+        </Link>
       </div>
     </div>
   )
@@ -32,6 +44,9 @@ function App() {
         <Route path="/3D-Preview" element={<FloorPlan3D />} />
         <Route path="/dxf-upload" element={<DxfUpload />} />
         <Route path="/designer" element={<DesignerPage />} />
+        <Route path="/cad-view" element={<CadViewPage />} />
+        <Route path="/dxf-json-view" element={<DxfJsonViewPage />} />
+        <Route path="/mxcad-app" element={<MxCadAppPage />} />
       </Routes>
     </BrowserRouter>
   )
