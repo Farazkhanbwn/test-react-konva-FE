@@ -133,6 +133,76 @@ function removePolylineFromDocByHandle(doc: DxfJsonDocument, handle: string): Dx
   return next
 }
 
+/* ─── DXF exporter ─────────────────────────────── */
+/**
+ * Serialises a DxfJsonDocument back to a standards-compliant DXF ASCII file.
+ * Produces HEADER + ENTITIES sections covering LINE, LWPOLYLINE and MTEXT.
+ * Group-code / value pairs each occupy their own line, as per the DXF spec.
+ */
+function docToDxfString(doc: DxfJsonDocument): string {
+  const out: string[] = []
+  const g = (code: number, value: string | number) => {
+    out.push(String(code))
+    out.push(String(value))
+  }
+  const n = (v: number) => v.toFixed(8)
+
+  /* ── HEADER ── */
+  g(0, 'SECTION'); g(2, 'HEADER')
+  g(9, '$ACADVER');  g(1,  doc.meta?.acad_version ?? 'AC1015')
+  g(9, '$EXTMIN')
+  g(10, n(doc.meta?.extmin?.[0] ?? 0))
+  g(20, n(doc.meta?.extmin?.[1] ?? 0))
+  g(30, '0.0')
+  g(9, '$EXTMAX')
+  g(10, n(doc.meta?.extmax?.[0] ?? 0))
+  g(20, n(doc.meta?.extmax?.[1] ?? 0))
+  g(30, '0.0')
+  g(0, 'ENDSEC')
+
+  /* ── ENTITIES ── */
+  g(0, 'SECTION'); g(2, 'ENTITIES')
+
+  for (const ln of doc.lines ?? []) {
+    g(0, 'LINE');  g(5, ln.handle);  g(8, ln.layer)
+    g(10, n(ln.start.x)); g(20, n(ln.start.y)); g(30, n(ln.start.z))
+    g(11, n(ln.end.x));   g(21, n(ln.end.y));   g(31, n(ln.end.z))
+  }
+
+  for (const pl of doc.polylines ?? []) {
+    g(0, 'LWPOLYLINE');  g(5, pl.handle);  g(8, pl.layer)
+    g(90, pl.vertices.length)
+    g(70, pl.closed ? 1 : 0)
+    for (const v of pl.vertices) {
+      g(10, n(v.x));  g(20, n(v.y))
+      if (v.bulge !== 0) g(42, n(v.bulge))
+    }
+  }
+
+  for (const tx of doc.texts ?? []) {
+    g(0, 'MTEXT');  g(5, tx.handle);  g(8, tx.layer)
+    g(10, n(tx.position.x));  g(20, n(tx.position.y));  g(30, n(tx.position.z))
+    g(40, n(tx.height))
+    /* DXF MTEXT uses \P as paragraph separator */
+    g(1, tx.text.replace(/\n/g, '\\P'))
+  }
+
+  g(0, 'ENDSEC')
+  g(0, 'EOF')
+
+  return out.join('\n') + '\n'
+}
+
+/** Trigger a browser download from a data-url or blob-url. */
+function triggerDownload(href: string, filename: string) {
+  const a = document.createElement('a')
+  a.href = href
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+}
+
 function appendUserText(
   doc: DxfJsonDocument,
   position: Pt,
@@ -758,6 +828,24 @@ export function DxfJsonViewPage() {
     if (units === 'mm')  return `${(m * 1000).toFixed(0)} mm`
     return `${m.toFixed(2)} m`
   }, [units])
+
+  /* ── exports ── */
+  const exportPng = useCallback(() => {
+    const stage = stageRef.current
+    if (!stage) return
+    const dataURL = stage.toDataURL({ pixelRatio: 2, mimeType: 'image/png' })
+    const base = (planDoc.source_file ?? 'floor-plan').replace(/\.dxf$/i, '')
+    triggerDownload(dataURL, `${base}.png`)
+  }, [planDoc.source_file])
+
+  const exportDxf = useCallback(() => {
+    const dxfStr = docToDxfString(planDoc)
+    const blob = new Blob([dxfStr], { type: 'application/dxf' })
+    const url = URL.createObjectURL(blob)
+    const base = (planDoc.source_file ?? 'floor-plan').replace(/\.dxf$/i, '')
+    triggerDownload(url, `${base}-exported.dxf`)
+    URL.revokeObjectURL(url)
+  }, [planDoc])
 
   /**
    * Only the Hand tool (or Space-bar held) should pan the canvas.
@@ -1651,6 +1739,33 @@ export function DxfJsonViewPage() {
                 setSelectedId(null)
               }}>Delete selected</button>
             )}
+          </div>
+
+          <div className="dxf-prop-panel">
+            <div className="dxf-prop-label">Export</div>
+            <p className="dxf-prop-hint">PNG captures the current view. DXF re-serialises all entities from the live JSON plan.</p>
+            <div className="dxf-export-btns">
+              <button
+                type="button"
+                className="dxf-action-btn dxf-export-btn"
+                onClick={exportPng}
+              >
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>
+                </svg>
+                PNG
+              </button>
+              <button
+                type="button"
+                className="dxf-action-btn dxf-export-btn"
+                onClick={exportDxf}
+              >
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>
+                </svg>
+                DXF
+              </button>
+            </div>
           </div>
 
           {selectedRoomIndex !== null && rooms[selectedRoomIndex] && (

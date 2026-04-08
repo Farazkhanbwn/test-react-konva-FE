@@ -1109,6 +1109,20 @@ button.dxf-room-pill {
   background: rgba(37, 99, 235, 0.14);
 }
 
+.dxf-export-btns {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.dxf-export-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-weight: 600;
+}
+
 .dxf-canvas-frame {
   flex: 1;
   display: flex;
