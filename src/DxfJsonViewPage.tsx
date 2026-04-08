@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * DXF JSON Interactive Floor-Plan Editor
  *
@@ -88,6 +89,25 @@ function polyArea(pts: Pt[]): number {
     a += pts[i].x * pts[j].y - pts[j].x * pts[i].y
   }
   return a / 2
+}
+
+/* ─── Rotation helpers ───────────────────────────── */
+/** Rotate point (px, py) around centre (cx, cy) by angle radians (CCW in standard maths). */
+function rotatePoint(px: number, py: number, cx: number, cy: number, angle: number): [number, number] {
+  const cos = Math.cos(angle), sin = Math.sin(angle)
+  const dx = px - cx, dy = py - cy
+  return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos]
+}
+
+/** Return a new wall array with selected walls rotated around (cx, cy) by angle radians. */
+function applyRotation(ws: WallSeg[], ids: Set<string>, cx: number, cy: number, angle: number): WallSeg[] {
+  if (angle === 0) return ws
+  return ws.map(w => {
+    if (!ids.has(w.id)) return w
+    const [sx, sy] = rotatePoint(w.start.x, w.start.y, cx, cy, angle)
+    const [ex, ey] = rotatePoint(w.end.x,   w.end.y,   cx, cy, angle)
+    return { ...w, start: { x: sx, y: sy }, end: { x: ex, y: ey } }
+  })
 }
 
 /** Check if a line segment (a-b) intersects or is inside a box defined by (x1,y1) to (x2,y2). */
@@ -302,6 +322,22 @@ export function DxfJsonViewPage() {
   const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null)
   const [dragDelta, setDragDelta]   = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
   const dragDeltaRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
+  /** Snapshot of selectedIds taken at mousedown — used by onClick to distinguish
+   *  "already selected before this click" (→ toggle off) from "just added by mousedown" (→ keep). */
+  const selBeforeMouseDown = useRef<Set<string>>(new Set())
+
+  /* ── rotation drag ── */
+  interface RotationDrag {
+    centerWX: number       // world-space rotation centre
+    centerWY: number
+    startMouseAngle: number // atan2 of initial mouse position relative to centre (canvas px)
+    wallIds: string[]
+    textHandles: string[]
+  }
+  const rotationDragRef = useRef<RotationDrag | null>(null)
+  const [rotationDrag, setRotationDrag] = useState<RotationDrag | null>(null)
+  const rotationAngleDeltaRef = useRef(0)
+  const [rotationAngleDelta, setRotationAngleDelta] = useState(0)
 
   /** Translate all selected walls by the current delta. */
   const applyDrag = useCallback((ws: WallSeg[], drag: ActiveDrag, delta: { dx: number; dy: number }): WallSeg[] => {
@@ -323,14 +359,26 @@ export function DxfJsonViewPage() {
 
   /** Real-time reactive labels — recalculated live during any drag or selection transformation. */
   const effectiveTexts = useMemo(() => {
-    if (!activeDrag) return planDoc.texts
-    const { toMoveTextIds } = activeDrag
-    const { dx, dy } = dragDelta
-    const tSet = new Set(toMoveTextIds)
-    return planDoc.texts.map(tx => 
-      tSet.has(tx.handle) ? { ...tx, position: { x: tx.position.x + dx, y: tx.position.y + dy, z: 0 } } : tx
-    )
-  }, [planDoc.texts, activeDrag, dragDelta])
+    let texts = planDoc.texts
+    if (activeDrag) {
+      const { toMoveTextIds } = activeDrag
+      const { dx, dy } = dragDelta
+      const tSet = new Set(toMoveTextIds)
+      texts = texts.map(tx =>
+        tSet.has(tx.handle) ? { ...tx, position: { x: tx.position.x + dx, y: tx.position.y + dy, z: 0 } } : tx
+      )
+    }
+    if (rotationDrag && rotationAngleDelta !== 0) {
+      const { centerWX, centerWY, textHandles } = rotationDrag
+      const tSet = new Set(textHandles)
+      texts = texts.map(tx => {
+        if (!tSet.has(tx.handle)) return tx
+        const [nx, ny] = rotatePoint(tx.position.x, tx.position.y, centerWX, centerWY, rotationAngleDelta)
+        return { ...tx, position: { x: nx, y: ny, z: 0 } }
+      })
+    }
+    return texts
+  }, [planDoc.texts, activeDrag, dragDelta, rotationDrag, rotationAngleDelta])
 
   /* derived rooms — recalculates live during drag */
   const rooms = useMemo(() => {
@@ -390,6 +438,27 @@ export function DxfJsonViewPage() {
     setIsDraggingEp(false)
   }, [])
 
+  /* ── commit pending rotation to wall state ── */
+  const commitRotation = useCallback(() => {
+    const rd = rotationDragRef.current
+    const angle = rotationAngleDeltaRef.current
+    rotationDragRef.current = null
+    rotationAngleDeltaRef.current = 0
+    setRotationDrag(null)
+    setRotationAngleDelta(0)
+    if (!rd || angle === 0) return
+    const ids = new Set(rd.wallIds)
+    setWalls(prev => applyRotation(prev, ids, rd.centerWX, rd.centerWY, angle))
+    setPlanDoc(prev => ({
+      ...prev,
+      texts: prev.texts.map(tx => {
+        if (!rd.textHandles.includes(tx.handle)) return tx
+        const [nx, ny] = rotatePoint(tx.position.x, tx.position.y, rd.centerWX, rd.centerWY, angle)
+        return { ...tx, position: { x: nx, y: ny, z: 0 } }
+      }),
+    }))
+  }, [])
+
   /* ── rubber-band selection ── */
   const onStageMouseDown = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     const isStage = e.target === stageRef.current || e.target.name() === 'background-rect'
@@ -400,7 +469,7 @@ export function DxfJsonViewPage() {
 
     const [wx, wy] = toW(pos.x, pos.y, t)
     setSelectionBox({ start: { x: wx, y: wy }, current: { x: wx, y: wy } })
-    if (!e.evt.shiftKey) setSelectedIds(new Set())
+    if (!(e.evt.ctrlKey || e.evt.metaKey)) setSelectedIds(new Set())
   }, [activeTool, spaceHeld, t])
 
   const onStageMouseMove = useCallback((_e: Konva.KonvaEventObject<MouseEvent>) => {
@@ -420,10 +489,18 @@ export function DxfJsonViewPage() {
 
       dragDeltaRef.current = { dx, dy }
       setDragDelta({ dx, dy })
+    } else if (rotationDragRef.current) { // Rotation Drag
+      const rd = rotationDragRef.current
+      const [ccx, ccy] = toC(rd.centerWX, rd.centerWY, t)
+      const currentAngle = Math.atan2(pos.y - ccy, pos.x - ccx)
+      const delta = currentAngle - rd.startMouseAngle
+      rotationAngleDeltaRef.current = delta
+      setRotationAngleDelta(delta)
     }
   }, [selectionBox, activeDrag, t, orthoEnabled])
 
   const onStageMouseUp = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (rotationDragRef.current) { commitRotation(); return }
     if (!selectionBox) return
     const { start, current } = selectionBox
     setSelectionBox(null)
@@ -453,14 +530,14 @@ export function DxfJsonViewPage() {
     }
 
     setSelectedIds(prev => {
-      if (e.evt.shiftKey) {
+      if (e.evt.ctrlKey || e.evt.metaKey) {
         const next = new Set(prev)
         newlySelected.forEach(id => next.add(id))
         return next
       }
       return newlySelected
     })
-  }, [selectionBox, walls])
+  }, [selectionBox, walls, commitRotation])
 
   /* ── mid-handle drag (move whole wall + stretch connected walls live) ── */
   const onMidDragStart = useCallback((
@@ -538,7 +615,17 @@ export function DxfJsonViewPage() {
       if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
         e.preventDefault(); undo()
       }
-      if (e.key === 'Escape') setSelectedIds(new Set())
+      if (e.key === 'Escape') {
+        // Cancel any active rotation drag first, then clear selection
+        if (rotationDragRef.current) {
+          rotationDragRef.current = null
+          rotationAngleDeltaRef.current = 0
+          setRotationDrag(null)
+          setRotationAngleDelta(0)
+        } else {
+          setSelectedIds(new Set())
+        }
+      }
       if (e.key === 'o' || e.key === 'O') setOrthoEnabled(v => !v)
       /* Space = temporary pan */
       if (e.code === 'Space' && !e.repeat) { e.preventDefault(); setSpaceHeld(true) }
@@ -574,10 +661,44 @@ export function DxfJsonViewPage() {
     return `${(Math.abs(m2) * 1e6).toFixed(0)} mm²`
   }, [units])
 
-  /** Walls with the active midpoint drag applied (single segment only). */
-  const effectiveWalls = useMemo(() =>
-    activeDrag ? applyDrag(visWalls, activeDrag, dragDelta) : visWalls,
-  [visWalls, activeDrag, dragDelta, applyDrag])
+  /** Walls with the active midpoint drag and/or live rotation preview applied. */
+  const effectiveWalls = useMemo(() => {
+    let ws = activeDrag ? applyDrag(visWalls, activeDrag, dragDelta) : visWalls
+    if (rotationDrag && rotationAngleDelta !== 0) {
+      ws = applyRotation(ws, new Set(rotationDrag.wallIds), rotationDrag.centerWX, rotationDrag.centerWY, rotationAngleDelta)
+    }
+    return ws
+  }, [visWalls, activeDrag, dragDelta, applyDrag, rotationDrag, rotationAngleDelta])
+
+  /** Bounding box of selected walls in canvas (pixel) coordinates — used to position rotation handle. */
+  const effectiveSelBBox = useMemo(() => {
+    if (selectedIds.size === 0) return null
+    const selWalls = effectiveWalls.filter(w => selectedIds.has(w.id))
+    if (selWalls.length === 0) return null
+    let minCX = Infinity, minCY = Infinity, maxCX = -Infinity, maxCY = -Infinity
+    for (const w of selWalls) {
+      for (const p of [w.start, w.end]) {
+        const [cx, cy] = toC(p.x, p.y, t)
+        minCX = Math.min(minCX, cx); maxCX = Math.max(maxCX, cx)
+        minCY = Math.min(minCY, cy); maxCY = Math.max(maxCY, cy)
+      }
+    }
+    return { minCX, minCY, maxCX, maxCY }
+  }, [effectiveWalls, selectedIds, t])
+
+  /** World-space centre of selected walls — stored at rotation-drag start as the rotation pivot. */
+  const baseSelCenter = useMemo(() => {
+    const selWalls = walls.filter(w => selectedIds.has(w.id))
+    if (selWalls.length === 0) return null
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const w of selWalls) {
+      for (const p of [w.start, w.end]) {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x)
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y)
+      }
+    }
+    return { wx: (minX + maxX) / 2, wy: (minY + maxY) / 2 }
+  }, [walls, selectedIds])
 
   /** Wall length in metres */
   const wallLength = (w: WallSeg) =>
@@ -710,7 +831,7 @@ export function DxfJsonViewPage() {
             onClick={e => { if (e.target === stageRef.current) setSelectedIds(new Set()) }}
             style={{
               display: 'block',
-              cursor: isDraggingEp
+              cursor: (isDraggingEp || rotationDrag)
                 ? 'crosshair'
                 : (activeTool === 'hand' || spaceHeld)
                   ? 'grab'
@@ -773,11 +894,14 @@ export function DxfJsonViewPage() {
                       strokeWidth={16 / zoom}
                       onMouseDown={e => {
                         e.cancelBubble = true
-                        // CAD logic: dragging an unselected item selects it first
+                        // Capture selection state BEFORE this interaction so onClick can
+                        // correctly decide whether to toggle-off or keep the item.
+                        selBeforeMouseDown.current = new Set(selectedIds)
                         let currentSel = selectedIds
                         if (!selectedIds.has(wall.id)) {
-                          const isShift = e.evt.shiftKey
-                          currentSel = new Set(isShift ? selectedIds : [])
+                          // Immediately add to selection so a subsequent drag moves all selected items
+                          const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                          currentSel = new Set(isCtrl ? selectedIds : [])
                           currentSel.add(wall.id)
                           setSelectedIds(currentSel)
                         }
@@ -786,12 +910,21 @@ export function DxfJsonViewPage() {
                       onMouseUp={e => { e.cancelBubble = true; onMidDragEnd() }}
                       onClick={e => {
                         e.cancelBubble = true
-                        const isShift = e.evt.shiftKey
+                        const isCtrl = e.evt.ctrlKey || e.evt.metaKey
                         setSelectedIds(prev => {
-                          const next = new Set(isShift ? prev : [])
-                          if (prev.has(wall.id) && isShift) next.delete(wall.id)
-                          else next.add(wall.id)
-                          return next
+                          if (!isCtrl) {
+                            // Plain click → select only this wall
+                            return new Set([wall.id])
+                          }
+                          // Ctrl+click: toggle based on state BEFORE mousedown.
+                          // If it was selected before → remove it.
+                          // If it wasn't → mousedown already added it, keep current set.
+                          if (selBeforeMouseDown.current.has(wall.id)) {
+                            const next = new Set(prev)
+                            next.delete(wall.id)
+                            return next
+                          }
+                          return prev // already added by mousedown, nothing to change
                         })
                       }}
                       onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
@@ -853,10 +986,11 @@ export function DxfJsonViewPage() {
                           draggable
                           onDragStart={e => {
                             e.cancelBubble = true
+                            selBeforeMouseDown.current = new Set(selectedIds)
                             let currentSel = selectedIds
                             if (!selectedIds.has(wall.id)) {
-                              const isShift = e.evt.shiftKey
-                              currentSel = new Set(isShift ? selectedIds : [])
+                              const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                              currentSel = new Set(isCtrl ? selectedIds : [])
                               currentSel.add(wall.id)
                               setSelectedIds(currentSel)
                             }
@@ -954,8 +1088,8 @@ export function DxfJsonViewPage() {
                         e.cancelBubble = true
                         let currentSel = selectedIds
                         if (!selectedIds.has(tx.handle)) {
-                          const isShift = (e.evt as any).shiftKey
-                          currentSel = new Set(isShift ? selectedIds : [])
+                          const isCtrl = (e.evt as any).ctrlKey || (e.evt as any).metaKey
+                          currentSel = new Set(isCtrl ? selectedIds : [])
                           currentSel.add(tx.handle)
                           setSelectedIds(currentSel)
                         }
@@ -1000,6 +1134,77 @@ export function DxfJsonViewPage() {
                 })}
               </Layer>
             )}
+
+            {/* ── Selection bounding box + rotation handle overlay ── */}
+            {effectiveSelBBox && selectedIds.size > 0 && activeTool === 'select' && !activeDrag && (() => {
+              const { minCX, minCY, maxCX, maxCY } = effectiveSelBBox
+              const pad = 6 / zoom
+              const cx = (minCX + maxCX) / 2
+              const topY = minCY - pad
+              const stemLen = 28 / zoom
+              const handleY = topY - stemLen
+              const handleR = 7 / zoom
+              return (
+                <Layer>
+                  {/* dashed selection rect */}
+                  <Rect
+                    x={minCX - pad} y={minCY - pad}
+                    width={maxCX - minCX + pad * 2} height={maxCY - minCY + pad * 2}
+                    stroke="#3b82f6" strokeWidth={1 / zoom}
+                    dash={[4 / zoom, 2 / zoom]}
+                    fill="transparent"
+                    listening={false}
+                  />
+                  {/* stem line */}
+                  <Line
+                    points={[cx, topY, cx, handleY]}
+                    stroke="#3b82f6" strokeWidth={1 / zoom}
+                    listening={false}
+                  />
+                  {/* rotation handle circle */}
+                  <Circle
+                    x={cx} y={handleY}
+                    radius={handleR}
+                    fill={rotationDrag ? '#3b82f6' : 'white'}
+                    stroke="#3b82f6" strokeWidth={1.5 / zoom}
+                    onMouseDown={e => {
+                      e.cancelBubble = true
+                      if (!baseSelCenter) return
+                      const mpos = stageRef.current?.getPointerPosition()
+                      if (!mpos) return
+                      const [ccx, ccy] = toC(baseSelCenter.wx, baseSelCenter.wy, t)
+                      const startAngle = Math.atan2(mpos.y - ccy, mpos.x - ccx)
+                      snapshot()
+                      const rd: RotationDrag = {
+                        centerWX:        baseSelCenter.wx,
+                        centerWY:        baseSelCenter.wy,
+                        startMouseAngle: startAngle,
+                        wallIds:         walls.filter(w => selectedIds.has(w.id)).map(w => w.id),
+                        textHandles:     planDoc.texts.filter(tx => selectedIds.has(tx.handle)).map(tx => tx.handle),
+                      }
+                      rotationDragRef.current = rd
+                      rotationAngleDeltaRef.current = 0
+                      setRotationDrag(rd)
+                      setRotationAngleDelta(0)
+                    }}
+                    onMouseUp={e => { e.cancelBubble = true; commitRotation() }}
+                    onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'crosshair' }}
+                    onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                  />
+                  {/* small curved arrow icon inside handle */}
+                  <Text
+                    x={cx - handleR} y={handleY - handleR}
+                    width={handleR * 2} height={handleR * 2}
+                    text="↻"
+                    fontSize={handleR * 1.3}
+                    align="center"
+                    verticalAlign="middle"
+                    fill={rotationDrag ? 'white' : '#3b82f6'}
+                    listening={false}
+                  />
+                </Layer>
+              )
+            })()}
           </Stage>
             </div>
           </div>
