@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * DXF JSON Interactive Floor-Plan Editor
  *
@@ -25,6 +26,7 @@
  *   pick the wall; clicks inside a room pick that room. Drag the room centroid to
  *   translate all boundary walls together (doc lines / polylines stay in sync).
  * • Undo (Ctrl-Z) – 20-step stack; Delete/Backspace removes selected wall.
+ * • Resize handles – scale selected items while maintaining relative positions.
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -42,7 +44,14 @@ import {
   type DxfText,
 } from '@/constants/dxfJsonData'
 import type { WallSeg } from '@/utils/wallsFromDxfJson'
-import { wallSegsFromPolyline, wallsFromDxfJson } from '@/utils/wallsFromDxfJson'
+import { wallsFromDxfJson, sortPolylineVertices, wallSegsFromPolyline } from '@/utils/wallsFromDxfJson'
+import {
+  arcHandleFromArcSegWallId,
+  isDoorStyleArc,
+  wallSegsFromArc,
+  wallSegsFromPolyline,
+  wallsFromDxfJson,
+} from '@/utils/wallsFromDxfJson'
 
 /* ─── Types ──────────────────────────────────────── */
 interface Pt { x: number; y: number }
@@ -85,7 +94,7 @@ function appendUserArc(
   startAngle: number,
   endAngle: number,
 ): { next: DxfJsonDocument; arc: DxfArc } {
-  const handle = `arc-user-${Date.now()}`
+  const handle = `user-ar-${Date.now()}`
   const arc: DxfArc = {
     entity_type: 'ARC',
     handle,
@@ -99,9 +108,26 @@ function appendUserArc(
   next.arcs = [...next.arcs, arc]
   next.stats = {
     ...next.stats,
+    arc_count: (next.stats.arc_count ?? 0) + 1,
     entity_counts: { ...next.stats.entity_counts, ARC: (next.stats.entity_counts.ARC ?? 0) + 1 },
   }
   return { next, arc }
+}
+
+function removeArcFromDocByHandle(doc: DxfJsonDocument, handle: string): DxfJsonDocument {
+  const arcs = doc.arcs.filter(a => a.handle !== handle)
+  if (arcs.length === doc.arcs.length) return doc
+  const next = cloneDoc(doc)
+  next.arcs = arcs
+  next.stats = {
+    ...next.stats,
+    arc_count: Math.max(0, (next.stats.arc_count ?? 0) - 1),
+    entity_counts: {
+      ...next.stats.entity_counts,
+      ARC: Math.max(0, (next.stats.entity_counts.ARC ?? 0) - 1),
+    },
+  }
+  return next
 }
 
 function appendUserPolyline(
@@ -158,6 +184,59 @@ function removePolylineFromDocByHandle(doc: DxfJsonDocument, handle: string): Dx
     },
   }
   return next
+}
+
+/* ─── Build DxfJsonDocument from current canvas walls ── */
+/**
+ * Reconstructs the `lines` and `polylines` arrays of a DxfJsonDocument from
+ * the live `walls` state so that `docToDxfString` always exports current
+ * positions — even after endpoint drags, rotations, or resizes that only
+ * update `walls` state without touching `planDoc`.
+ *
+ * Metadata (extmin/extmax, arcs, texts) is preserved from the source doc.
+ */
+function buildDocFromWalls(doc: DxfJsonDocument, walls: WallSeg[]): DxfJsonDocument {
+  const ungrouped = walls.filter(w => !w.groupId)
+  const grouped = new Map<string, WallSeg[]>()
+  for (const w of walls) {
+    if (!w.groupId) continue
+    if (!grouped.has(w.groupId)) grouped.set(w.groupId, [])
+    grouped.get(w.groupId)!.push(w)
+  }
+
+  const lines: DxfLine[] = ungrouped.map(w => ({
+    entity_type: 'LINE' as const,
+    handle: w.id.replace(/^ln-/, ''),
+    layer: '0',
+    start: { x: w.start.x, y: w.start.y, z: 0 },
+    end:   { x: w.end.x,   y: w.end.y,   z: 0 },
+  }))
+
+  const polylines: DxfPolyline[] = [...grouped.entries()].map(([gid, segs]) => {
+    const ordered = sortPolylineVertices(segs)
+    const verts: DxfPolylineVertex[] = []
+    for (const s of ordered) {
+      const last = verts[verts.length - 1]
+      if (!last || Math.abs(last.x - s.start.x) > 0.01 || Math.abs(last.y - s.start.y) > 0.01)
+        verts.push({ x: s.start.x, y: s.start.y, z: 0, bulge: 0 })
+      verts.push({ x: s.end.x, y: s.end.y, z: 0, bulge: 0 })
+    }
+    const closed =
+      verts.length > 2 &&
+      Math.abs(verts[0].x - verts[verts.length - 1].x) < 0.01 &&
+      Math.abs(verts[0].y - verts[verts.length - 1].y) < 0.01
+    if (closed) verts.pop()
+    return {
+      entity_type: 'LWPOLYLINE' as const,
+      handle: gid.replace(/^pl-/, ''),
+      layer: '0',
+      closed,
+      vertex_count: verts.length,
+      vertices: verts,
+    }
+  })
+
+  return { ...doc, lines, polylines }
 }
 
 /* ─── DXF exporter ─────────────────────────────── */
@@ -496,7 +575,8 @@ function removeTextFromDoc(doc: DxfJsonDocument, handle: string): DxfJsonDocumen
 const PAD = 55
 const STAGE_MIN_W = 320
 const STAGE_MIN_H = 280
-const SNAP_TH = 0.15   // world metres — snap threshold
+const SNAP_TH     = 0.15   // world metres — endpoint snap threshold
+const SNAP_LINE_TH = 0.25  // world metres — snap-to-line threshold (slightly wider)
 const HP_SCR  = 7      // endpoint handle radius in screen px
 const ROOM_COLORS = [
   'rgba(59,130,246,0.15)',
@@ -584,6 +664,26 @@ function applyRoomDeltaToDoc(doc: DxfJsonDocument, wallIds: string[], dx: number
       return { ...pl, vertices }
     })
   }
+
+  const arcHandles = new Set<string>()
+  for (const wid of wallIds) {
+    const ah = arcHandleFromArcSegWallId(wid)
+    if (ah) arcHandles.add(ah)
+  }
+  if (arcHandles.size) {
+    next.arcs = next.arcs.map(a => {
+      if (!arcHandles.has(a.handle)) return a
+      return {
+        ...a,
+        center: {
+          ...a.center,
+          x: a.center.x + dx,
+          y: a.center.y + dy,
+        },
+      }
+    })
+  }
+
   return next
 }
 
@@ -612,6 +712,14 @@ const toW = (cx: number, cy: number, t: T): [number, number] => [
   (cx - t.oX) / t.sc + t.emin[0],
   t.emin[1] + t.wH - (cy - t.oY) / t.sc,
 ]
+
+/** Pointer in stage content-space after undoing Stage pan/zoom. */
+function getStageCanvasPointer(stage: Konva.Stage): { x: number; y: number } | null {
+  const p = stage.getPointerPosition()
+  if (!p) return null
+  const inv = stage.getAbsoluteTransform().copy().invert()
+  return inv.point(p)
+}
 
 /**
  * Generate canvas-space points for a DXF ARC (CCW, degrees).
@@ -644,6 +752,92 @@ function polyArea(pts: Pt[]): number {
   return a / 2
 }
 
+/* ─── Rotation helpers ───────────────────────────── */
+/** Rotate point (px, py) around centre (cx, cy) by angle radians (CCW in standard maths). */
+function rotatePoint(px: number, py: number, cx: number, cy: number, angle: number): [number, number] {
+  const cos = Math.cos(angle), sin = Math.sin(angle)
+  const dx = px - cx, dy = py - cy
+  return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos]
+}
+
+/** Return a new wall array with selected walls rotated around (cx, cy) by angle radians. */
+function applyRotation(ws: WallSeg[], ids: Set<string>, cx: number, cy: number, angle: number): WallSeg[] {
+  if (angle === 0) return ws
+  return ws.map(w => {
+    if (!ids.has(w.id)) return w
+    const [sx, sy] = rotatePoint(w.start.x, w.start.y, cx, cy, angle)
+    const [ex, ey] = rotatePoint(w.end.x,   w.end.y,   cx, cy, angle)
+    return { ...w, start: { x: sx, y: sy }, end: { x: ex, y: ey } }
+  })
+}
+
+/* ─── Resize helpers ────────────────────────────── */
+/** Scale point around center */
+function scalePoint(px: number, py: number, cx: number, cy: number, sx: number, sy: number): [number, number] {
+  return [cx + (px - cx) * sx, cy + (py - cy) * sy]
+}
+
+/** Apply scale to selected walls */
+function applyScale(ws: WallSeg[], ids: Set<string>, cx: number, cy: number, sx: number, sy: number): WallSeg[] {
+  if (sx === 1 && sy === 1) return ws
+  return ws.map(w => {
+    if (!ids.has(w.id)) return w
+    const [startX, startY] = scalePoint(w.start.x, w.start.y, cx, cy, sx, sy)
+    const [endX, endY] = scalePoint(w.end.x, w.end.y, cx, cy, sx, sy)
+    return { ...w, start: { x: startX, y: startY }, end: { x: endX, y: endY } }
+  })
+}
+
+/**
+ * Returns the closest point on segment (ax,ay)→(bx,by) to (px,py),
+ * and the parametric t ∈ [0,1] along the segment.
+ */
+function closestPointOnSegment(
+  px: number, py: number,
+  ax: number, ay: number,
+  bx: number, by: number,
+): { pt: { x: number; y: number }; t: number; dist: number } {
+  const dx = bx - ax, dy = by - ay
+  const lenSq = dx * dx + dy * dy
+  if (lenSq < 1e-12) return { pt: { x: ax, y: ay }, t: 0, dist: Math.hypot(px - ax, py - ay) }
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq))
+  const cx = ax + t * dx, cy = ay + t * dy
+  return { pt: { x: cx, y: cy }, t, dist: Math.hypot(px - cx, py - cy) }
+}
+
+/**
+ * Returns all wall IDs that belong to the same group as `wallId`.
+ * If the wall has no groupId, returns `[wallId]` (just itself).
+ */
+function getGroupWallIds(wallId: string, walls: WallSeg[]): string[] {
+  const target = walls.find(w => w.id === wallId)
+  if (!target?.groupId) return [wallId]
+  const gid = target.groupId
+  return walls.filter(w => w.groupId === gid).map(w => w.id)
+}
+
+/** Check if a line segment (a-b) intersects or is inside a box defined by (x1,y1) to (x2,y2). */
+function lineIntersectsRect(a: Pt, b: Pt, x1: number, y1: number, x2: number, y2: number): boolean {
+  // 1. One endpoint inside
+  if (a.x >= x1 && a.x <= x2 && a.y >= y1 && a.y <= y2) return true
+  if (b.x >= x1 && b.x <= x2 && b.y >= y1 && b.y <= y2) return true
+  // 2. Line intersects any of the 4 edges
+  const intersect = (p1: Pt, p2: Pt, p3: Pt, p4: Pt) => {
+    const den = (p4.y - p3.y) * (p2.x - p1.x) - (p4.x - p3.x) * (p2.y - p1.y)
+    if (den === 0) return false
+    const ua = ((p4.x - p3.x) * (p1.y - p3.y) - (p4.y - p3.y) * (p1.x - p3.x)) / den
+    const ub = ((p2.x - p1.x) * (p1.y - p3.y) - (p2.y - p1.y) * (p1.x - p3.x)) / den
+    return ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1
+  }
+  const rect = [
+    { a: { x: x1, y: y1 }, b: { x: x2, y: y1 } },
+    { a: { x: x2, y: y1 }, b: { x: x2, y: y2 } },
+    { a: { x: x2, y: y2 }, b: { x: x1, y: y2 } },
+    { a: { x: x1, y: y2 }, b: { x: x1, y: y1 } },
+  ]
+  return rect.some(edge => intersect(a, b, edge.a, edge.b))
+}
+
 /* ─── DCEL-based minimal face extraction ────────── */
 /**
  * Finds all minimal bounded faces (rooms) from non-detail wall segments:
@@ -656,7 +850,13 @@ function polyArea(pts: Pt[]): number {
  *     faces that the DCEL can produce when walls are nearly-collinear.
  */
 function detectRooms(walls: WallSeg[]): Pt[][] {
-  const segs = walls.filter(w => !w.isDetail)
+  // Only use LINE-derived walls for room detection.
+  // LWPOLYLINE segments (pl-*) are long boundary edges that bypass intermediate junction
+  // nodes (e.g., the full left wall y=22.8→34.8 skips junctions at 25.8 and 30.8), which
+  // prevents the DCEL from closing faces like KITCHEN, BATH, WC.
+  // The LINE entities already define every room boundary redundantly, so we can safely
+  // exclude polyline walls here. Also exclude isOuter (wall-thickness offset) and isDetail.
+  const segs = walls.filter(w => !w.isDetail && !w.isOuter && !w.id.startsWith('pl-'))
   if (segs.length < 3) return []
 
   /* Step 1 – merge coincident endpoints */
@@ -762,6 +962,132 @@ function detectRooms(walls: WallSeg[]): Pt[][] {
   return validFaces
 }
 
+/* ─── applyResizeToWalls ────────────────────────── */
+function applyResizeToWalls(
+  ws: WallSeg[], ids: Set<string>,
+  origBox: { minWX: number; minWY: number; maxWX: number; maxWY: number },
+  newBox:  { minWX: number; minWY: number; maxWX: number; maxWY: number },
+): WallSeg[] {
+  const origW = origBox.maxWX - origBox.minWX || 1e-9
+  const origH = origBox.maxWY - origBox.minWY || 1e-9
+  const newW  = newBox.maxWX - newBox.minWX
+  const newH  = newBox.maxWY - newBox.minWY
+  return ws.map(w => {
+    if (!ids.has(w.id)) return w
+    const scaleX = (p: number) => newBox.minWX + (p - origBox.minWX) / origW * newW
+    const scaleY = (p: number) => newBox.minWY + (p - origBox.minWY) / origH * newH
+    return {
+      ...w,
+      start: { x: scaleX(w.start.x), y: scaleY(w.start.y) },
+      end:   { x: scaleX(w.end.x),   y: scaleY(w.end.y) },
+    }
+  })
+}
+
+
+/* ─── detectRoomsWithWalls ─────────────────────── */
+/** Same DCEL logic as detectRooms but also returns the wall IDs that form each room boundary. */
+function detectRoomsWithWalls(walls: WallSeg[]): Array<{ polygon: Pt[]; wallIds: string[] }> {
+  // Only use LINE-derived walls for room detection.
+  // LWPOLYLINE segments (pl-*) are long boundary edges that bypass intermediate junction
+  // nodes (e.g., the full left wall y=22.8→34.8 skips junctions at 25.8 and 30.8), which
+  // prevents the DCEL from closing faces like KITCHEN, BATH, WC.
+  // The LINE entities already define every room boundary redundantly, so we can safely
+  // exclude polyline walls here. Also exclude isOuter (wall-thickness offset) and isDetail.
+  const segs = walls.filter(w => !w.isDetail && !w.isOuter && !w.id.startsWith('pl-'))
+  if (segs.length < 3) return []
+
+  const nodes: Pt[] = []
+  const getN = (x: number, y: number): number => {
+    for (let i = 0; i < nodes.length; i++)
+      if (Math.abs(nodes[i].x - x) < SNAP_TH && Math.abs(nodes[i].y - y) < SNAP_TH) return i
+    return nodes.push({ x, y }) - 1
+  }
+
+  const eKeys = new Set<string>()
+  const eList: [number, number][] = []
+  const eWallIds: string[] = []   // parallel to eList – the wall id for each undirected edge
+
+  for (const w of segs) {
+    const u = getN(w.start.x, w.start.y)
+    const v = getN(w.end.x, w.end.y)
+    if (u === v) continue
+    const k = `${Math.min(u, v)},${Math.max(u, v)}`
+    if (!eKeys.has(k)) {
+      eKeys.add(k)
+      eList.push([u, v])
+      eWallIds.push(w.id)
+    }
+  }
+  if (eList.length < 3) return []
+
+  const adj = new Map<number, number[]>()
+  for (const [u, v] of eList)
+    for (const [a, b] of [[u, v], [v, u]] as const) {
+      if (!adj.has(a)) adj.set(a, [])
+      adj.get(a)!.push(b)
+    }
+  for (const [n, nb] of adj) {
+    const pn = nodes[n]
+    nb.sort((a, b) =>
+      Math.atan2(nodes[a].y - pn.y, nodes[a].x - pn.x) -
+      Math.atan2(nodes[b].y - pn.y, nodes[b].x - pn.x),
+    )
+  }
+
+  // Build heWallId map: half-edge key → wall id
+  const heWallId = new Map<string, string>()
+  for (let idx = 0; idx < eList.length; idx++) {
+    const [u, v] = eList[idx]
+    const wid = eWallIds[idx]
+    heWallId.set(`${u},${v}`, wid)
+    heWallId.set(`${v},${u}`, wid)
+  }
+
+  const nextHE = new Map<string, string>()
+  for (const [u, v] of eList) {
+    for (const [s, e] of [[u, v], [v, u]] as const) {
+      const backA = Math.atan2(nodes[s].y - nodes[e].y, nodes[s].x - nodes[e].x)
+      let bestW = -1, bestCW = Infinity
+      for (const w of adj.get(e) ?? []) {
+        const outA = Math.atan2(nodes[w].y - nodes[e].y, nodes[w].x - nodes[e].x)
+        let cw = backA - outA
+        while (cw <= 0) cw += 2 * Math.PI
+        if (cw < bestCW) { bestCW = cw; bestW = w }
+      }
+      if (bestW !== -1) nextHE.set(`${s},${e}`, `${e},${bestW}`)
+    }
+  }
+
+  const traced = new Set<string>()
+  const result: Array<{ polygon: Pt[]; wallIds: string[] }> = []
+  for (const [u, v] of eList) {
+    for (const [s, e] of [[u, v], [v, u]] as const) {
+      const sk = `${s},${e}`
+      if (traced.has(sk) || !nextHE.has(sk)) continue
+      const ids: number[] = []
+      const faceWallIds: string[] = []
+      let cur = sk, guard = 0
+      do {
+        traced.add(cur)
+        ids.push(Number(cur.split(',')[0]))
+        const wid = heWallId.get(cur)
+        if (wid && !faceWallIds.includes(wid)) faceWallIds.push(wid)
+        cur = nextHE.get(cur) ?? ''
+        guard++
+      } while (cur !== sk && cur !== '' && guard < 60)
+      if (cur === sk && ids.length >= 3) {
+        const polygon = ids.map(i => nodes[i])
+        if (polyArea(polygon) > 0.05) {
+          result.push({ polygon, wallIds: faceWallIds })
+        }
+      }
+    }
+  }
+  return result
+}
+
+
 /* ─── Component ──────────────────────────────────── */
 export function DxfJsonViewPage() {
   const stageRef = useRef<Konva.Stage>(null)
@@ -798,6 +1124,8 @@ export function DxfJsonViewPage() {
   const [history, setHistory]     = useState<EditorSnapshot[]>([])
   const [zoom, setZoom]           = useState(1)
   const [pos, setPos]             = useState({ x: 0, y: 0 })
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [selectionBox, setSelectionBox] = useState<{ start: Pt; current: Pt } | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selectedRoomIndex, setSelectedRoomIndex] = useState<number | null>(null)
   const [selectedTextHandle, setSelectedTextHandle] = useState<string | null>(null)
@@ -811,6 +1139,7 @@ export function DxfJsonViewPage() {
   const [polylineClosed, setPolylineClosed] = useState(false)
   const textHeightDragRef = useRef<{ handle: string; startH: number; startPointerWy: number } | null>(null)
   const [snapEnabled, setSnapEnabled] = useState(true)
+  const [orthoEnabled, setOrthoEnabled] = useState(false)
   const [showDetail, setShowDetail]   = useState(true)
   const [showLabels, setShowLabels]   = useState(true)
   const [selectedArcHandle, setSelectedArcHandle] = useState<string | null>(null)
@@ -824,6 +1153,10 @@ export function DxfJsonViewPage() {
   /** Live pointer position for arc/circle previews */
   const [shapePointer, setShapePointer] = useState<Pt | null>(null)
 
+  /** groupId being hovered — all walls with this groupId get a preview highlight. */
+  const [hoveredGroupId, setHoveredGroupId] = useState<string | null>(null)
+  const [hoveredRoomIdx, setHoveredRoomIdx] = useState<number | null>(null)
+
   /* editor chrome (Synaps-style) */
   const [activeTool, setActiveTool] = useState<
     'select' | 'hand' | 'frame' | 'drawLine' | 'drawPolyline' | 'text' | 'drawArc' | 'drawCircle'
@@ -834,6 +1167,9 @@ export function DxfJsonViewPage() {
 
   /* drag feedback */
   const [snapTarget, setSnapTarget]   = useState<Pt | null>(null)
+  /** When snapping to the interior of a wall (not its endpoint), records the target wall id
+   *  so we can split it on drag-end. null when snapping to an endpoint. */
+  const snapLineWallRef = useRef<{ wallId: string; t: number } | null>(null)
   const [isDraggingEp, setIsDraggingEp] = useState(false)
   /* Space-bar temporary pan mode */
   const [spaceHeld, setSpaceHeld] = useState(false)
@@ -846,15 +1182,65 @@ export function DxfJsonViewPage() {
    */
   interface ActiveDrag {
     wallId:    string
-    origStart: Pt
-    origEnd:   Pt
-    initCX:    number   // canvas-space handle position when drag started
-    initCY:    number
+    toMoveWallIds: string[]
+    toMoveTextIds: string[]
+    toMoveArcHandles: string[]
+    initWX:    number   // world-space mouse position when drag started
+    initWY:    number
+  }
+  /** Midpoint drag on any edge of an LWPOLYLINE: translate all chords + doc vertices together. */
+  interface ActivePolylineDrag {
+    polyHandle: string
+    leaderSegId: string
+    segments: { id: string; origStart: Pt; origEnd: Pt }[]
+    initCX: number
+    initCY: number
   }
   const activeDragRef = useRef<ActiveDrag | null>(null)
   const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null)
   const [dragDelta, setDragDelta]   = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
   const dragDeltaRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
+  /** Snapshot of selectedIds taken at mousedown — used by onClick to distinguish
+   *  "already selected before this click" (→ toggle off) from "just added by mousedown" (→ keep). */
+  const selBeforeMouseDown = useRef<Set<string>>(new Set())
+  /** Tracks which wall + which endpoint ('start'|'end') is actively being dragged,
+   *  so onEpDragEnd can auto-join when the endpoint snaps onto another wall. */
+  const draggingEpInfo = useRef<{ wallId: string; ep: 'start' | 'end' } | null>(null)
+
+  /* ── rotation drag ── */
+  interface RotationDrag {
+    centerWX: number       // world-space rotation centre
+    centerWY: number
+    startMouseAngle: number // atan2 of initial mouse position relative to centre (canvas px)
+    wallIds: string[]
+    textHandles: string[]
+    arcHandles: string[]
+  }
+  const rotationDragRef = useRef<RotationDrag | null>(null)
+  const [rotationDrag, setRotationDrag] = useState<RotationDrag | null>(null)
+  const rotationAngleDeltaRef = useRef(0)
+  const [rotationAngleDelta, setRotationAngleDelta] = useState(0)
+
+  /* ── resize drag ── */
+  interface ResizeDrag {
+    handle: 'nw'|'n'|'ne'|'e'|'se'|'s'|'sw'|'w'
+    initBBox: { minWX: number; minWY: number; maxWX: number; maxWY: number }
+    initMouseWX: number
+    initMouseWY: number
+    wallIds: string[]
+    textHandles: string[]
+    arcHandles: string[]
+  }
+  const resizeDragRef = useRef<ResizeDrag | null>(null)
+  const [resizeDrag, setResizeDrag] = useState<ResizeDrag | null>(null)
+  const resizePreviewRef = useRef<{ minWX: number; minWY: number; maxWX: number; maxWY: number } | null>(null)
+  const [resizePreview, setResizePreview] = useState<{ minWX: number; minWY: number; maxWX: number; maxWY: number } | null>(null)
+
+  /** Translate all selected walls by the current delta. */
+  const activePolyDragRef = useRef<ActivePolylineDrag | null>(null)
+  const [activePolyDrag, setActivePolyDrag] = useState<ActivePolylineDrag | null>(null)
+  const [polyDragDelta, setPolyDragDelta] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
+  const polyDragDeltaRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
 
   /** Rigid move of every wall segment on a detected room boundary. */
   interface RoomDrag {
@@ -870,17 +1256,118 @@ export function DxfJsonViewPage() {
 
   /** Translate only the wall being midpoint-dragged (no connected-wall stretching). */
   const applyDrag = useCallback((ws: WallSeg[], drag: ActiveDrag, delta: { dx: number; dy: number }): WallSeg[] => {
-    const { wallId, origStart, origEnd } = drag
+    const { toMoveWallIds } = drag
     const { dx, dy } = delta
-    const newStart = { x: origStart.x + dx, y: origStart.y + dy }
-    const newEnd   = { x: origEnd.x   + dx, y: origEnd.y   + dy }
-    return ws.map(w => (w.id === wallId ? { ...w, start: newStart, end: newEnd } : w))
+    const toMove = new Set(toMoveWallIds)
+
+    return ws.map(w => {
+      if (toMove.has(w.id)) {
+        return { 
+          ...w, 
+          start: { x: w.start.x + dx, y: w.start.y + dy }, 
+          end:   { x: w.end.x   + dx, y: w.end.y   + dy } 
+        }
+      }
+      return w
+    })
   }, [])
 
+  /** Real-time reactive labels — recalculated live during any drag or selection transformation. */
+  const effectiveTexts = useMemo(() => {
+    let texts = planDoc.texts
+    if (activeDrag) {
+      const { toMoveTextIds } = activeDrag
+      const { dx, dy } = dragDelta
+      const tSet = new Set(toMoveTextIds)
+      texts = texts.map(tx =>
+        tSet.has(tx.handle) ? { ...tx, position: { x: tx.position.x + dx, y: tx.position.y + dy, z: 0 } } : tx
+      )
+    }
+    if (rotationDrag && rotationAngleDelta !== 0) {
+      const { centerWX, centerWY, textHandles } = rotationDrag
+      const tSet = new Set(textHandles)
+      texts = texts.map(tx => {
+        if (!tSet.has(tx.handle)) return tx
+        const [nx, ny] = rotatePoint(tx.position.x, tx.position.y, centerWX, centerWY, rotationAngleDelta)
+        return { ...tx, position: { x: nx, y: ny, z: 0 } }
+      })
+    }
+    if (resizeDrag && resizePreview) {
+      const { textHandles, initBBox } = resizeDrag
+      const origW = initBBox.maxWX - initBBox.minWX || 1e-9
+      const origH = initBBox.maxWY - initBBox.minWY || 1e-9
+      const newW  = resizePreview.maxWX - resizePreview.minWX
+      const newH  = resizePreview.maxWY - resizePreview.minWY
+      // Scale font size proportionally with the geometric mean of the resize ratio
+      const scaleF = Math.sqrt((newW / origW) * (newH / origH))
+      const tSet = new Set(textHandles)
+      texts = texts.map(tx => {
+        if (!tSet.has(tx.handle)) return tx
+        const nx = resizePreview.minWX + (tx.position.x - initBBox.minWX) / origW * newW
+        const ny = resizePreview.minWY + (tx.position.y - initBBox.minWY) / origH * newH
+        return { ...tx, position: { x: nx, y: ny, z: 0 }, height: Math.max(0.05, tx.height * scaleF) }
+      })
+    }
+    return texts
+  }, [planDoc.texts, activeDrag, dragDelta, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
+
+  /** Live arc positions during drag / rotation / resize — mirrors effectiveTexts. */
+  const effectiveArcs = useMemo(() => {
+    let arcs = planDoc.arcs
+    if (activeDrag) {
+      const aSet = new Set(activeDrag.toMoveArcHandles)
+      const { dx, dy } = dragDelta
+      arcs = arcs.map(a => aSet.has(a.handle)
+        ? { ...a, center: { ...a.center, x: a.center.x + dx, y: a.center.y + dy } }
+        : a)
+    }
+    if (rotationDrag && rotationAngleDelta !== 0) {
+      const aSet = new Set(rotationDrag.arcHandles)
+      arcs = arcs.map(a => {
+        if (!aSet.has(a.handle)) return a
+        const [nx, ny] = rotatePoint(a.center.x, a.center.y, rotationDrag.centerWX, rotationDrag.centerWY, rotationAngleDelta)
+        return { ...a, center: { ...a.center, x: nx, y: ny } }
+      })
+    }
+    if (resizeDrag && resizePreview) {
+      const { arcHandles, initBBox } = resizeDrag
+      const origW = initBBox.maxWX - initBBox.minWX || 1e-9
+      const origH = initBBox.maxWY - initBBox.minWY || 1e-9
+      const newW  = resizePreview.maxWX - resizePreview.minWX
+      const newH  = resizePreview.maxWY - resizePreview.minWY
+      const aSet = new Set(arcHandles)
+      arcs = arcs.map(a => {
+        if (!aSet.has(a.handle)) return a
+        const nx = resizePreview.minWX + (a.center.x - initBBox.minWX) / origW * newW
+        const ny = resizePreview.minWY + (a.center.y - initBBox.minWY) / origH * newH
+        return { ...a, center: { ...a.center, x: nx, y: ny } }
+      })
+    }
+    return arcs
+  }, [planDoc.arcs, activeDrag, dragDelta, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
+
+  /* derived rooms with wall IDs — recalculates live during drag */
+  const roomsWithWalls = useMemo(() => {
+    let ws = walls
+    if (activeDrag) {
+      ws = applyDrag(ws, activeDrag, dragDelta)
+    }
+    if (rotationDrag && rotationAngleDelta !== 0) {
+      ws = applyRotation(ws, new Set(rotationDrag.wallIds), rotationDrag.centerWX, rotationDrag.centerWY, rotationAngleDelta)
+    }
+    if (resizeDrag && resizePreview) {
+      ws = applyResizeToWalls(ws, new Set(resizeDrag.wallIds), resizeDrag.initBBox, resizePreview)
+    }
+    return detectRoomsWithWalls(ws)
+  }, [walls, activeDrag, dragDelta, applyDrag, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
   /** Walls with midpoint-drag preview only (baseline for room detection + room move). */
   const wallsBase = useMemo(
-    () => (activeDrag ? applyDrag(walls, activeDrag, dragDelta) : walls),
-    [walls, activeDrag, dragDelta, applyDrag],
+    () => {
+      if (activePolyDrag) return applyPolylineDrag(walls, activePolyDrag, polyDragDelta)
+      if (activeDrag) return applyDrag(walls, activeDrag, dragDelta)
+      return walls
+    },
+    [walls, activeDrag, dragDelta, activePolyDrag, polyDragDelta, applyDrag, applyPolylineDrag],
   )
 
   /* derived rooms — includes live room-translation preview */
@@ -909,18 +1396,38 @@ export function DxfJsonViewPage() {
     })
   }, [])
 
-  /* ── snap helper ── */
-  const getSnap = useCallback((x: number, y: number, excludeId: string): Pt => {
-    if (!snapEnabled) return { x, y }
-    let best: Pt | null = null, bestD = SNAP_TH
+  /* ── snap helper — endpoint-priority then snap-to-line interior ── */
+  const getSnap = useCallback((x: number, y: number, excludeIds: string[]): Pt => {
+    if (!snapEnabled) { snapLineWallRef.current = null; return { x, y } }
+
+    // Phase 1: snap to any endpoint (highest priority, tight threshold)
+    let bestEp: Pt | null = null, bestEpD = SNAP_TH
     for (const w of walls) {
-      if (w.id === excludeId) continue
+      if (excludeIds.includes(w.id)) continue
       for (const ep of [w.start, w.end]) {
         const d = Math.hypot(ep.x - x, ep.y - y)
-        if (d < bestD) { bestD = d; best = ep }
+        if (d < bestEpD) { bestEpD = d; bestEp = ep }
       }
     }
-    return best ?? { x, y }
+    if (bestEp) { snapLineWallRef.current = null; return bestEp }
+
+    // Phase 2: snap to nearest point along any wall segment interior
+    let bestSeg: { wallId: string; t: number; pt: Pt } | null = null, bestSegD = SNAP_LINE_TH
+    for (const w of walls) {
+      if (excludeIds.includes(w.id)) continue
+      const { pt, t, dist } = closestPointOnSegment(x, y, w.start.x, w.start.y, w.end.x, w.end.y)
+      // Exclude t≈0 and t≈1 (those are the endpoints, already checked above)
+      if (t > 0.01 && t < 0.99 && dist < bestSegD) {
+        bestSegD = dist; bestSeg = { wallId: w.id, t, pt }
+      }
+    }
+    if (bestSeg) {
+      snapLineWallRef.current = { wallId: bestSeg.wallId, t: bestSeg.t }
+      return bestSeg.pt
+    }
+
+    snapLineWallRef.current = null
+    return { x, y }
   }, [walls, snapEnabled])
 
   /* ── endpoint drag ── */
@@ -931,7 +1438,7 @@ export function DxfJsonViewPage() {
   ) => {
     const node = e.target
     const [rawX, rawY] = toW(node.x(), node.y(), t)
-    const snapped = getSnap(rawX, rawY, wallId)
+    const snapped = getSnap(rawX, rawY, [wallId])
     /* force node to snapped canvas position so Konva tracks the right place */
     const [scx, scy] = toC(snapped.x, snapped.y, t)
     node.x(scx); node.y(scy)
@@ -944,48 +1451,375 @@ export function DxfJsonViewPage() {
   const onEpDragEnd = useCallback(() => {
     setSnapTarget(null)
     setIsDraggingEp(false)
+
+    const info = draggingEpInfo.current
+    const lineSnap = snapLineWallRef.current
+    draggingEpInfo.current = null
+    snapLineWallRef.current = null
+    if (!info) return
+
+    setWalls(prev => {
+      const moved = prev.find(w => w.id === info.wallId)
+      if (!moved) return prev
+      const pt = moved[info.ep]
+
+      // ── Case A: snapped to the interior of another wall → split that wall ──
+      if (lineSnap) {
+        const target = prev.find(w => w.id === lineSnap.wallId)
+        if (target) {
+          const splitPt = pt  // moved endpoint IS the snap point on the target wall
+          // Create two new wall segments replacing the target
+          const segA: WallSeg = {
+            ...target,
+            id: `${target.id}-a`,
+            end: splitPt,
+          }
+          const segB: WallSeg = {
+            ...target,
+            id: `${target.id}-b`,
+            start: splitPt,
+          }
+          // Unify group: moved wall + both split halves
+          const existingGroups = new Set<string>(
+            [moved, target].map(w => w.groupId).filter(Boolean) as string[]
+          )
+          const unified = existingGroups.size > 0 ? [...existingGroups][0] : `g-${Date.now()}`
+          const toJoin = new Set([
+            moved.id,
+            segA.id, segB.id,
+            ...prev.filter(w => w.groupId && existingGroups.has(w.groupId)).map(w => w.id),
+          ])
+          return [
+            ...prev
+              .filter(w => w.id !== target.id)
+              .map(w => toJoin.has(w.id) ? { ...w, groupId: unified } : w),
+            { ...segA, groupId: unified },
+            { ...segB, groupId: unified },
+          ]
+        }
+      }
+
+      // ── Case B: snapped to another wall's endpoint → auto-group ──
+      const connected = prev.filter(w =>
+        w.id !== moved.id && (
+          (Math.abs(w.start.x - pt.x) < SNAP_TH && Math.abs(w.start.y - pt.y) < SNAP_TH) ||
+          (Math.abs(w.end.x   - pt.x) < SNAP_TH && Math.abs(w.end.y   - pt.y) < SNAP_TH)
+        )
+      )
+      if (connected.length === 0) return prev
+
+      const existingGroupIds = new Set<string>(
+        [moved, ...connected].map(w => w.groupId).filter(Boolean) as string[]
+      )
+      const unified = existingGroupIds.size > 0 ? [...existingGroupIds][0] : `g-${Date.now()}`
+      const toJoin = new Set([
+        moved.id,
+        ...connected.map(w => w.id),
+        ...prev.filter(w => w.groupId && existingGroupIds.has(w.groupId)).map(w => w.id),
+      ])
+      return prev.map(w => toJoin.has(w.id) ? { ...w, groupId: unified } : w)
+    })
   }, [])
+
+  /* ── commit pending rotation to wall state ── */
+  const commitRotation = useCallback(() => {
+    const rd = rotationDragRef.current
+    const angle = rotationAngleDeltaRef.current
+    rotationDragRef.current = null
+    rotationAngleDeltaRef.current = 0
+    setRotationDrag(null)
+    setRotationAngleDelta(0)
+    if (!rd || angle === 0) return
+    const ids = new Set(rd.wallIds)
+    const arcKey = (h: string) => h.replace(/^arc-/, '')
+    setWalls(prev => applyRotation(prev, ids, rd.centerWX, rd.centerWY, angle))
+    setPlanDoc(prev => ({
+      ...prev,
+      texts: prev.texts.map(tx => {
+        if (!rd.textHandles.includes(tx.handle)) return tx
+        const [nx, ny] = rotatePoint(tx.position.x, tx.position.y, rd.centerWX, rd.centerWY, angle)
+        return { ...tx, position: { x: nx, y: ny, z: 0 } }
+      }),
+      arcs: prev.arcs.map(a => {
+        if (!rd.arcHandles.includes(a.handle)) return a
+        const [nx, ny] = rotatePoint(a.center.x, a.center.y, rd.centerWX, rd.centerWY, angle)
+        return { ...a, center: { ...a.center, x: nx, y: ny } }
+      }),
+      lines: prev.lines.map(l => {
+        const belongsToRotatedArc = rd.arcHandles.some(h => l.handle.startsWith(`dfl-${arcKey(h)}`))
+        if (!belongsToRotatedArc) return l
+        const [sx, sy] = rotatePoint(l.start.x, l.start.y, rd.centerWX, rd.centerWY, angle)
+        const [ex, ey] = rotatePoint(l.end.x,   l.end.y,   rd.centerWX, rd.centerWY, angle)
+        return { ...l, start: { ...l.start, x: sx, y: sy }, end: { ...l.end, x: ex, y: ey } }
+      }),
+    }))
+  }, [])
+
+  /* ── commit pending resize to wall state ── */
+  const commitResize = useCallback(() => {
+    const rd = resizeDragRef.current
+    const preview = resizePreviewRef.current
+    resizeDragRef.current = null
+    resizePreviewRef.current = null
+    setResizeDrag(null)
+    setResizePreview(null)
+    if (!rd || !preview) return
+    const ids = new Set(rd.wallIds)
+    setWalls(prev => applyResizeToWalls(prev, ids, rd.initBBox, preview))
+    const origW = rd.initBBox.maxWX - rd.initBBox.minWX || 1e-9
+    const origH = rd.initBBox.maxWY - rd.initBBox.minWY || 1e-9
+    const newW  = preview.maxWX - preview.minWX
+    const newH  = preview.maxWY - preview.minWY
+    const scaleF = Math.sqrt((newW / origW) * (newH / origH))
+    const scalePos = (x: number, y: number) => ({
+      x: preview.minWX + (x - rd.initBBox.minWX) / origW * newW,
+      y: preview.minWY + (y - rd.initBBox.minWY) / origH * newH,
+    })
+    const arcKey = (h: string) => h.replace(/^arc-/, '')
+    setPlanDoc(prev => ({
+      ...prev,
+      texts: prev.texts.map(tx => {
+        if (!rd.textHandles.includes(tx.handle)) return tx
+        const { x: nx, y: ny } = scalePos(tx.position.x, tx.position.y)
+        return { ...tx, position: { x: nx, y: ny, z: 0 }, height: Math.max(0.05, tx.height * scaleF) }
+      }),
+      arcs: prev.arcs.map(a => {
+        if (!rd.arcHandles.includes(a.handle)) return a
+        const { x: nx, y: ny } = scalePos(a.center.x, a.center.y)
+        return { ...a, center: { ...a.center, x: nx, y: ny }, radius: Math.max(0.01, a.radius * scaleF) }
+      }),
+      lines: prev.lines.map(l => {
+        const belongsToResizedArc = rd.arcHandles.some(h => l.handle.startsWith(`dfl-${arcKey(h)}`))
+        if (!belongsToResizedArc) return l
+        const s = scalePos(l.start.x, l.start.y)
+        const e = scalePos(l.end.x, l.end.y)
+        return { ...l, start: { ...l.start, x: s.x, y: s.y }, end: { ...l.end, x: e.x, y: e.y } }
+      }),
+    }))
+  }, [])
+
+  /* ── grouping ── */
+  /**
+   * Join all currently selected walls into a single polyline group.
+   * After joining, clicking any member selects the entire group as one element.
+   */
+  const joinSelected = useCallback(() => {
+    const wallIds = walls.filter(w => selectedIds.has(w.id)).map(w => w.id)
+    if (wallIds.length < 2) return
+    snapshot()
+    const newGroupId = `g-${Date.now()}`
+    setWalls(prev => prev.map(w => wallIds.includes(w.id) ? { ...w, groupId: newGroupId } : w))
+  }, [walls, selectedIds, snapshot])
+
+  /**
+   * Remove groupId from all selected walls (and every sibling in the same group).
+   * Each segment becomes an independent wall again.
+   */
+  const ungroupSelected = useCallback(() => {
+    // Collect the groupIds touched by the current selection
+    const touchedGroups = new Set(
+      walls.filter(w => selectedIds.has(w.id) && w.groupId).map(w => w.groupId!)
+    )
+    if (touchedGroups.size === 0) return
+    snapshot()
+    setWalls(prev => prev.map(w =>
+      (w.groupId && touchedGroups.has(w.groupId)) ? { ...w, groupId: undefined } : w
+    ))
+  }, [walls, selectedIds, snapshot])
+
+  /* ── rubber-band selection ── */
+  const onStageMouseDown = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+    const isStage = e.target === stageRef.current || e.target.name() === 'background-rect'
+    if (!isStage || activeTool !== 'select' || spaceHeld) return
+
+    // getRelativePointerPosition accounts for stage zoom + pan; getPointerPosition does not.
+    const pos = stageRef.current?.getRelativePointerPosition()
+    if (!pos) return
+
+    const [wx, wy] = toW(pos.x, pos.y, t)
+    setSelectionBox({ start: { x: wx, y: wy }, current: { x: wx, y: wy } })
+    if (!(e.evt.ctrlKey || e.evt.metaKey)) setSelectedIds(new Set())
+  }, [activeTool, spaceHeld, t])
+
+  const onStageMouseMove = useCallback((_e: Konva.KonvaEventObject<MouseEvent>) => {
+    const pos = stageRef.current?.getRelativePointerPosition()
+    if (!pos) return
+    const [wx, wy] = toW(pos.x, pos.y, t)
+
+    if (selectionBox) { // Box Selection
+      setSelectionBox(prev => prev ? { ...prev, current: { x: wx, y: wy } } : null)
+    } else if (activeDrag) { // Entity Drag
+      let dx = wx - activeDrag.initWX
+      let dy = wy - activeDrag.initWY
+
+      if (orthoEnabled) {
+        if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0
+      }
+
+      dragDeltaRef.current = { dx, dy }
+      setDragDelta({ dx, dy })
+    } else if (rotationDragRef.current) { // Rotation Drag
+      const rd = rotationDragRef.current
+      const [ccx, ccy] = toC(rd.centerWX, rd.centerWY, t)
+      // pos is already in logical canvas coords (getRelativePointerPosition), same space as toC output
+      const currentAngle = Math.atan2(pos.y - ccy, pos.x - ccx)
+      const delta = currentAngle - rd.startMouseAngle
+      rotationAngleDeltaRef.current = delta
+      setRotationAngleDelta(delta)
+    } else if (resizeDragRef.current) { // Resize Drag
+      const rd = resizeDragRef.current
+      const dWX = wx - rd.initMouseWX
+      const dWY = wy - rd.initMouseWY
+      const h = rd.handle
+      const nb = { ...rd.initBBox }
+      if (h.includes('e')) nb.maxWX = Math.max(rd.initBBox.minWX + 0.1, rd.initBBox.maxWX + dWX)
+      if (h.includes('w')) nb.minWX = Math.min(rd.initBBox.maxWX - 0.1, rd.initBBox.minWX + dWX)
+      if (h.includes('n')) nb.maxWY = Math.max(rd.initBBox.minWY + 0.1, rd.initBBox.maxWY + dWY)
+      if (h.includes('s')) nb.minWY = Math.min(rd.initBBox.maxWY - 0.1, rd.initBBox.minWY + dWY)
+      resizePreviewRef.current = nb
+      setResizePreview(nb)
+    } else if (activeTool === 'drawLine' && drawLineAnchorRef.current) {
+      setDrawLinePointer(getSnap(wx, wy, ''))
+    } else if (activeTool === 'drawPolyline') {
+      if (polylineDraftRef.current.length > 0) setPolylineHover(getSnap(wx, wy, ''))
+      else setPolylineHover(null)
+    } else if (activeTool === 'drawArc' || activeTool === 'drawCircle') {
+      setShapePointer({ x: wx, y: wy })
+    }
+  }, [selectionBox, activeDrag, t, orthoEnabled, activeTool, getSnap])
+
+  const onStageMouseUp = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (rotationDragRef.current) { commitRotation(); return }
+    if (resizeDragRef.current) { commitResize(); return }
+    if (!selectionBox) return
+    const { start, current } = selectionBox
+    setSelectionBox(null)
+
+    const x1 = Math.min(start.x, current.x), x2 = Math.max(start.x, current.x)
+    const y1 = Math.min(start.y, current.y), y2 = Math.max(start.y, current.y)
+    
+    // AutoCAD convention: L-to-R (start.x < current.x) is Window (Inside)
+    // R-to-L (start.x > current.x) is Crossing (Touches)
+    const isWindow = start.x < current.x
+
+    // Selection box logic: check both walls and room labels
+    const newlySelected = new Set<string>()
+    for (const w of walls) {
+      if (isWindow) {
+        const sIn = w.start.x >= x1 && w.start.x <= x2 && w.start.y >= y1 && w.start.y <= y2
+        const eIn = w.end.x   >= x1 && w.end.x   <= x2 && w.end.y   >= y1 && w.end.y   <= y2
+        if (sIn && eIn) newlySelected.add(w.id)
+      } else {
+        // Crossing: use precise segment-rectangle intersection
+        if (lineIntersectsRect(w.start, w.end, x1, y1, x2, y2)) newlySelected.add(w.id)
+      }
+    }
+    for (const tx of planDoc.texts) {
+      const isInside = tx.position.x >= x1 && tx.position.x <= x2 && tx.position.y >= y1 && tx.position.y <= y2
+      if (isInside) newlySelected.add(tx.handle)
+    }
+    for (const a of planDoc.arcs) {
+      const isInside = a.center.x >= x1 && a.center.x <= x2 && a.center.y >= y1 && a.center.y <= y2
+      if (isInside) newlySelected.add(a.handle)
+    }
+
+    setSelectedIds(prev => {
+      if (e.evt.ctrlKey || e.evt.metaKey) {
+        const next = new Set(prev)
+        newlySelected.forEach(id => next.add(id))
+        return next
+      }
+      return newlySelected
+    })
+  }, [selectionBox, walls, commitRotation, commitResize])
 
   /* ── mid-handle drag (move whole wall + stretch connected walls live) ── */
   const onMidDragStart = useCallback((
-    e: Konva.KonvaEventObject<DragEvent>,
-    wall: WallSeg,
+    e: Konva.KonvaEventObject<MouseEvent>,
+    targetId: string,
+    currentSel: Set<string>
   ) => {
+    if (wall.fromArc) return
     if (roomDragRef.current) return
     setSelectedRoomIndex(null)
     snapshot()
+    const pos = stageRef.current?.getRelativePointerPosition()
+    if (!pos) return
+    const [wx, wy] = toW(pos.x, pos.y, t)
+
+    const toMoveW = walls.filter(w => currentSel.has(w.id)).map(w => w.id)
+    const toMoveT = planDoc.texts.filter(t => currentSel.has(t.handle)).map(t => t.handle)
+    const toMoveA = planDoc.arcs.filter(a => currentSel.has(a.handle)).map(a => a.handle)
+
     const drag: ActiveDrag = {
-      wallId:    wall.id,
-      origStart: { ...wall.start },
-      origEnd:   { ...wall.end },
-      initCX:    e.target.x(),
-      initCY:    e.target.y(),
+      wallId:           targetId,
+      toMoveWallIds:    toMoveW,
+      toMoveTextIds:    toMoveT,
+      toMoveArcHandles: toMoveA,
+      initWX:           wx,
+      initWY:           wy,
     }
     activeDragRef.current = drag
     setActiveDrag(drag)
     dragDeltaRef.current = { dx: 0, dy: 0 }
     setDragDelta({ dx: 0, dy: 0 })
-  }, [snapshot])
-
-  const onMidDragMove = useCallback((e: Konva.KonvaEventObject<DragEvent>) => {
-    const drag = activeDragRef.current
-    if (!drag) return
-    const dx =  (e.target.x() - drag.initCX) / t.sc
-    const dy = -(e.target.y() - drag.initCY) / t.sc   // Y-axis is inverted in DXF
-    dragDeltaRef.current = { dx, dy }
-    setDragDelta({ dx, dy })
-  }, [t.sc])
+  }, [snapshot, walls, planDoc.texts, t])
 
   const onMidDragEnd = useCallback(() => {
+    const pDrag = activePolyDragRef.current
+    if (pDrag) {
+      const { dx, dy } = polyDragDeltaRef.current
+      if (Math.abs(dx) > 1e-9 || Math.abs(dy) > 1e-9) {
+        setWalls(prev => applyPolylineDrag(prev, pDrag, { dx, dy }))
+        setPlanDoc(prev => ({
+          ...prev,
+          polylines: prev.polylines.map(pl =>
+            pl.handle !== pDrag.polyHandle
+              ? pl
+              : {
+                  ...pl,
+                  vertices: pl.vertices.map(v => ({ ...v, x: v.x + dx, y: v.y + dy })),
+                },
+          ),
+        }))
+      }
+      activePolyDragRef.current = null
+      setActivePolyDrag(null)
+      polyDragDeltaRef.current = { dx: 0, dy: 0 }
+      setPolyDragDelta({ dx: 0, dy: 0 })
+      return
+    }
     const drag = activeDragRef.current
     if (!drag) return
     const delta = dragDeltaRef.current
+    
+    const aSet = new Set(drag.toMoveArcHandles)
+    const arcKey = (h: string) => h.replace(/^arc-/, '')
     setWalls(prev => applyDrag(prev, drag, delta))
+    setPlanDoc(prev => ({
+      ...prev,
+      texts: prev.texts.map(tx =>
+        new Set(drag.toMoveTextIds).has(tx.handle)
+          ? { ...tx, position: { x: tx.position.x + delta.dx, y: tx.position.y + delta.dy, z: 0 } }
+          : tx
+      ),
+      arcs: prev.arcs.map(a =>
+        aSet.has(a.handle)
+          ? { ...a, center: { ...a.center, x: a.center.x + delta.dx, y: a.center.y + delta.dy } }
+          : a
+      ),
+      lines: prev.lines.map(l => {
+        const belongsToMovedArc = drag.toMoveArcHandles.some(h => l.handle.startsWith(`dfl-${arcKey(h)}`))
+        if (!belongsToMovedArc) return l
+        return { ...l, start: { ...l.start, x: l.start.x + delta.dx, y: l.start.y + delta.dy }, end: { ...l.end, x: l.end.x + delta.dx, y: l.end.y + delta.dy } }
+      }),
+    }))
+
     activeDragRef.current = null
     setActiveDrag(null)
     dragDeltaRef.current = { dx: 0, dy: 0 }
     setDragDelta({ dx: 0, dy: 0 })
-  }, [applyDrag])
+  }, [applyDrag, applyPolylineDrag, setWalls, setPlanDoc, setActivePolyDrag, setPolyDragDelta, setActiveDrag, setDragDelta])
 
   /** Move an arc and all its associated door-frame lines by (dx, dy) in world metres. */
   const moveArcAndLines = useCallback((arcHandle: string, dx: number, dy: number) => {
@@ -1008,6 +1842,27 @@ export function DxfJsonViewPage() {
         }
       }),
     }))
+  }, [])
+
+  /** Move a standalone user arc / circle and its tessellated wall chords together. */
+  const moveStandaloneArc = useCallback((arcHandle: string, dx: number, dy: number) => {
+    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return
+    setPlanDoc(prev => ({
+      ...prev,
+      arcs: prev.arcs.map(a =>
+        a.handle !== arcHandle ? a : {
+          ...a,
+          center: { x: a.center.x + dx, y: a.center.y + dy, z: a.center.z },
+        },
+      ),
+    }))
+    setWalls(prev => prev.map(w =>
+      w.fromArc !== arcHandle ? w : {
+        ...w,
+        start: { x: w.start.x + dx, y: w.start.y + dy },
+        end: { x: w.end.x + dx, y: w.end.y + dy },
+      },
+    ))
   }, [])
 
   /** Move all window lines that belong to `winKey` by (dx, dy) in world metres. */
@@ -1094,6 +1949,68 @@ export function DxfJsonViewPage() {
     setPos({ x: pt.x - mpX * nz, y: pt.y - mpY * nz })
   }, [zoom, pos])
 
+  /* ── keyboard shortcuts ── */
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedIds.size > 0) {
+          snapshot()
+          setWalls(p => p.filter(w => !selectedIds.has(w.id)))
+          setSelectedIds(new Set())
+        }
+      }
+      if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+        e.preventDefault(); undo()
+      }
+      if (e.key === 'Escape') {
+        // Cancel any active rotation drag first, then clear selection
+        if (rotationDragRef.current) {
+          rotationDragRef.current = null
+          rotationAngleDeltaRef.current = 0
+          setRotationDrag(null)
+          setRotationAngleDelta(0)
+        } else if (resizeDragRef.current) {
+          resizeDragRef.current = null
+          resizePreviewRef.current = null
+          setResizeDrag(null)
+          setResizePreview(null)
+        } else {
+          setSelectedIds(new Set())
+        }
+      }
+      if (e.key === 'o' || e.key === 'O') setOrthoEnabled(v => !v)
+      if (e.key === 'j' || e.key === 'J') { e.preventDefault(); joinSelected() }
+      if (e.key === 'u' || e.key === 'U') { e.preventDefault(); ungroupSelected() }
+      /* Space = temporary pan */
+      if (e.code === 'Space' && !e.repeat) { e.preventDefault(); setSpaceHeld(true) }
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') setSpaceHeld(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [selectedIds, snapshot, undo, joinSelected, ungroupSelected])
+
+  /* ── global mouseup: commit any in-progress drag/rotate/resize even if pointer
+     leaves the canvas or the browser window (prevents "stuck" drag state) ── */
+  useEffect(() => {
+    const onGlobalMouseUp = () => {
+      if (activeDragRef.current)     { onMidDragEnd() }
+      if (rotationDragRef.current)   { commitRotation() }
+      if (resizeDragRef.current)     { commitResize() }
+      if (selectionBox)              { /* selectionBox commits via onStageMouseUp; safe to leave */ }
+      if (isDraggingEp)              { onEpDragEnd() }
+    }
+    window.addEventListener('mouseup', onGlobalMouseUp)
+    return () => window.removeEventListener('mouseup', onGlobalMouseUp)
+  }, [onMidDragEnd, commitRotation, commitResize, onEpDragEnd, selectionBox, isDraggingEp])
+
   /* ── derived values ── */
   const HR  = HP_SCR / zoom   // endpoint handle radius in canvas units
   const MH  = 7 / zoom        // mid-handle half-size
@@ -1117,15 +2034,97 @@ export function DxfJsonViewPage() {
     return `${(Math.abs(m2) * 1e6).toFixed(0)} mm²`
   }, [units])
 
-  /** Walls with room move + midpoint drag previews applied. */
+  /** Walls with the active midpoint drag and/or live rotation/resize preview applied. */
   const effectiveWalls = useMemo(() => {
     let ws = visWalls
-    if (roomDrag)
-      ws = translateWallsByIds(ws, roomDrag.wallIds, roomDragDelta.dx, roomDragDelta.dy)
-    if (activeDrag)
+    
+    // Apply drag transformation
+    if (activeDrag) {
       ws = applyDrag(ws, activeDrag, dragDelta)
+    }
+    
+    // Apply rotation transformation
+    if (rotationDrag && rotationAngleDelta !== 0) {
+      ws = applyRotation(ws, new Set(rotationDrag.wallIds), rotationDrag.centerWX, rotationDrag.centerWY, rotationAngleDelta)
+    }
+    
+    // Apply resize transformation
+    if (resizeDrag && resizePreview) {
+      ws = applyResizeToWalls(ws, new Set(resizeDrag.wallIds), resizeDrag.initBBox, resizePreview)
+    }
+    
     return ws
-  }, [visWalls, roomDrag, roomDragDelta, activeDrag, dragDelta, applyDrag])
+  }, [visWalls, activeDrag, dragDelta, applyDrag, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
+
+  /** Bounding box of selected walls in canvas (pixel) coordinates — used to position rotation handle. */
+  const effectiveSelBBox = useMemo(() => {
+    if (selectedIds.size === 0) return null
+    let minCX = Infinity, minCY = Infinity, maxCX = -Infinity, maxCY = -Infinity
+    let hasAny = false
+    for (const w of effectiveWalls.filter(w => selectedIds.has(w.id))) {
+      for (const p of [w.start, w.end]) {
+        const [cx, cy] = toC(p.x, p.y, t)
+        minCX = Math.min(minCX, cx); maxCX = Math.max(maxCX, cx)
+        minCY = Math.min(minCY, cy); maxCY = Math.max(maxCY, cy)
+        hasAny = true
+      }
+    }
+    for (const tx of effectiveTexts.filter(tx => selectedIds.has(tx.handle))) {
+      const [cx, cy] = toC(tx.position.x, tx.position.y, t)
+      minCX = Math.min(minCX, cx); maxCX = Math.max(maxCX, cx)
+      minCY = Math.min(minCY, cy); maxCY = Math.max(maxCY, cy)
+      hasAny = true
+    }
+    for (const a of effectiveArcs.filter(a => selectedIds.has(a.handle))) {
+      const [cx, cy] = toC(a.center.x, a.center.y, t)
+      const r = a.radius * t.sc
+      minCX = Math.min(minCX, cx - r); maxCX = Math.max(maxCX, cx + r)
+      minCY = Math.min(minCY, cy - r); maxCY = Math.max(maxCY, cy + r)
+      hasAny = true
+    }
+    if (!hasAny) return null
+    return { minCX, minCY, maxCX, maxCY }
+  }, [effectiveWalls, effectiveTexts, effectiveArcs, selectedIds, t])
+
+  /** World-space bounds of all selected elements (walls + texts + arcs). */
+  const worldSelBounds = useMemo(() => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    let hasAny = false
+    for (const w of walls.filter(w => selectedIds.has(w.id))) {
+      for (const p of [w.start, w.end]) {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x)
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y)
+        hasAny = true
+      }
+    }
+    for (const tx of planDoc.texts.filter(tx => selectedIds.has(tx.handle))) {
+      minX = Math.min(minX, tx.position.x); maxX = Math.max(maxX, tx.position.x)
+      minY = Math.min(minY, tx.position.y); maxY = Math.max(maxY, tx.position.y)
+      hasAny = true
+    }
+    for (const a of planDoc.arcs.filter(a => selectedIds.has(a.handle))) {
+      minX = Math.min(minX, a.center.x - a.radius); maxX = Math.max(maxX, a.center.x + a.radius)
+      minY = Math.min(minY, a.center.y - a.radius); maxY = Math.max(maxY, a.center.y + a.radius)
+      hasAny = true
+    }
+    if (!hasAny) return null
+    return { minX, minY, maxX, maxY }
+  }, [walls, planDoc.texts, planDoc.arcs, selectedIds])
+
+  /** World-space centre of selected walls — stored at rotation/resize-drag start as the pivot. */
+  const baseSelCenter = useMemo(() => {
+    if (!worldSelBounds) return null
+    return { 
+      wx: (worldSelBounds.minX + worldSelBounds.maxX) / 2, 
+      wy: (worldSelBounds.minY + worldSelBounds.maxY) / 2 
+    }
+  }, [worldSelBounds])
+
+  /** World-space bbox of all selected elements — used as initBBox for resize drags. */
+  const baseSelWBox = useMemo(() => {
+    if (!worldSelBounds) return null
+    return { minWX: worldSelBounds.minX, minWY: worldSelBounds.minY, maxWX: worldSelBounds.maxX, maxWY: worldSelBounds.maxY }
+  }, [worldSelBounds])
 
   /** Wall length in metres */
   const wallLength = (w: WallSeg) =>
@@ -1148,13 +2147,17 @@ export function DxfJsonViewPage() {
   }, [planDoc.source_file])
 
   const exportDxf = useCallback(() => {
-    const dxfStr = docToDxfString(planDoc)
+    // Sync current wall positions (from canvas edits) into planDoc before exporting.
+    // planDoc.lines/polylines go stale after endpoint-drag/rotate/resize since those
+    // operations only update `walls` state, not planDoc.
+    const syncedDoc = buildDocFromWalls(planDoc, walls)
+    const dxfStr = docToDxfString(syncedDoc)
     const blob = new Blob([dxfStr], { type: 'application/dxf' })
     const url = URL.createObjectURL(blob)
     const base = (planDoc.source_file ?? 'floor-plan').replace(/\.dxf$/i, '')
     triggerDownload(url, `${base}-exported.dxf`)
     URL.revokeObjectURL(url)
-  }, [planDoc])
+  }, [planDoc, walls])
 
   /**
    * Only the Hand tool (or Space-bar held) should pan the canvas.
@@ -1163,33 +2166,11 @@ export function DxfJsonViewPage() {
    */
   const stageDraggable = (activeTool === 'hand' || spaceHeld) && !isDraggingEp && !isDraggingRoom
 
-  const handleStageMouseMove = useCallback(() => {
-    const stage = stageRef.current
-    if (!stage) return
-    const p = stage.getPointerPosition()
-    if (!p) return
-    const [wx, wy] = toW(p.x, p.y, t)
-    if (activeTool === 'drawLine' && drawLineAnchorRef.current) {
-      const snapped = getSnap(wx, wy, '')
-      setDrawLinePointer(snapped)
-      return
-    }
-    if (activeTool === 'drawPolyline' && polylineDraftRef.current.length > 0) {
-      setPolylineHover(getSnap(wx, wy, ''))
-    }
-    else if (activeTool === 'drawPolyline') {
-      setPolylineHover(null)
-    }
-    if (activeTool === 'drawArc' || activeTool === 'drawCircle') {
-      setShapePointer({ x: wx, y: wy })
-    }
-  }, [activeTool, t, getSnap])
-
   const handleStageClick = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     if (e.target !== stageRef.current) return
     const stage = stageRef.current
     if (!stage) return
-    const p = stage.getPointerPosition()
+    const p = getStageCanvasPointer(stage)
     if (!p) return
     const [wx, wy] = toW(p.x, p.y, t)
 
@@ -1266,12 +2247,17 @@ export function DxfJsonViewPage() {
       let endAngle = angle
       if (endAngle <= arcDraftStartAngle!) endAngle += 360
       snapshot()
-      const { next } = appendUserArc(planDoc, arcDraftCenter, arcDraftRadius, arcDraftStartAngle!, endAngle)
+      const { next, arc } = appendUserArc(planDoc, arcDraftCenter, arcDraftRadius, arcDraftStartAngle!, endAngle)
       setPlanDoc(next)
+      setWalls(w => [...w, ...wallSegsFromArc(arc, false)])
       setArcDraftCenter(null)
       setArcDraftRadius(null)
       setArcDraftStartAngle(null)
       setShapePointer(null)
+      setSelectedArcHandle(arc.handle)
+      setSelectedId(null)
+      setSelectedRoomIndex(null)
+      setSelectedTextHandle(null)
       setActiveTool('select')
       return
     }
@@ -1284,10 +2270,15 @@ export function DxfJsonViewPage() {
       const radius = Math.hypot(wx - circleDraftCenter.x, wy - circleDraftCenter.y)
       if (radius < 0.01) return
       snapshot()
-      const { next } = appendUserArc(planDoc, circleDraftCenter, radius, 0, 360)
+      const { next, arc } = appendUserArc(planDoc, circleDraftCenter, radius, 0, 360)
       setPlanDoc(next)
+      setWalls(w => [...w, ...wallSegsFromArc(arc, false)])
       setCircleDraftCenter(null)
       setShapePointer(null)
+      setSelectedArcHandle(arc.handle)
+      setSelectedId(null)
+      setSelectedRoomIndex(null)
+      setSelectedTextHandle(null)
       setActiveTool('select')
       return
     }
@@ -1297,8 +2288,34 @@ export function DxfJsonViewPage() {
     setSelectedTextHandle(null)
     setSelectedArcHandle(null)
     setSelectedWinKey(null)
-  }, [activeTool, t, getSnap, planDoc, snapshot, setActiveTool,
-      arcDraftCenter, arcDraftRadius, arcDraftStartAngle, circleDraftCenter])
+  }, [
+    activeTool,
+    t,
+    getSnap,
+    planDoc,
+    snapshot,
+    setActiveTool,
+    arcDraftCenter,
+    arcDraftRadius,
+    arcDraftStartAngle,
+    circleDraftCenter,
+    setDrawLineAnchor,
+    setDrawLinePointer,
+    setPlanDoc,
+    setWalls,
+    setSelectedId,
+    setSelectedRoomIndex,
+    setSelectedTextHandle,
+    setPolylineDraft,
+    setShowLabels,
+    setArcDraftCenter,
+    setArcDraftRadius,
+    setArcDraftStartAngle,
+    setShapePointer,
+    setSelectedArcHandle,
+    setCircleDraftCenter,
+    setSelectedWinKey,
+  ])
 
   const finishPolyline = useCallback(() => {
     const pts = polylineDraftRef.current
@@ -1336,6 +2353,16 @@ export function DxfJsonViewPage() {
           setPlanDoc(p => removeTextFromDoc(p, selectedTextHandle))
           setSelectedTextHandle(null)
         }
+        else if (selectedArcHandle) {
+          const arc = planDoc.arcs.find(a => a.handle === selectedArcHandle)
+          if (arc && !isDoorStyleArc(planDoc, arc)) {
+            snapshot()
+            const h = selectedArcHandle
+            setPlanDoc(p => removeArcFromDocByHandle(p, h))
+            setWalls(w => w.filter(seg => seg.fromArc !== h))
+            setSelectedArcHandle(null)
+          }
+        }
         else if (selectedId) {
           snapshot()
           const ph = polylineHandleFromWallId(selectedId)
@@ -1344,8 +2371,18 @@ export function DxfJsonViewPage() {
             setWalls(p => p.filter(w => !w.id.startsWith(`pl-${ph}-`)))
           }
           else {
-            setPlanDoc(p => removeLineFromDocByWallId(p, selectedId))
-            setWalls(p => p.filter(w => w.id !== selectedId))
+            const ah = arcHandleFromArcSegWallId(selectedId)
+            if (ah) {
+              const a = planDoc.arcs.find(x => x.handle === ah)
+              if (a && !isDoorStyleArc(planDoc, a)) {
+                setPlanDoc(p => removeArcFromDocByHandle(p, ah))
+                setWalls(w => w.filter(seg => seg.fromArc !== ah))
+              }
+            }
+            else {
+              setPlanDoc(p => removeLineFromDocByWallId(p, selectedId))
+              setWalls(p => p.filter(w => w.id !== selectedId))
+            }
           }
           setSelectedId(null)
         }
@@ -1374,6 +2411,14 @@ export function DxfJsonViewPage() {
         setArcDraftStartAngle(null)
         setCircleDraftCenter(null)
         setShapePointer(null)
+        activeDragRef.current = null
+        setActiveDrag(null)
+        dragDeltaRef.current = { dx: 0, dy: 0 }
+        setDragDelta({ dx: 0, dy: 0 })
+        activePolyDragRef.current = null
+        setActivePolyDrag(null)
+        polyDragDeltaRef.current = { dx: 0, dy: 0 }
+        setPolyDragDelta({ dx: 0, dy: 0 })
       }
       if (e.code === 'Space' && !e.repeat) { e.preventDefault(); setSpaceHeld(true) }
     }
@@ -1386,12 +2431,39 @@ export function DxfJsonViewPage() {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
     }
-  }, [selectedId, selectedTextHandle, snapshot, undo, activeTool])
+  }, [selectedId, selectedArcHandle, selectedTextHandle, planDoc, snapshot, undo, activeTool])
 
   const doc = planDoc
   const selectedTextEntity = selectedTextHandle
     ? doc.texts.find(tx => tx.handle === selectedTextHandle)
     : undefined
+
+  const activateTool = (
+    id: 'select' | 'hand' | 'frame' | 'drawLine' | 'drawPolyline' | 'text' | 'drawArc' | 'drawCircle',
+  ) => {
+    if (id !== 'drawLine') {
+      drawLineAnchorRef.current = null
+      setDrawLineAnchor(null)
+      setDrawLinePointer(null)
+    }
+    if (id !== 'drawPolyline') {
+      polylineDraftRef.current = []
+      setPolylineDraft([])
+      setPolylineHover(null)
+    }
+    if (id !== 'drawArc') {
+      setArcDraftCenter(null)
+      setArcDraftRadius(null)
+      setArcDraftStartAngle(null)
+    }
+    if (id !== 'drawCircle') {
+      setCircleDraftCenter(null)
+    }
+    if (id !== 'drawArc' && id !== 'drawCircle') {
+      setShapePointer(null)
+    }
+    setActiveTool(id)
+  }
 
   return (
     <div className="dxf-editor">
@@ -1457,67 +2529,82 @@ export function DxfJsonViewPage() {
         {/* ── Center: toolbar + white canvas + prompt ── */}
         <main className="dxf-editor-main">
           <div className="dxf-main-tools" role="toolbar" aria-label="Editor tools">
-            {([
-              { id: 'select'      as const, label: 'Select' },
-              { id: 'hand'        as const, label: 'Pan' },
-              { id: 'frame'       as const, label: 'Frame' },
-              { id: 'drawLine'    as const, label: 'Line' },
-              { id: 'drawPolyline'as const, label: 'Polyline' },
-              { id: 'drawArc'     as const, label: 'Arc' },
-              { id: 'drawCircle'  as const, label: 'Circle' },
-              { id: 'text'        as const, label: 'Text' },
-            ]).map(({ id, label }) => (
-              <button
-                key={id}
-                type="button"
-                title={label}
-                className={`dxf-tool-icon dxf-tool-labeled${activeTool === id ? ' active' : ''}`}
-                onClick={() => {
-                  if (id !== 'drawLine') {
-                    drawLineAnchorRef.current = null
-                    setDrawLineAnchor(null)
-                    setDrawLinePointer(null)
-                  }
-                  if (id !== 'drawPolyline') {
-                    polylineDraftRef.current = []
-                    setPolylineDraft([])
-                    setPolylineHover(null)
-                  }
-                  if (id !== 'drawArc') {
-                    setArcDraftCenter(null)
-                    setArcDraftRadius(null)
-                    setArcDraftStartAngle(null)
-                  }
-                  if (id !== 'drawCircle') {
-                    setCircleDraftCenter(null)
-                  }
-                  if (id !== 'drawArc' && id !== 'drawCircle') {
-                    setShapePointer(null)
-                  }
-                  setActiveTool(id)
-                }}
-              >
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                  {id === 'select'       && <path d="M4 4l7 7-4 1-3-4z" />}
-                  {id === 'hand'         && (
-                    <>
-                      <path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0" />
-                      <path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2" />
-                      <path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8" />
-                      <path d="M18 11a2 2 0 1 1 4 0v5a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 19" />
-                    </>
-                  )}
-                  {id === 'frame'        && <rect x="5" y="5" width="14" height="14" rx="1" />}
-                  {id === 'drawLine'     && <path d="M3 21l4.5-4.5M12 3l6 6-9 9H3v-6l9-9z" />}
-                  {id === 'drawPolyline' && <path d="M4 16l4-6 4 5 4-8 4 6" />}
-                  {id === 'drawArc'      && <path d="M3 19 A10 10 0 0 1 21 19" />}
-                  {id === 'drawCircle'   && <circle cx="12" cy="12" r="9" />}
-                  {id === 'text'         && <><path d="M4 6h16M10 6v14M14 6v14" /></>}
-                </svg>
-                {(['drawLine','drawPolyline','drawArc','drawCircle'] as string[]).includes(id) &&
-                  <span className="dxf-tool-caption">{label}</span>}
-              </button>
-            ))}
+            <div className="dxf-tool-cluster">
+              {([
+                { id: 'select' as const, label: 'Select' },
+                { id: 'hand'   as const, label: 'Pan' },
+                { id: 'frame'  as const, label: 'Frame' },
+                { id: 'text'   as const, label: 'Text' },
+              ]).map(({ id, label }) => (
+                <button
+                  key={id}
+                  type="button"
+                  title={label}
+                  className={`dxf-tool-icon${activeTool === id ? ' active' : ''}`}
+                  onClick={() => activateTool(id)}
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                    {id === 'select' && <path d="M4 4l7 7-4 1-3-4z" />}
+                    {id === 'hand' && (
+                      <>
+                        <path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0" />
+                        <path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2" />
+                        <path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8" />
+                        <path d="M18 11a2 2 0 1 1 4 0v5a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 19" />
+                      </>
+                    )}
+                    {id === 'frame' && <rect x="5" y="5" width="14" height="14" rx="1" />}
+                    {id === 'text' && <><path d="M4 6h16M10 6v14M14 6v14" /></>}
+                  </svg>
+                </button>
+              ))}
+            </div>
+
+            <div className="dxf-tool-sep" aria-hidden />
+
+            <div className="dxf-tool-cluster dxf-draw-tool-cluster">
+              {([
+                { id: 'drawLine'     as const, label: 'Line' },
+                { id: 'drawPolyline' as const, label: 'Polyline' },
+                { id: 'drawCircle'   as const, label: 'Circle' },
+                { id: 'drawArc'      as const, label: 'Arc' },
+              ]).map(({ id, label }) => (
+                <button
+                  key={id}
+                  type="button"
+                  title={label}
+                  className={`dxf-tool-icon dxf-tool-labeled${activeTool === id ? ' active' : ''}`}
+                  onClick={() => activateTool(id)}
+                >
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                    {id === 'drawLine' && (
+                      <>
+                        <path d="M5 19L19 5" />
+                        <circle cx="5" cy="19" r="1.35" fill="currentColor" stroke="none" />
+                        <circle cx="19" cy="5" r="1.35" fill="currentColor" stroke="none" />
+                      </>
+                    )}
+                    {id === 'drawPolyline' && (
+                      <>
+                        <path d="M4 18L9 8L15 8Q20 8 20 13" />
+                        <circle cx="4" cy="18" r="1.2" fill="currentColor" stroke="none" />
+                        <circle cx="9" cy="8" r="1.2" fill="currentColor" stroke="none" />
+                        <circle cx="20" cy="13" r="1.2" fill="currentColor" stroke="none" />
+                      </>
+                    )}
+                    {id === 'drawCircle' && (
+                      <>
+                        <circle cx="12" cy="12" r="8" />
+                        <path d="M12 12l4-4" />
+                        <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+                      </>
+                    )}
+                    {id === 'drawArc' && <path d="M4 18A11 11 0 0 1 20 7" />}
+                  </svg>
+                  <span className="dxf-tool-caption">{label}</span>
+                </button>
+              ))}
+            </div>
           </div>
 
           {(['drawLine','drawPolyline','drawArc','drawCircle','text'] as string[]).includes(activeTool) && (
@@ -1563,45 +2650,80 @@ export function DxfJsonViewPage() {
             draggable={stageDraggable}
             onDragEnd={e => { if (e.target === stageRef.current) setPos({ x: e.target.x(), y: e.target.y() }) }}
             onWheel={handleWheel}
-            onMouseMove={handleStageMouseMove}
-            onClick={handleStageClick}
+            onMouseDown={onStageMouseDown}
+            onMouseMove={onStageMouseMove}
+            onMouseUp={onStageMouseUp}
+            onClick={e => {
+              if (e.target === stageRef.current) {
+                setSelectedIds(new Set())
+                handleStageClick(e)
+              }
+            }}
             style={{
               display: 'block',
-              cursor: isDraggingEp
-                ? 'crosshair'
-                : (activeTool === 'hand' || spaceHeld)
-                  ? 'grab'
-                  : ['drawLine','drawPolyline','drawArc','drawCircle','text'].includes(activeTool)
-                    ? 'crosshair'
-                    : 'default',
+              cursor: resizeDrag
+                ? `${resizeDrag.handle}-resize`
+                : (isDraggingEp || rotationDrag)
+                  ? 'crosshair'
+                  : (activeTool === 'hand' || spaceHeld)
+                    ? 'grab'
+                    : selectionBox
+                      ? 'default'
+                      : activeTool === 'draw' || activeTool === 'text'
+                        ? 'crosshair'
+                        : 'default',
             }}
           >
 
             {/* ── white artboard + light grid (Synaps-style) ── */}
             <Layer listening={false}>
-              <Rect x={0} y={0} width={stageSize.w} height={stageSize.h} fill="#ffffff" />
+              <Rect name="background-rect" x={0} y={0} width={stageSize.w} height={stageSize.h} fill="#ffffff" />
               {gridLines}
             </Layer>
 
-            {/* ── room colour fills (below walls: edge clicks hit walls first) ── */}
-            <Layer listening={activeTool === 'select' && !spaceHeld}>
-              {rooms.map((room, i) => {
-                const isRoomSel = selectedRoomIndex === i
+            {/* ── room colour fills ── */}
+            <Layer>
+              {roomsWithWalls.map((r, i) => {
+                const isHovered = hoveredRoomIdx === i
                 return (
-                  <Line
-                    key={`room-${i}`}
-                    points={room.flatMap(p => toC(p.x, p.y, t))}
-                  closed
-                  fill={ROOM_COLORS[i % ROOM_COLORS.length]}
-                  stroke={isRoomSel ? '#f59e0b' : ROOM_STROKES[i % ROOM_STROKES.length]}
-                  strokeWidth={(isRoomSel ? 2.4 : 1) / zoom}
-                  onClick={(e) => {
-                    e.cancelBubble = true
-                    setSelectedId(null)
-                    setSelectedTextHandle(null)
-                    setSelectedRoomIndex(isRoomSel ? null : i)
-                  }}
-                />
+                  <Group key={`room-${i}`}>
+                    <Line
+                      points={r.polygon.flatMap(p => toC(p.x, p.y, t))}
+                      closed
+                      fill={ROOM_COLORS[i % ROOM_COLORS.length]}
+                      stroke={ROOM_STROKES[i % ROOM_STROKES.length]}
+                      strokeWidth={isHovered ? 2.5 / zoom : 1 / zoom}
+                      listening={true}
+                      onClick={e => {
+                        e.cancelBubble = true
+                        const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                        setSelectedIds(prev => {
+                          if (isCtrl) {
+                            const next = new Set(prev)
+                            r.wallIds.forEach(id => next.add(id))
+                            return next
+                          }
+                          return new Set(r.wallIds)
+                        })
+                      }}
+                      onMouseDown={e => {
+                        if (rotationDragRef.current) return
+                        e.cancelBubble = true
+                        const currentSel = new Set(r.wallIds)
+                        setSelectedIds(currentSel)
+                        onMidDragStart(e as any, r.wallIds[0] ?? '', currentSel)
+                      }}
+                      onMouseUp={e => { e.cancelBubble = true; onMidDragEnd() }}
+                      onMouseEnter={ev => {
+                        ev.target.getStage()!.container().style.cursor = 'move'
+                        setHoveredRoomIdx(i)
+                      }}
+                      onMouseLeave={ev => {
+                        ev.target.getStage()!.container().style.cursor = 'default'
+                        setHoveredRoomIdx(null)
+                      }}
+                    />
+                  </Group>
                 )
               })}
             </Layer>
@@ -1663,9 +2785,9 @@ export function DxfJsonViewPage() {
               })}
 
               {/* ── Door arcs + associated frame lines ── */}
-              {planDoc.arcs.map((arc) => {
+              {effectiveArcs.map((arc) => {
                 const isFullCircle = arc.end_angle - arc.start_angle >= 360
-                const isSelArc  = selectedArcHandle === arc.handle
+                const isSelArc  = selectedIds.has(arc.handle)
                 const arcKey    = arc.handle.replace(/^arc-/, '')
                 const frameLines = planDoc.lines.filter(ln => ln.handle.startsWith(`dfl-${arcKey}`))
                 const arcColor  = isSelArc ? '#f59e0b' : strokeHex
@@ -1676,30 +2798,30 @@ export function DxfJsonViewPage() {
                 return (
                   <Group
                     key={arc.handle}
-                    draggable
-                    onDragStart={e => {
-                      e.cancelBubble = true
-                      snapshot()
-                      setSelectedArcHandle(arc.handle)
-                      setSelectedWinKey(null)
-                      setSelectedId(null)
-                      setSelectedTextHandle(null)
-                      setSelectedRoomIndex(null)
-                    }}
-                    onDragEnd={e => {
-                      const dcx = e.target.x()
-                      const dcy = e.target.y()
-                      e.target.position({ x: 0, y: 0 })
-                      moveArcAndLines(arc.handle, dcx / t.sc, -dcy / t.sc)
-                    }}
                     onClick={e => {
                       e.cancelBubble = true
-                      setSelectedId(null)
-                      setSelectedWinKey(null)
-                      setSelectedTextHandle(null)
+                      if (activeTool === 'hand' || spaceHeld) return
                       setSelectedRoomIndex(null)
-                      setSelectedArcHandle(isSelArc ? null : arc.handle)
+                      setSelectedTextHandle(null)
+                      setSelectedId(null)
+                      const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                      setSelectedIds(prev => {
+                        const next = new Set(isCtrl ? prev : [])
+                        if (isSelArc && isCtrl) next.delete(arc.handle)
+                        else next.add(arc.handle)
+                        return next
+                      })
                     }}
+                    onMouseDown={e => {
+                      e.cancelBubble = true
+                      if (activeTool !== 'select' || spaceHeld) return
+                      const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                      const currentSel = new Set(isCtrl ? selectedIds : (isSelArc ? selectedIds : new Set<string>()))
+                      currentSel.add(arc.handle)
+                      if (!isCtrl && !isSelArc) setSelectedIds(currentSel)
+                      onMidDragStart(e as any, arc.handle, currentSel)
+                    }}
+                    onMouseUp={e => { e.cancelBubble = true; onMidDragEnd() }}
                     onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
                     onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                   >
@@ -1741,6 +2863,7 @@ export function DxfJsonViewPage() {
                   </Group>
                 )
               })}
+
             </Layer>
 
             {/* ── walls + midpoint handles (pass 1 — bodies only) ── */}
@@ -1749,8 +2872,8 @@ export function DxfJsonViewPage() {
                 const [sx, sy] = toC(wall.start.x, wall.start.y, t)
                 const [ex, ey] = toC(wall.end.x,   wall.end.y,   t)
                 const midX = (sx + ex) / 2, midY = (sy + ey) / 2
-                const isSel      = selectedId === wall.id
-                const isDragging = activeDrag?.wallId === wall.id
+                const isSel       = selectedIds.has(wall.id)
+                const isDragging  = activeDrag?.wallId === wall.id
                 const showDim = (isSel || isDragging) && !wall.isDetail
 
                 const wallColor = wall.isDetail ? '#60a5fa' : strokeHex
@@ -1770,24 +2893,70 @@ export function DxfJsonViewPage() {
                       points={[sx, sy, ex, ey]}
                       stroke="transparent"
                       strokeWidth={16 / zoom}
+                      onMouseDown={e => {
+                        e.cancelBubble = true
+                        selBeforeMouseDown.current = new Set(selectedIds)
+                        // Resolve the full group so drag always moves the whole element
+                        const groupIds = getGroupWallIds(wall.id, walls)
+                        const groupFullySelected = groupIds.every(id => selectedIds.has(id))
+                        let currentSel = selectedIds
+                        if (!groupFullySelected) {
+                          const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                          currentSel = new Set(isCtrl ? selectedIds : [])
+                          groupIds.forEach(id => currentSel.add(id))
+                          setSelectedIds(currentSel)
+                        }
+                        onMidDragStart(e as any, wall.id, currentSel)
+                      }}
+                      onMouseUp={e => { e.cancelBubble = true; onMidDragEnd() }}
                       onClick={e => {
                         e.cancelBubble = true
-                        setSelectedTextHandle(null)
-                        setSelectedRoomIndex(null)
-                        setSelectedArcHandle(null)
-                        if (activeTool !== 'select') return
-                        setSelectedId(isSel ? null : wall.id)
+                        const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                        const groupIds = getGroupWallIds(wall.id, walls)
+                        setSelectedIds(prev => {
+                          if (!isCtrl) {
+                            // Plain click → select entire group (or just this wall if ungrouped)
+                            return new Set(groupIds)
+                          }
+                          // Ctrl+click: toggle the entire group based on pre-mousedown state
+                          if (selBeforeMouseDown.current.has(wall.id)) {
+                            const next = new Set(prev)
+                            groupIds.forEach(id => next.delete(id))
+                            return next
+                          }
+                          return prev // mousedown already added all group members
+                        })
+                      }}
+                      onMouseEnter={ev => {
+                        ev.target.getStage()!.container().style.cursor = 'move'
+                        if (wall.groupId) setHoveredGroupId(wall.groupId)
+                      }}
+                      onMouseLeave={ev => {
+                        ev.target.getStage()!.container().style.cursor = 'default'
+                        setHoveredGroupId(null)
                       }}
                     />
 
-                    {/* visible wall line */}
-                    <Line
-                      points={[sx, sy, ex, ey]}
-                      stroke={isDragging ? '#3b82f6' : isSel ? '#f59e0b' : wallColor}
-                      strokeWidth={(isDragging || isSel) ? 2.2 / zoom : strokeW}
-                      lineCap="round"
-                      listening={false}
-                    />
+                    {/* ── visible wall line ── */}
+                    {(() => {
+                      const isHoverGroup = !isSel && !isDragging && !!wall.groupId && wall.groupId === hoveredGroupId
+                      return (
+                        <Line
+                          points={[sx, sy, ex, ey]}
+                          stroke={
+                            isDragging   ? '#3b82f6'
+                            : isSel      ? '#f59e0b'
+                            : isHoverGroup ? '#a855f7'
+                            : wallColor
+                          }
+                          strokeWidth={
+                            (isDragging || isSel || isHoverGroup) ? 2.2 / zoom : strokeW
+                          }
+                          lineCap="round"
+                          listening={false}
+                        />
+                      )
+                    })()}
 
                     {/* live dimension label */}
                     {lenLabel && (
@@ -1815,22 +2984,40 @@ export function DxfJsonViewPage() {
                       </Group>
                     )}
 
-                    {/* mid-point square — only for non-selected, non-detail walls.
-                        The selected wall's midpoint is re-rendered in pass 2c (on top). */}
-                    {!wall.isDetail && wall.id !== selectedId && (
-                      <Rect
-                        x={midX - MH} y={midY - MH}
-                        width={MH * 2} height={MH * 2}
-                        fill="#334155"
-                        stroke="#64748b" strokeWidth={0.8 / zoom}
-                        cornerRadius={2 / zoom}
-                        draggable
-                        onDragStart={e => { e.cancelBubble = true; onMidDragStart(e, wall) }}
-                        onDragMove={e => { e.cancelBubble = true; onMidDragMove(e) }}
-                        onDragEnd={onMidDragEnd}
-                        onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
-                        onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
-                      />
+
+
+                    {/* ── endpoint handles (ALL walls when selected, enables snapping + auto-join) ── */}
+                    {isSel && (
+                      <>
+                        <Circle
+                          x={sx} y={sy} radius={HR}
+                          fill="#3b82f6" stroke="#fff" strokeWidth={1.2 / zoom}
+                          draggable
+                          onDragStart={() => {
+                            snapshot()
+                            setIsDraggingEp(true)
+                            draggingEpInfo.current = { wallId: wall.id, ep: 'start' }
+                          }}
+                          onDragMove={e => onEpDragMove(e, wall.id, 'start')}
+                          onDragEnd={onEpDragEnd}
+                          onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'crosshair' }}
+                          onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                        />
+                        <Circle
+                          x={ex} y={ey} radius={HR}
+                          fill="#3b82f6" stroke="#fff" strokeWidth={1.2 / zoom}
+                          draggable
+                          onDragStart={() => {
+                            snapshot()
+                            setIsDraggingEp(true)
+                            draggingEpInfo.current = { wallId: wall.id, ep: 'end' }
+                          }}
+                          onDragMove={e => onEpDragMove(e, wall.id, 'end')}
+                          onDragEnd={onEpDragEnd}
+                          onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'crosshair' }}
+                          onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                        />
+                      </>
                     )}
                   </Group>
                 )
@@ -1847,7 +3034,7 @@ export function DxfJsonViewPage() {
                */}
               {/* 2a — unselected endpoint dots (invisible, no interaction when not selected) */}
               {effectiveWalls
-                .filter(w => !w.isDetail && w.id !== selectedId)
+                .filter(w => !w.isDetail && !w.fromArc && w.id !== selectedId)
                 .map(wall => {
                   const [sx, sy] = toC(wall.start.x, wall.start.y, t)
                   const [ex, ey] = toC(wall.end.x,   wall.end.y,   t)
@@ -1862,25 +3049,28 @@ export function DxfJsonViewPage() {
 
               {/* 2c — SELECTED wall: midpoint square + endpoint circles, on top of everything */}
               {(() => {
-                const wall = effectiveWalls.find(w => w.id === selectedId && !w.isDetail)
+                const wall = effectiveWalls.find(w => w.id === selectedId && !w.isDetail && !w.fromArc)
                 if (!wall) return null
                 const [sx, sy] = toC(wall.start.x, wall.start.y, t)
                 const [ex, ey] = toC(wall.end.x,   wall.end.y,   t)
                 const midX = (sx + ex) / 2, midY = (sy + ey) / 2
-                const isDragging = activeDrag?.wallId === wall.id
+                const isMidDragging = activeDrag?.wallId === wall.id || activePolyDrag?.leaderSegId === wall.id
                 return (
                   <Group key={`ep-sel-${wall.id}`}>
                     {/* midpoint square re-rendered on top so it's also above crossings */}
                     <Rect
                       x={midX - MH} y={midY - MH}
                       width={MH * 2} height={MH * 2}
-                      fill={isDragging ? '#2563eb' : '#334155'}
+                      fill={isMidDragging ? '#2563eb' : '#334155'}
                       stroke="#64748b" strokeWidth={0.8 / zoom}
                       cornerRadius={2 / zoom}
-                      draggable
-                      onDragStart={e => { e.cancelBubble = true; onMidDragStart(e, wall) }}
-                      onDragMove={e => { e.cancelBubble = true; onMidDragMove(e) }}
-                      onDragEnd={onMidDragEnd}
+                      onMouseDown={e => {
+                        e.cancelBubble = true
+                        const currentSel = new Set(selectedIds)
+                        if (!currentSel.has(wall.id)) currentSel.add(wall.id)
+                        onMidDragStart(e as any, wall.id, currentSel)
+                      }}
+                      onMouseUp={e => { e.cancelBubble = true; onMidDragEnd() }}
                       onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
                       onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                     />
@@ -2046,128 +3236,127 @@ export function DxfJsonViewPage() {
 
             </Layer>
 
-            {/* ── room labels (MTEXT) ── */}
+            {/* ── rubber-band selection UI ── */}
+            {selectionBox && (() => {
+              const [sx, sy] = toC(selectionBox.start.x, selectionBox.start.y, t)
+              const [cx, cy] = toC(selectionBox.current.x, selectionBox.current.y, t)
+              const isWindow = selectionBox.start.x < selectionBox.current.x
+              return (
+                <Layer listening={false}>
+                  <Rect
+                    x={Math.min(sx, cx)}
+                    y={Math.min(sy, cy)}
+                    width={Math.abs(cx - sx)}
+                    height={Math.abs(cy - sy)}
+                    fill={isWindow ? 'rgba(59, 130, 246, 0.2)' : 'rgba(34, 197, 94, 0.2)'}
+                    stroke={isWindow ? '#3b82f6' : '#22c55e'}
+                    strokeWidth={1 / zoom}
+                    dash={[4 / zoom, 2 / zoom]}
+                  />
+                </Layer>
+              )
+            })()}
+
             {showLabels && (
               <Layer>
-                {doc.texts.map(tx => {
-                  const lines = tx.text.split('\n')
+                {effectiveTexts.map(tx => {
+                  const textLines = tx.text.split('\n')
                   const [lx, ly] = toC(tx.position.x, tx.position.y, t)
                   const fs = Math.max(7, tx.height * t.sc * 3.5)
-                  const isTxtSel = selectedTextHandle === tx.handle
-                  const estW = Math.max(fs * 3, (lines[0]?.length ?? 1) * fs * 0.52)
-                  const boxH = fs * (lines[1] ? 2.15 : 1) + 8 / zoom
+                  // A label is "selected" if it's in the unified selectedIds set
+                  const isTxtSel = selectedIds.has(tx.handle)
+                  const estW = Math.max(fs * 3, (textLines[0]?.length ?? 1) * fs * 0.52)
+                  const boxH = fs * (textLines[1] ? 2.15 : 1) + 8 / zoom
                   const handleY = fs * 0.2
-                  const canDragText = isTxtSel && activeTool === 'select' && !spaceHeld
 
                   return (
                     <Group
                       key={tx.handle}
                       x={lx}
                       y={ly}
-                      draggable={canDragText}
                       onClick={(e) => {
                         e.cancelBubble = true
                         if (activeTool === 'hand' || spaceHeld) return
-                        if (activeTool === 'drawLine' || activeTool === 'drawPolyline') return
-                        setSelectedId(null)
+                        if (activeTool !== 'select') return
                         setSelectedRoomIndex(null)
-                        const next = isTxtSel ? null : tx.handle
-                        setSelectedTextHandle(next)
+                        setSelectedId(null)
+                        const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                        setSelectedIds(prev => {
+                          const next = new Set(isCtrl ? prev : [])
+                          if (isTxtSel && isCtrl) next.delete(tx.handle)
+                          else next.add(tx.handle)
+                          return next
+                        })
+                        setSelectedTextHandle(isTxtSel && !e.evt.ctrlKey ? null : tx.handle)
                       }}
-                      onDragStart={(e) => {
-                        if (!canDragText) return
+                      onMouseDown={e => {
                         e.cancelBubble = true
-                        snapshot()
+                        if (activeTool !== 'select' || spaceHeld) return
+                        const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                        const currentSel = new Set(isCtrl ? selectedIds : (isTxtSel ? selectedIds : new Set<string>()))
+                        currentSel.add(tx.handle)
+                        if (!isCtrl && !isTxtSel) setSelectedIds(currentSel)
+                        onMidDragStart(e as any, tx.handle, currentSel)
                       }}
-                      onDragEnd={(e) => {
-                        if (!canDragText) return
-                        const n = e.target
-                        const [nwx, nwy] = toW(n.x(), n.y(), t)
-                        setPlanDoc(prev => ({
-                          ...prev,
-                          texts: prev.texts.map(t =>
-                            t.handle === tx.handle ? { ...t, position: { ...t.position, x: nwx, y: nwy } } : t,
-                          ),
-                        }))
-                      }}
+                      onMouseUp={e => { e.cancelBubble = true; onMidDragEnd() }}
+                      onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
+                      onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                     >
+                      {/* selection highlight */}
+                      {isTxtSel && (
+                        <Rect
+                          x={-4 / zoom} y={-fs - 4 / zoom}
+                          width={estW + 8 / zoom} height={boxH}
+                          fill="rgba(245,158,11,0.12)" stroke="#f59e0b"
+                          strokeWidth={1.2 / zoom} cornerRadius={2 / zoom}
+                          listening={false}
+                        />
+                      )}
                       <Text
-                        x={0}
-                        y={-fs}
-                        text={lines[0]}
-                        fontSize={fs}
-                        fontStyle="bold"
-                        fill="#2563eb"
+                        x={0} y={-fs}
+                        text={textLines[0]}
+                        fontSize={fs} fontStyle="bold"
+                        fill={isTxtSel ? '#f59e0b' : '#2563eb'}
                         fontFamily="system-ui, -apple-system, 'Segoe UI', sans-serif"
                       />
-                      {lines[1] && (
+                      {textLines[1] && (
                         <Text
-                          x={0}
-                          y={-fs + fs * 1.25}
-                          text={lines[1]}
+                          x={0} y={-fs + fs * 1.25}
+                          text={textLines[1]}
                           fontSize={fs * 0.78}
-                          fill="#64748b"
+                          fill={isTxtSel ? '#f59e0b' : '#64748b'}
                           fontFamily="system-ui, -apple-system, 'Segoe UI', sans-serif"
                         />
                       )}
-                      {isTxtSel && activeTool === 'select' && (
-                        <>
-                          <Rect
-                            x={-4 / zoom}
-                            y={-fs - 4 / zoom}
-                            width={estW + 8 / zoom}
-                            height={boxH}
-                            stroke="#f59e0b"
-                            strokeWidth={1.2 / zoom}
-                            fill="transparent"
-                            listening={false}
-                          />
-                          <Circle
-                            x={estW}
-                            y={handleY}
-                            radius={HR}
-                            fill="#3b82f6"
-                            stroke="#fff"
-                            strokeWidth={1.2 / zoom}
-                            draggable
-                            onDragStart={(e) => {
-                              e.cancelBubble = true
-                              snapshot()
-                              const stage = e.target.getStage()!
-                              const p = stage.getPointerPosition()!
-                              const [, wy] = toW(p.x, p.y, t)
-                              textHeightDragRef.current = {
-                                handle: tx.handle,
-                                startH: tx.height,
-                                startPointerWy: wy,
-                              }
-                            }}
-                            onDragMove={(e) => {
-                              e.cancelBubble = true
-                              const r = textHeightDragRef.current
-                              if (!r || r.handle !== tx.handle) return
-                              const stage = e.target.getStage()!
-                              const p = stage.getPointerPosition()!
-                              const [, wy] = toW(p.x, p.y, t)
-                              const dWy = wy - r.startPointerWy
-                              const newH = Math.max(0.05, Math.min(3, r.startH + dWy * 0.45))
-                              setPlanDoc(prev => ({
-                                ...prev,
-                                texts: prev.texts.map(t =>
-                                  t.handle === tx.handle ? { ...t, height: newH } : t,
-                                ),
-                              }))
-                              e.target.position({ x: estW, y: handleY })
-                            }}
-                            onDragEnd={(e) => {
-                              e.cancelBubble = true
-                              textHeightDragRef.current = null
-                              e.target.position({ x: estW, y: handleY })
-                            }}
-                            onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'ns-resize' }}
-                            onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
-                          />
-                        </>
+                      {/* per-label font-size resize handle — only when it's the sole selection */}
+                      {isTxtSel && selectedIds.size === 1 && activeTool === 'select' && (
+                        <Circle
+                          x={estW} y={handleY}
+                          radius={HR} fill="#3b82f6" stroke="#fff" strokeWidth={1.2 / zoom}
+                          draggable
+                          onDragStart={(e) => {
+                            e.cancelBubble = true
+                            snapshot()
+                            const stage = e.target.getStage()!
+                            const p = stage.getRelativePointerPosition()!
+                            const [, wy] = toW(p.x, p.y, t)
+                            textHeightDragRef.current = { handle: tx.handle, startH: tx.height, startPointerWy: wy }
+                          }}
+                          onDragMove={(e) => {
+                            e.cancelBubble = true
+                            const r = textHeightDragRef.current
+                            if (!r || r.handle !== tx.handle) return
+                            const stage = e.target.getStage()!
+                            const p = stage.getRelativePointerPosition()!
+                            const [, wy] = toW(p.x, p.y, t)
+                            const newH = Math.max(0.05, Math.min(3, r.startH + (wy - r.startPointerWy) * 0.45))
+                            setPlanDoc(prev => ({ ...prev, texts: prev.texts.map(t => t.handle === tx.handle ? { ...t, height: newH } : t) }))
+                            e.target.position({ x: estW, y: handleY })
+                          }}
+                          onDragEnd={(e) => { e.cancelBubble = true; textHeightDragRef.current = null; e.target.position({ x: estW, y: handleY }) }}
+                          onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'ns-resize' }}
+                          onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                        />
                       )}
                     </Group>
                   )
@@ -2175,6 +3364,131 @@ export function DxfJsonViewPage() {
               </Layer>
             )}
 
+            {/* ── Dim overlay moved to SVG outside Stage — see below ── */}
+
+            {/* ── Resize + rotation handles (separate interactive layer) ── */}
+            {effectiveSelBBox && selectedIds.size > 0 && activeTool === 'select' && !activeDrag && (() => {
+              const { minCX, minCY, maxCX, maxCY } = effectiveSelBBox
+              const pad = 6 / zoom
+              const w = maxCX - minCX
+              const h = maxCY - minCY
+              const handleSize = 8 / zoom
+              const halfHandle = handleSize / 2
+              const corners = {
+                nw: { x: minCX - pad, y: minCY - pad },
+                ne: { x: maxCX + pad, y: minCY - pad },
+                sw: { x: minCX - pad, y: maxCY + pad },
+                se: { x: maxCX + pad, y: maxCY + pad },
+                n: { x: minCX + w / 2, y: minCY - pad },
+                s: { x: minCX + w / 2, y: maxCY + pad },
+                e: { x: maxCX + pad, y: minCY + h / 2 },
+                w: { x: minCX - pad, y: minCY + h / 2 },
+              }
+              const cx = (minCX + maxCX) / 2
+              const topY = minCY - pad
+              const stemLen = 28 / zoom
+              const handleY = topY - stemLen
+              const rotHandleR = 7 / zoom
+              return (
+                <Layer>
+                  {/* Resize handles */}
+                  {Object.entries(corners).map(([pos, pt]) => (
+                    <Rect
+                      key={pos}
+                      x={pt.x - halfHandle}
+                      y={pt.y - halfHandle}
+                      width={handleSize}
+                      height={handleSize}
+                      fill="white"
+                      stroke="#3b82f6"
+                      strokeWidth={1.5 / zoom}
+                      onMouseDown={e => {
+                        e.cancelBubble = true
+                        if (!baseSelWBox) return
+                        const mpos = stageRef.current?.getRelativePointerPosition()
+                        if (!mpos) return
+                        const [mwx, mwy] = toW(mpos.x, mpos.y, t)
+                        snapshot()
+                        const rd: ResizeDrag = {
+                          handle: pos as ResizeDrag['handle'],
+                          initBBox: { ...baseSelWBox },
+                          initMouseWX: mwx,
+                          initMouseWY: mwy,
+                          wallIds: walls.filter(w => selectedIds.has(w.id)).map(w => w.id),
+                          textHandles: planDoc.texts.filter(tx => selectedIds.has(tx.handle)).map(tx => tx.handle),
+                          arcHandles: planDoc.arcs.filter(a => selectedIds.has(a.handle)).map(a => a.handle),
+                        }
+                        resizeDragRef.current = rd
+                        resizePreviewRef.current = { ...baseSelWBox }
+                        setResizeDrag(rd)
+                        setResizePreview({ ...baseSelWBox })
+                      }}
+                      onMouseUp={e => { e.cancelBubble = true; commitResize() }}
+                      onMouseEnter={ev => {
+                        const cursor = pos.includes('n') ? 'n' : pos.includes('s') ? 's' : ''
+                        ev.target.getStage()!.container().style.cursor = 
+                          pos === 'n' || pos === 's' ? 'ns-resize'
+                          : pos === 'e' || pos === 'w' ? 'ew-resize'
+                          : pos === 'nw' || pos === 'se' ? 'nwse-resize'
+                          : 'nesw-resize'
+                      }}
+                      onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                    />
+                  ))}
+                  
+                  {/* stem line for rotation handle */}
+                  <Line
+                    points={[cx, topY, cx, handleY]}
+                    stroke="#3b82f6" strokeWidth={1 / zoom}
+                    listening={false}
+                  />
+                  
+                  {/* rotation handle circle */}
+                  <Circle
+                    x={cx} y={handleY}
+                    radius={rotHandleR}
+                    fill={rotationDrag ? '#3b82f6' : 'white'}
+                    stroke="#3b82f6" strokeWidth={1.5 / zoom}
+                    onMouseDown={e => {
+                      e.cancelBubble = true
+                      if (!baseSelCenter) return
+                      const mpos = stageRef.current?.getRelativePointerPosition()
+                      if (!mpos) return
+                      const [ccx, ccy] = toC(baseSelCenter.wx, baseSelCenter.wy, t)
+                      const startAngle = Math.atan2(mpos.y - ccy, mpos.x - ccx)
+                      snapshot()
+                      const rd: RotationDrag = {
+                        centerWX:        baseSelCenter.wx,
+                        centerWY:        baseSelCenter.wy,
+                        startMouseAngle: startAngle,
+                        wallIds:         walls.filter(w => selectedIds.has(w.id)).map(w => w.id),
+                        textHandles:     planDoc.texts.filter(tx => selectedIds.has(tx.handle)).map(tx => tx.handle),
+                        arcHandles:      planDoc.arcs.filter(a => selectedIds.has(a.handle)).map(a => a.handle),
+                      }
+                      rotationDragRef.current = rd
+                      rotationAngleDeltaRef.current = 0
+                      setRotationDrag(rd)
+                      setRotationAngleDelta(0)
+                    }}
+                    onMouseUp={e => { e.cancelBubble = true; commitRotation() }}
+                    onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'crosshair' }}
+                    onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                  />
+                  
+                  {/* small curved arrow icon inside handle */}
+                  <Text
+                    x={cx - rotHandleR} y={handleY - rotHandleR}
+                    width={rotHandleR * 2} height={rotHandleR * 2}
+                    text="↻"
+                    fontSize={rotHandleR * 1.3}
+                    align="center"
+                    verticalAlign="middle"
+                    fill={rotationDrag ? 'white' : '#3b82f6'}
+                    listening={false}
+                  />
+                </Layer>
+              )
+            })()}
             {/* Room move handle on top so MTEXT labels do not steal drags */}
             <Layer>
               {activeTool === 'select' && !spaceHeld && selectedRoomIndex !== null && rooms[selectedRoomIndex] && (() => {
@@ -2202,6 +3516,120 @@ export function DxfJsonViewPage() {
               })()}
             </Layer>
           </Stage>
+
+          {/* ── Dimension / selection overlay (SVG, absolutely positioned over canvas) ──
+               Rendered OUTSIDE the Konva Stage so it is completely immune to
+               Stage zoom/pan transforms.  All coordinates are in screen pixels:
+                 screenX = stageLocalX * zoom + pos.x
+                 screenY = stageLocalY * zoom + pos.y                              */}
+          {effectiveSelBBox && selectedIds.size > 0 && activeTool === 'select' && !activeDrag && (() => {
+            /* ── All drawing is in canvas-local (pre-zoom) coordinates ──
+               The <g> transform mirrors the Konva Stage transform exactly:
+                 translate(pos.x, pos.y) scale(zoom)
+               so any canvas-local point (cx, cy) lands at the same screen
+               pixel as the corresponding Konva element.  Fixed-size items
+               (stroke widths, text, arrow heads) use /zoom to counteract
+               the scale so they stay a constant screen size.              */
+            const { minCX, minCY, maxCX, maxCY } = effectiveSelBBox
+            const pad = 6 / zoom          // canvas-local padding
+            const rX = minCX - pad, rY = minCY - pad
+            const rW = (maxCX - minCX) + pad * 2
+            const rH = (maxCY - minCY) + pad * 2
+
+            // World-space dimensions for label text
+            const selWalls = effectiveWalls.filter(ww => selectedIds.has(ww.id))
+            let dimW = 0, dimH = 0
+            if (selWalls.length > 0) {
+              let mnX = Infinity, mxX = -Infinity, mnY = Infinity, mxY = -Infinity
+              for (const ww of selWalls) for (const p of [ww.start, ww.end]) {
+                mnX = Math.min(mnX, p.x); mxX = Math.max(mxX, p.x)
+                mnY = Math.min(mnY, p.y); mxY = Math.max(mxY, p.y)
+              }
+              dimW = Math.abs(mxX - mnX); dimH = Math.abs(mxY - mnY)
+            }
+            const dimWLabel = fmtLen(dimW)
+            const dimHLabel = fmtLen(dimH)
+
+            // Canvas-local sizes that appear as fixed screen pixels
+            const DIM_OFFSET = 22 / zoom
+            const TICK       = 5  / zoom
+            const ARROW_SZ   = 6  / zoom
+            const FS         = 11 / zoom
+            const LBL_PAD    = 4  / zoom
+            const SW         = 1  / zoom   // stroke width
+            const DASH       = `${5/zoom},${3/zoom}`
+
+            const wDimY = rY + rH + DIM_OFFSET
+            const wMidX = rX + rW / 2
+            const hDimX = rX + rW + DIM_OFFSET
+            const hMidY = rY + rH / 2
+
+            const arrowPath = (tipX: number, tipY: number, fromX: number, fromY: number) => {
+              const angle = Math.atan2(tipY - fromY, tipX - fromX)
+              return [
+                `M${tipX - ARROW_SZ * Math.cos(angle - 0.35)},${tipY - ARROW_SZ * Math.sin(angle - 0.35)}`,
+                `L${tipX},${tipY}`,
+                `L${tipX - ARROW_SZ * Math.cos(angle + 0.35)},${tipY - ARROW_SZ * Math.sin(angle + 0.35)}`,
+              ].join(' ')
+            }
+
+            const lblW  = dimWLabel.length * FS * 0.6 + LBL_PAD * 2
+            const hlblW = dimHLabel.length * FS * 0.6 + LBL_PAD * 2
+            const lblH  = FS * 1.5
+
+            return (
+              <svg
+                style={{
+                  position: 'absolute', top: 0, left: 0,
+                  width: stageSize.w, height: stageSize.h,
+                  pointerEvents: 'none', overflow: 'visible',
+                }}
+              >
+                {/* Mirror the Stage transform: translate by pos then scale by zoom.
+                    Everything inside is drawn in canvas-local coordinates. */}
+                <g transform={`translate(${pos.x},${pos.y}) scale(${zoom})`}>
+                  {/* dashed selection rect */}
+                  <rect
+                    x={rX} y={rY} width={rW} height={rH}
+                    fill="none" stroke="#3b82f6" strokeWidth={SW}
+                    strokeDasharray={DASH}
+                  />
+
+                  {/* ── Width dimension (below bbox) ── */}
+                  {dimW > 0.01 && <>
+                    <line x1={rX} y1={rY + rH} x2={rX} y2={wDimY + TICK} stroke="#64748b" strokeWidth={SW * 0.8} />
+                    <line x1={rX + rW} y1={rY + rH} x2={rX + rW} y2={wDimY + TICK} stroke="#64748b" strokeWidth={SW * 0.8} />
+                    <line x1={rX} y1={wDimY} x2={rX + rW} y2={wDimY} stroke="#64748b" strokeWidth={SW} />
+                    <path d={arrowPath(rX, wDimY, rX + rW, wDimY)} stroke="#64748b" strokeWidth={SW} fill="none" />
+                    <path d={arrowPath(rX + rW, wDimY, rX, wDimY)} stroke="#64748b" strokeWidth={SW} fill="none" />
+                    <rect x={wMidX - lblW / 2} y={wDimY - lblH / 2} width={lblW} height={lblH} fill="white" rx={2 / zoom} />
+                    <text x={wMidX} y={wDimY + FS * 0.35} textAnchor="middle" fontSize={FS} fill="#1e40af" fontWeight="bold" fontFamily="system-ui,-apple-system,'Segoe UI',sans-serif">{dimWLabel}</text>
+                  </>}
+
+                  {/* ── Height dimension (right of bbox) ── */}
+                  {dimH > 0.01 && <>
+                    <line x1={rX + rW} y1={rY} x2={hDimX + TICK} y2={rY} stroke="#64748b" strokeWidth={SW * 0.8} />
+                    <line x1={rX + rW} y1={rY + rH} x2={hDimX + TICK} y2={rY + rH} stroke="#64748b" strokeWidth={SW * 0.8} />
+                    <line x1={hDimX} y1={rY} x2={hDimX} y2={rY + rH} stroke="#64748b" strokeWidth={SW} />
+                    <path d={arrowPath(hDimX, rY, hDimX, rY + rH)} stroke="#64748b" strokeWidth={SW} fill="none" />
+                    <path d={arrowPath(hDimX, rY + rH, hDimX, rY)} stroke="#64748b" strokeWidth={SW} fill="none" />
+                    <rect
+                      x={hDimX - lblH / 2} y={hMidY - hlblW / 2}
+                      width={lblH} height={hlblW}
+                      fill="white" rx={2 / zoom}
+                      transform={`rotate(-90,${hDimX},${hMidY})`}
+                    />
+                    <text
+                      x={hDimX} y={hMidY + FS * 0.35}
+                      textAnchor="middle" fontSize={FS} fill="#1e40af" fontWeight="bold"
+                      fontFamily="system-ui,-apple-system,'Segoe UI',sans-serif"
+                      transform={`rotate(-90,${hDimX},${hMidY})`}
+                    >{dimHLabel}</text>
+                  </>}
+                </g>
+              </svg>
+            )
+          })()}
             </div>
           </div>
         </main>
@@ -2210,31 +3638,35 @@ export function DxfJsonViewPage() {
         <aside className="dxf-right-rail">
           <div className="dxf-prop-panel">
             <div className="dxf-prop-label">Add walls</div>
-            <p className="dxf-prop-hint">Add LINE (two clicks) or LWPOLYLINE (multi-vertex) to the JSON plan.</p>
+            <p className="dxf-prop-hint">Add LINE, LWPOLYLINE, ARC, or CIRCLE — same entities as the top toolbar.</p>
             <div className="dxf-add-wall-btns">
               <button
                 type="button"
                 className={`dxf-action-btn${activeTool === 'drawLine' ? ' dxf-action-btn-active' : ''}`}
-                onClick={() => {
-                  polylineDraftRef.current = []
-                  setPolylineDraft([])
-                  setPolylineHover(null)
-                  setActiveTool('drawLine')
-                }}
+                onClick={() => activateTool('drawLine')}
               >
                 Line
               </button>
               <button
                 type="button"
                 className={`dxf-action-btn${activeTool === 'drawPolyline' ? ' dxf-action-btn-active' : ''}`}
-                onClick={() => {
-                  drawLineAnchorRef.current = null
-                  setDrawLineAnchor(null)
-                  setDrawLinePointer(null)
-                  setActiveTool('drawPolyline')
-                }}
+                onClick={() => activateTool('drawPolyline')}
               >
                 Polyline
+              </button>
+              <button
+                type="button"
+                className={`dxf-action-btn${activeTool === 'drawCircle' ? ' dxf-action-btn-active' : ''}`}
+                onClick={() => activateTool('drawCircle')}
+              >
+                Circle
+              </button>
+              <button
+                type="button"
+                className={`dxf-action-btn${activeTool === 'drawArc' ? ' dxf-action-btn-active' : ''}`}
+                onClick={() => activateTool('drawArc')}
+              >
+                Arc
               </button>
             </div>
             {activeTool === 'drawPolyline' && (
@@ -2310,6 +3742,10 @@ export function DxfJsonViewPage() {
               <input type="checkbox" checked={showDetail} onChange={e => setShowDetail(e.target.checked)} />
               Detail lines (stairs)
             </label>
+            <label className="dxf-toggle">
+              <input type="checkbox" checked={orthoEnabled} onChange={e => setOrthoEnabled(e.target.checked)} />
+              Ortho Mode (O)
+            </label>
             <button className="dxf-action-btn" onClick={undo} disabled={!history.length}>Undo</button>
             <button
               type="button"
@@ -2322,31 +3758,62 @@ export function DxfJsonViewPage() {
                 setSelectedId(null)
                 setSelectedRoomIndex(null)
                 setSelectedTextHandle(null)
+                setSelectedArcHandle(null)
+                setSelectedWinKey(null)
                 drawLineAnchorRef.current = null
                 setDrawLineAnchor(null)
                 setDrawLinePointer(null)
                 polylineDraftRef.current = []
                 setPolylineDraft([])
                 setPolylineHover(null)
+                setArcDraftCenter(null)
+                setArcDraftRadius(null)
+                setArcDraftStartAngle(null)
+                setCircleDraftCenter(null)
+                setShapePointer(null)
+                activeDragRef.current = null
+                setActiveDrag(null)
+                dragDeltaRef.current = { dx: 0, dy: 0 }
+                setDragDelta({ dx: 0, dy: 0 })
+                activePolyDragRef.current = null
+                setActivePolyDrag(null)
+                polyDragDeltaRef.current = { dx: 0, dy: 0 }
+                setPolyDragDelta({ dx: 0, dy: 0 })
               }}
             >
               Reset plan
             </button>
-            {selectedId && (
-              <button type="button" className="dxf-action-btn danger" onClick={() => {
+            {selectedIds.size > 0 && (
+              <button className="dxf-action-btn danger" onClick={() => {
                 snapshot()
-                const id = selectedId
-                const ph = polylineHandleFromWallId(id)
-                if (ph) {
-                  setPlanDoc(p => removePolylineFromDocByHandle(p, ph))
-                  setWalls(p => p.filter(w => !w.id.startsWith(`pl-${ph}-`)))
-                }
-                else {
-                  setPlanDoc(p => removeLineFromDocByWallId(p, id))
-                  setWalls(p => p.filter(w => w.id !== id))
-                }
-                setSelectedId(null)
-              }}>Delete selected</button>
+                setWalls(p => p.filter(w => !selectedIds.has(w.id)))
+                setPlanDoc(prev => ({
+                  ...prev,
+                  texts: prev.texts.filter(tx => !selectedIds.has(tx.handle))
+                }))
+                setSelectedIds(new Set())
+              }}>Delete Selection</button>
+            )}
+          </div>
+
+          <div className="dxf-prop-panel">
+            <div className="dxf-prop-label">Grouping</div>
+            <div className="dxf-prop-hint">
+              Select ≥ 2 walls then Join to treat them as one element.
+              Hover a joined wall to preview all members (purple).
+            </div>
+            <button
+              className="dxf-action-btn"
+              disabled={walls.filter(w => selectedIds.has(w.id)).length < 2}
+              onClick={joinSelected}
+              title="J"
+            >
+              Join selected (J)
+            </button>
+            {walls.some(w => selectedIds.has(w.id) && !!w.groupId) && (
+              <button className="dxf-action-btn" onClick={ungroupSelected} title="U">
+                Break group (U)
+              </button>
             )}
           </div>
 
