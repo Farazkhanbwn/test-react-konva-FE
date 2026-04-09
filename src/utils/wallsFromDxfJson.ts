@@ -1,4 +1,4 @@
-import type { DxfJsonDocument, DxfPolyline } from '@/constants/dxfJsonData'
+import type { DxfArc, DxfJsonDocument, DxfPolyline } from '@/constants/dxfJsonData'
 
 /** Editable wall segment derived from parsed DXF JSON (lines + polyline edges). */
 export interface WallSeg {
@@ -10,6 +10,8 @@ export interface WallSeg {
   /** When set, this segment belongs to a named polyline group. Clicking any member
    *  selects the entire group; drag / rotate / resize operate on the group as a unit. */
   groupId?: string
+  /** Tessellated chord of this ARC entity (non-door arcs only). */
+  fromArc?: string
 }
 
 const DETAIL_LEN_M = 1.5
@@ -47,6 +49,55 @@ export function wallSegsFromPolyline(pl: DxfPolyline, isOuter: boolean, groupId?
       isOuter,
       isDetail: false,
       ...(groupId ? { groupId } : {}),
+    })
+  }
+  return ws
+}
+
+/** Arcs that belong to door symbols carry `dfl-*` frame lines keyed off the handle suffix. */
+export function isDoorStyleArc(doc: DxfJsonDocument, arc: DxfArc): boolean {
+  const key = arc.handle.replace(/^arc-/, '')
+  return doc.lines.some(ln => ln.handle.startsWith(`dfl-${key}`))
+}
+
+/** Wall id format `ar-${arcHandle}-${edgeIndex}` → arc entity handle. */
+export function arcHandleFromArcSegWallId(wallId: string): string | null {
+  if (!wallId.startsWith('ar-')) return null
+  const rest = wallId.slice(3)
+  const dash = rest.lastIndexOf('-')
+  if (dash <= 0) return null
+  if (!/^\d+$/.test(rest.slice(dash + 1))) return null
+  return rest.slice(0, dash)
+}
+
+/**
+ * Approximate an ARC (or full circle via 0°→360°) as short wall chords for editing / room detection.
+ */
+export function wallSegsFromArc(arc: DxfArc, isOuter: boolean): WallSeg[] {
+  const ws: WallSeg[] = []
+  if (arc.radius < 0.01) return ws
+  const startRad = arc.start_angle * (Math.PI / 180)
+  const spanDeg =
+    arc.end_angle > arc.start_angle
+      ? arc.end_angle - arc.start_angle
+      : arc.end_angle + 360 - arc.start_angle
+  const sweep = spanDeg * (Math.PI / 180)
+  const steps = Math.max(8, Math.min(96, Math.ceil(spanDeg / 5)))
+  for (let i = 0; i < steps; i++) {
+    const a0 = startRad + (sweep * i) / steps
+    const a1 = startRad + (sweep * (i + 1)) / steps
+    const x0 = arc.center.x + arc.radius * Math.cos(a0)
+    const y0 = arc.center.y + arc.radius * Math.sin(a0)
+    const x1 = arc.center.x + arc.radius * Math.cos(a1)
+    const y1 = arc.center.y + arc.radius * Math.sin(a1)
+    if (Math.hypot(x1 - x0, y1 - y0) < 0.01) continue
+    ws.push({
+      id: `ar-${arc.handle}-${i}`,
+      start: { x: x0, y: y0 },
+      end: { x: x1, y: y1 },
+      isOuter,
+      isDetail: false,
+      fromArc: arc.handle,
     })
   }
   return ws
@@ -127,6 +178,11 @@ export function wallsFromDxfJson(doc: DxfJsonDocument): WallSeg[] {
     // On export, grouped walls → LWPOLYLINE; ungrouped walls → LINE.
     const groupId = `pl-${pl.handle}`
     ws.push(...wallSegsFromPolyline(pl, isOuter, groupId))
+  }
+
+  for (const ar of doc.arcs ?? []) {
+    if (isDoorStyleArc(doc, ar)) continue
+    ws.push(...wallSegsFromArc(ar, false))
   }
 
   return ws
