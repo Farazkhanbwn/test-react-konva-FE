@@ -35,6 +35,7 @@ import polygonClipping from 'polygon-clipping'
 import {
   DXF_JSON_DATA,
   type DxfJsonDocument,
+  type DxfArc,
   type DxfLine,
   type DxfPolyline,
   type DxfPolylineVertex,
@@ -75,6 +76,32 @@ function appendUserLine(doc: DxfJsonDocument, start: Pt, end: Pt): { next: DxfJs
     },
   }
   return { next, handle }
+}
+
+function appendUserArc(
+  doc: DxfJsonDocument,
+  center: Pt,
+  radius: number,
+  startAngle: number,
+  endAngle: number,
+): { next: DxfJsonDocument; arc: DxfArc } {
+  const handle = `arc-user-${Date.now()}`
+  const arc: DxfArc = {
+    entity_type: 'ARC',
+    handle,
+    layer: '0',
+    center: { x: center.x, y: center.y, z: 0 },
+    radius,
+    start_angle: startAngle,
+    end_angle: endAngle,
+  }
+  const next = cloneDoc(doc)
+  next.arcs = [...next.arcs, arc]
+  next.stats = {
+    ...next.stats,
+    entity_counts: { ...next.stats.entity_counts, ARC: (next.stats.entity_counts.ARC ?? 0) + 1 },
+  }
+  return { next, arc }
 }
 
 function appendUserPolyline(
@@ -135,60 +162,260 @@ function removePolylineFromDocByHandle(doc: DxfJsonDocument, handle: string): Dx
 
 /* ─── DXF exporter ─────────────────────────────── */
 /**
- * Serialises a DxfJsonDocument back to a standards-compliant DXF ASCII file.
- * Produces HEADER + ENTITIES sections covering LINE, LWPOLYLINE and MTEXT.
- * Group-code / value pairs each occupy their own line, as per the DXF spec.
+ * Serialises a DxfJsonDocument to a standards-compliant AutoCAD ASCII DXF.
+ *
+ * Produces the sections Autodesk Viewer requires:
+ *   HEADER → TABLES (VPORT/LTYPE/LAYER/STYLE/VIEW/UCS/APPID/DIMSTYLE/BLOCK_RECORD)
+ *   → BLOCKS (*Model_Space + *Paper_Space) → ENTITIES → OBJECTS (root DICTIONARY)
+ *
+ * Group-code formatting matches AutoCAD output:
+ *   • codes right-aligned in 3-char field ("  0", " 10", "100")
+ *   • integer values right-aligned in 6-char field ("     1", "   256")
+ *   • float / string values written verbatim
  */
 function docToDxfString(doc: DxfJsonDocument): string {
   const out: string[] = []
-  const g = (code: number, value: string | number) => {
-    out.push(String(code))
-    out.push(String(value))
+
+  const push = (code: number, value: string | number) => {
+    out.push(String(code).padStart(3, ' '))
+    if (typeof value === 'number' && Number.isInteger(value)) {
+      out.push(String(value).padStart(6, ' '))
+    } else {
+      out.push(String(value))
+    }
   }
+
   const n = (v: number) => v.toFixed(8)
 
-  /* ── HEADER ── */
-  g(0, 'SECTION'); g(2, 'HEADER')
-  g(9, '$ACADVER');  g(1,  doc.meta?.acad_version ?? 'AC1015')
-  g(9, '$EXTMIN')
-  g(10, n(doc.meta?.extmin?.[0] ?? 0))
-  g(20, n(doc.meta?.extmin?.[1] ?? 0))
-  g(30, '0.0')
-  g(9, '$EXTMAX')
-  g(10, n(doc.meta?.extmax?.[0] ?? 0))
-  g(20, n(doc.meta?.extmax?.[1] ?? 0))
-  g(30, '0.0')
-  g(0, 'ENDSEC')
+  /* Fixed handle assignments (matching standard AutoCAD layout) */
+  const H_BLOCK_REC_TABLE  = '1'
+  const H_LAYER_TABLE      = '2'
+  const H_STYLE_TABLE      = '3'
+  const H_LTYPE_TABLE      = '5'
+  const H_VIEW_TABLE       = '6'
+  const H_UCS_TABLE        = '7'
+  const H_VPORT_TABLE      = '8'
+  const H_APPID_TABLE      = '9'
+  const H_DIMSTYLE_TABLE   = 'A'
+  const H_ROOT_DICT        = 'C'
+  const H_LAYER_0          = '10'
+  const H_LTYPE_BYBLOCK    = '14'
+  const H_LTYPE_BYLAYER    = '15'
+  const H_LTYPE_CONTINUOUS = '16'
+  const H_DIMSTYLE_STD     = '27'
+  const H_STYLE_STD        = '11'
+  const H_APPID_ACAD       = '12'
+  const H_VPORT_ACTIVE     = '94'
+  const H_MS_BLOCK_REC     = '1F'
+  const H_MS_BLOCK         = '20'
+  const H_MS_ENDBLK        = '21'
+  const H_MS_LAYOUT        = '22'
+  const H_PS_BLOCK_REC     = '58'
+  const H_PS_BLOCK         = '5A'
+  const H_PS_ENDBLK        = '5B'
+  const H_PS_LAYOUT        = '59'
 
-  /* ── ENTITIES ── */
-  g(0, 'SECTION'); g(2, 'ENTITIES')
+  let handleSeed = 0x300
+  const nextH = () => (handleSeed++).toString(16).toUpperCase()
+
+  const layerSet = new Set<string>()
+  for (const ln of doc.lines ?? [])     layerSet.add(ln.layer || '0')
+  for (const pl of doc.polylines ?? []) layerSet.add(pl.layer || '0')
+  for (const tx of doc.texts ?? [])     layerSet.add(tx.layer || '0')
+  for (const ar of doc.arcs ?? [])      layerSet.add(ar.layer || '0')
+  layerSet.add('0')
+  const layers = [...layerSet].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+
+  const extmin = doc.meta?.extmin ?? [0, 0, 0]
+  const extmax = doc.meta?.extmax ?? [1, 1, 0]
+  const cx = (extmin[0] + extmax[0]) / 2
+  const cy = (extmin[1] + extmax[1]) / 2
+  const vHeight = Math.max(1, extmax[1] - extmin[1])
+
+  /* ── HEADER ─────────────────────────────────────── */
+  push(0, 'SECTION'); push(2, 'HEADER')
+  push(9, '$ACADVER');   push(1, 'AC1015')
+  push(9, '$INSUNITS');  push(70, 6)
+  push(9, '$INSBASE');   push(10, 0); push(20, 0); push(30, 0)
+  push(9, '$EXTMIN');    push(10, n(extmin[0])); push(20, n(extmin[1])); push(30, '0.0')
+  push(9, '$EXTMAX');    push(10, n(extmax[0])); push(20, n(extmax[1])); push(30, '0.0')
+  push(9, '$LIMMIN');    push(10, 0); push(20, 0)
+  push(9, '$LIMMAX');    push(10, 50); push(20, 50)
+  push(9, '$ORTHOMODE'); push(70, 0)
+  push(9, '$LTSCALE');   push(40, '1.0')
+  push(9, '$TEXTSIZE');  push(40, '0.2')
+  push(9, '$TEXTSTYLE'); push(7, 'Standard')
+  push(9, '$CLAYER');    push(8, '0')
+  push(9, '$CELTYPE');   push(6, 'ByLayer')
+  push(9, '$CECOLOR');   push(62, 256)
+  push(9, '$DIMSCALE');  push(40, '1.0')
+  push(9, '$DIMSTYLE');  push(2, 'Standard')
+  push(0, 'ENDSEC')
+
+  /* ── TABLES ──────────────────────────────────────── */
+  push(0, 'SECTION'); push(2, 'TABLES')
+
+  push(0, 'TABLE'); push(2, 'VPORT')
+  push(5, H_VPORT_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 1)
+  push(0, 'VPORT'); push(5, H_VPORT_ACTIVE); push(330, H_VPORT_TABLE)
+  push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbViewportTableRecord')
+  push(2, '*Active'); push(70, 0)
+  push(10, 0); push(20, 0); push(11, 1); push(21, 1)
+  push(12, n(cx)); push(22, n(cy)); push(13, 0); push(23, 0)
+  push(14, 0.5); push(24, 0.5); push(15, 0.5); push(25, 0.5)
+  push(16, 0); push(26, 0); push(36, 1); push(17, 0); push(27, 0); push(37, 0)
+  push(40, n(vHeight)); push(41, '1.0'); push(42, '50.0'); push(43, 0); push(44, 0)
+  push(50, 0); push(51, 0); push(71, 0); push(72, 1000); push(73, 1); push(74, 3)
+  push(75, 0); push(76, 0); push(77, 0); push(78, 0)
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'LTYPE')
+  push(5, H_LTYPE_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 3)
+  for (const [h, name, desc] of [
+    [H_LTYPE_BYBLOCK, 'ByBlock', ''],
+    [H_LTYPE_BYLAYER, 'ByLayer', ''],
+    [H_LTYPE_CONTINUOUS, 'Continuous', 'Solid line'],
+  ] as const) {
+    push(0, 'LTYPE'); push(5, h); push(330, H_LTYPE_TABLE)
+    push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbLinetypeTableRecord')
+    push(2, name); push(70, 0); push(3, desc); push(72, 65); push(73, 0); push(40, 0)
+  }
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'LAYER')
+  push(5, H_LAYER_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, layers.length)
+  for (const layerName of layers) {
+    const h = layerName === '0' ? H_LAYER_0 : nextH()
+    push(0, 'LAYER'); push(5, h); push(330, H_LAYER_TABLE)
+    push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbLayerTableRecord')
+    push(2, layerName); push(70, 0); push(62, 7); push(6, 'Continuous')
+    push(370, -3); push(390, 'F')
+  }
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'STYLE')
+  push(5, H_STYLE_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 1)
+  push(0, 'STYLE'); push(5, H_STYLE_STD); push(330, H_STYLE_TABLE)
+  push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbTextStyleTableRecord')
+  push(2, 'Standard'); push(70, 0); push(40, 0); push(41, '1.0'); push(50, 0); push(71, 0); push(42, '0.2')
+  push(3, 'arial.ttf'); push(4, '')
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'VIEW')
+  push(5, H_VIEW_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 0)
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'UCS')
+  push(5, H_UCS_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 0)
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'APPID')
+  push(5, H_APPID_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 1)
+  push(0, 'APPID'); push(5, H_APPID_ACAD); push(330, H_APPID_TABLE)
+  push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbRegAppTableRecord')
+  push(2, 'ACAD'); push(70, 0)
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'DIMSTYLE')
+  push(5, H_DIMSTYLE_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 1)
+  push(0, 'DIMSTYLE'); push(5, H_DIMSTYLE_STD); push(330, H_DIMSTYLE_TABLE)
+  push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbDimStyleTableRecord')
+  push(2, 'Standard'); push(70, 0)
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'BLOCK_RECORD')
+  push(5, H_BLOCK_REC_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 2)
+  push(0, 'BLOCK_RECORD'); push(5, H_MS_BLOCK_REC); push(330, H_BLOCK_REC_TABLE)
+  push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbBlockTableRecord')
+  push(2, '*Model_Space'); push(340, H_MS_LAYOUT); push(70, 0); push(280, 1); push(281, 0)
+  push(0, 'BLOCK_RECORD'); push(5, H_PS_BLOCK_REC); push(330, H_BLOCK_REC_TABLE)
+  push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbBlockTableRecord')
+  push(2, '*Paper_Space'); push(340, H_PS_LAYOUT); push(70, 0); push(280, 1); push(281, 0)
+  push(0, 'ENDTAB')
+
+  push(0, 'ENDSEC')
+
+  /* ── BLOCKS ──────────────────────────────────────── */
+  push(0, 'SECTION'); push(2, 'BLOCKS')
+
+  push(0, 'BLOCK'); push(5, H_MS_BLOCK); push(330, H_MS_BLOCK_REC)
+  push(100, 'AcDbEntity'); push(8, '0')
+  push(100, 'AcDbBlockBegin')
+  push(2, '*Model_Space'); push(70, 0); push(10, 0); push(20, 0); push(30, 0)
+  push(3, '*Model_Space'); push(1, '')
+  push(0, 'ENDBLK'); push(5, H_MS_ENDBLK); push(330, H_MS_BLOCK_REC)
+  push(100, 'AcDbEntity'); push(8, '0'); push(100, 'AcDbBlockEnd')
+
+  push(0, 'BLOCK'); push(5, H_PS_BLOCK); push(330, H_PS_BLOCK_REC)
+  push(100, 'AcDbEntity'); push(67, 1); push(8, '0')
+  push(100, 'AcDbBlockBegin')
+  push(2, '*Paper_Space'); push(70, 0); push(10, 0); push(20, 0); push(30, 0)
+  push(3, '*Paper_Space'); push(1, '')
+  push(0, 'ENDBLK'); push(5, H_PS_ENDBLK); push(330, H_PS_BLOCK_REC)
+  push(100, 'AcDbEntity'); push(67, 1); push(8, '0'); push(100, 'AcDbBlockEnd')
+
+  push(0, 'ENDSEC')
+
+  /* ── ENTITIES ────────────────────────────────────── */
+  push(0, 'SECTION'); push(2, 'ENTITIES')
 
   for (const ln of doc.lines ?? []) {
-    g(0, 'LINE');  g(5, ln.handle);  g(8, ln.layer)
-    g(10, n(ln.start.x)); g(20, n(ln.start.y)); g(30, n(ln.start.z))
-    g(11, n(ln.end.x));   g(21, n(ln.end.y));   g(31, n(ln.end.z))
+    push(0, 'LINE')
+    push(5, nextH()); push(330, H_MS_BLOCK_REC)
+    push(100, 'AcDbEntity'); push(8, ln.layer || '0')
+    push(100, 'AcDbLine')
+    push(10, n(ln.start.x)); push(20, n(ln.start.y)); push(30, n(ln.start.z ?? 0))
+    push(11, n(ln.end.x));   push(21, n(ln.end.y));   push(31, n(ln.end.z ?? 0))
+  }
+
+  for (const ar of doc.arcs ?? []) {
+    push(0, 'ARC')
+    push(5, nextH()); push(330, H_MS_BLOCK_REC)
+    push(100, 'AcDbEntity'); push(8, ar.layer || '0')
+    push(100, 'AcDbCircle')
+    push(10, n(ar.center.x)); push(20, n(ar.center.y)); push(30, '0.0')
+    push(40, n(ar.radius))
+    push(100, 'AcDbArc')
+    push(50, n(ar.start_angle)); push(51, n(ar.end_angle))
   }
 
   for (const pl of doc.polylines ?? []) {
-    g(0, 'LWPOLYLINE');  g(5, pl.handle);  g(8, pl.layer)
-    g(90, pl.vertices.length)
-    g(70, pl.closed ? 1 : 0)
+    push(0, 'LWPOLYLINE')
+    push(5, nextH()); push(330, H_MS_BLOCK_REC)
+    push(100, 'AcDbEntity'); push(8, pl.layer || '0')
+    push(100, 'AcDbLwPolyline')
+    push(90, pl.vertices.length); push(70, pl.closed ? 1 : 0)
     for (const v of pl.vertices) {
-      g(10, n(v.x));  g(20, n(v.y))
-      if (v.bulge !== 0) g(42, n(v.bulge))
+      push(10, n(v.x)); push(20, n(v.y))
+      if (v.bulge !== 0) push(42, n(v.bulge))
     }
   }
 
   for (const tx of doc.texts ?? []) {
-    g(0, 'MTEXT');  g(5, tx.handle);  g(8, tx.layer)
-    g(10, n(tx.position.x));  g(20, n(tx.position.y));  g(30, n(tx.position.z))
-    g(40, n(tx.height))
-    /* DXF MTEXT uses \P as paragraph separator */
-    g(1, tx.text.replace(/\n/g, '\\P'))
+    push(0, 'MTEXT')
+    push(5, nextH()); push(330, H_MS_BLOCK_REC)
+    push(100, 'AcDbEntity'); push(8, tx.layer || '0')
+    push(100, 'AcDbMText')
+    push(10, n(tx.position.x)); push(20, n(tx.position.y)); push(30, '0.0')
+    push(40, n(tx.height))
+    push(41, '10.0')
+    push(46, '0.0')
+    push(71, 1)
+    push(72, 1)
+    push(1, tx.text.replace(/\n/g, '\\P'))
+    push(73, 1); push(44, '1.0')
   }
 
-  g(0, 'ENDSEC')
-  g(0, 'EOF')
+  push(0, 'ENDSEC')
+
+  /* ── OBJECTS ─────────────────────────────────────── */
+  push(0, 'SECTION'); push(2, 'OBJECTS')
+  push(0, 'DICTIONARY'); push(5, H_ROOT_DICT); push(330, 0)
+  push(100, 'AcDbDictionary'); push(281, 1)
+  push(3, 'ACAD_GROUP'); push(350, 'D')
+  push(0, 'ENDSEC')
+
+  push(0, 'EOF')
 
   return out.join('\n') + '\n'
 }
@@ -386,6 +613,27 @@ const toW = (cx: number, cy: number, t: T): [number, number] => [
   t.emin[1] + t.wH - (cy - t.oY) / t.sc,
 ]
 
+/**
+ * Generate canvas-space points for a DXF ARC (CCW, degrees).
+ * Handles arcs that wrap through 0° (end_angle < start_angle).
+ */
+function arcPoints(arc: DxfArc, t: T, steps = 48): number[] {
+  const startRad = arc.start_angle * Math.PI / 180
+  const endDeg = arc.end_angle > arc.start_angle ? arc.end_angle : arc.end_angle + 360
+  const endRad = endDeg * Math.PI / 180
+  const pts: number[] = []
+  for (let i = 0; i <= steps; i++) {
+    const angle = startRad + (endRad - startRad) * i / steps
+    const [cx, cy] = toC(
+      arc.center.x + arc.radius * Math.cos(angle),
+      arc.center.y + arc.radius * Math.sin(angle),
+      t,
+    )
+    pts.push(cx, cy)
+  }
+  return pts
+}
+
 /* ─── Polygon area (shoelace, world Y-up coords) ── */
 function polyArea(pts: Pt[]): number {
   let a = 0
@@ -565,10 +813,20 @@ export function DxfJsonViewPage() {
   const [snapEnabled, setSnapEnabled] = useState(true)
   const [showDetail, setShowDetail]   = useState(true)
   const [showLabels, setShowLabels]   = useState(true)
+  const [selectedArcHandle, setSelectedArcHandle] = useState<string | null>(null)
+  const [selectedWinKey, setSelectedWinKey]       = useState<string | null>(null)
+
+  /* Arc / circle drawing state machine */
+  const [arcDraftCenter,     setArcDraftCenter]     = useState<Pt | null>(null)
+  const [arcDraftRadius,     setArcDraftRadius]     = useState<number | null>(null)
+  const [arcDraftStartAngle, setArcDraftStartAngle] = useState<number | null>(null)
+  const [circleDraftCenter,  setCircleDraftCenter]  = useState<Pt | null>(null)
+  /** Live pointer position for arc/circle previews */
+  const [shapePointer, setShapePointer] = useState<Pt | null>(null)
 
   /* editor chrome (Synaps-style) */
   const [activeTool, setActiveTool] = useState<
-    'select' | 'hand' | 'frame' | 'drawLine' | 'drawPolyline' | 'text'
+    'select' | 'hand' | 'frame' | 'drawLine' | 'drawPolyline' | 'text' | 'drawArc' | 'drawCircle'
   >('select')
   const [units, setUnits] = useState<'m' | 'cm' | 'mm'>('m')
   const [strokeHex, setStrokeHex] = useState('#474747')
@@ -729,6 +987,57 @@ export function DxfJsonViewPage() {
     setDragDelta({ dx: 0, dy: 0 })
   }, [applyDrag])
 
+  /** Move an arc and all its associated door-frame lines by (dx, dy) in world metres. */
+  const moveArcAndLines = useCallback((arcHandle: string, dx: number, dy: number) => {
+    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return
+    const arcKey = arcHandle.replace(/^arc-/, '')
+    setPlanDoc(prev => ({
+      ...prev,
+      arcs: prev.arcs.map(a =>
+        a.handle !== arcHandle ? a : {
+          ...a,
+          center: { x: a.center.x + dx, y: a.center.y + dy, z: a.center.z },
+        },
+      ),
+      lines: prev.lines.map(l => {
+        if (!l.handle.startsWith(`dfl-${arcKey}`)) return l
+        return {
+          ...l,
+          start: { ...l.start, x: l.start.x + dx, y: l.start.y + dy },
+          end:   { ...l.end,   x: l.end.x   + dx, y: l.end.y   + dy },
+        }
+      }),
+    }))
+  }, [])
+
+  /** Move all window lines that belong to `winKey` by (dx, dy) in world metres. */
+  const moveWindowLines = useCallback((winKey: string, dx: number, dy: number) => {
+    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return
+    setPlanDoc(prev => ({
+      ...prev,
+      lines: prev.lines.map(l => {
+        if (!l.handle.startsWith(`win-${winKey}`)) return l
+        return {
+          ...l,
+          start: { ...l.start, x: l.start.x + dx, y: l.start.y + dy },
+          end:   { ...l.end,   x: l.end.x   + dx, y: l.end.y   + dy },
+        }
+      }),
+    }))
+  }, [])
+
+  /** Windows grouped by key (e.g. "u45") for dragging as a unit. */
+  const windowGroups = useMemo(() => {
+    const groups = new Map<string, DxfLine[]>()
+    for (const ln of planDoc.lines) {
+      if (!ln.handle.startsWith('win-')) continue
+      const key = ln.handle.replace(/^win-/, '').replace(/-\d+$/, '')
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key)!.push(ln)
+    }
+    return Array.from(groups.entries()).map(([key, lines]) => ({ key, lines }))
+  }, [planDoc.lines])
+
   const onRoomMoveDragStart = useCallback((e: Konva.KonvaEventObject<DragEvent>) => {
     if (selectedRoomIndex === null || activeDragRef.current) return
     const snapshotRooms = detectRooms(wallsBase)
@@ -871,6 +1180,9 @@ export function DxfJsonViewPage() {
     else if (activeTool === 'drawPolyline') {
       setPolylineHover(null)
     }
+    if (activeTool === 'drawArc' || activeTool === 'drawCircle') {
+      setShapePointer({ x: wx, y: wy })
+    }
   }, [activeTool, t, getSnap])
 
   const handleStageClick = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
@@ -933,10 +1245,60 @@ export function DxfJsonViewPage() {
       return
     }
 
+    if (activeTool === 'drawArc') {
+      if (!arcDraftCenter) {
+        setArcDraftCenter({ x: wx, y: wy })
+        setArcDraftRadius(null)
+        setArcDraftStartAngle(null)
+        return
+      }
+      const dx = wx - arcDraftCenter.x
+      const dy = wy - arcDraftCenter.y
+      const angle = Math.atan2(dy, dx) * (180 / Math.PI)
+      const radius = Math.hypot(dx, dy)
+      if (arcDraftRadius === null) {
+        if (radius < 0.01) return
+        setArcDraftRadius(radius)
+        setArcDraftStartAngle(angle)
+        return
+      }
+      /* Step 3 — commit arc */
+      let endAngle = angle
+      if (endAngle <= arcDraftStartAngle!) endAngle += 360
+      snapshot()
+      const { next } = appendUserArc(planDoc, arcDraftCenter, arcDraftRadius, arcDraftStartAngle!, endAngle)
+      setPlanDoc(next)
+      setArcDraftCenter(null)
+      setArcDraftRadius(null)
+      setArcDraftStartAngle(null)
+      setShapePointer(null)
+      setActiveTool('select')
+      return
+    }
+
+    if (activeTool === 'drawCircle') {
+      if (!circleDraftCenter) {
+        setCircleDraftCenter({ x: wx, y: wy })
+        return
+      }
+      const radius = Math.hypot(wx - circleDraftCenter.x, wy - circleDraftCenter.y)
+      if (radius < 0.01) return
+      snapshot()
+      const { next } = appendUserArc(planDoc, circleDraftCenter, radius, 0, 360)
+      setPlanDoc(next)
+      setCircleDraftCenter(null)
+      setShapePointer(null)
+      setActiveTool('select')
+      return
+    }
+
     setSelectedId(null)
     setSelectedRoomIndex(null)
     setSelectedTextHandle(null)
-  }, [activeTool, t, getSnap, planDoc, snapshot, setActiveTool])
+    setSelectedArcHandle(null)
+    setSelectedWinKey(null)
+  }, [activeTool, t, getSnap, planDoc, snapshot, setActiveTool,
+      arcDraftCenter, arcDraftRadius, arcDraftStartAngle, circleDraftCenter])
 
   const finishPolyline = useCallback(() => {
     const pts = polylineDraftRef.current
@@ -999,12 +1361,19 @@ export function DxfJsonViewPage() {
         setSelectedId(null)
         setSelectedRoomIndex(null)
         setSelectedTextHandle(null)
+        setSelectedArcHandle(null)
+        setSelectedWinKey(null)
         drawLineAnchorRef.current = null
         setDrawLineAnchor(null)
         setDrawLinePointer(null)
         polylineDraftRef.current = []
         setPolylineDraft([])
         setPolylineHover(null)
+        setArcDraftCenter(null)
+        setArcDraftRadius(null)
+        setArcDraftStartAngle(null)
+        setCircleDraftCenter(null)
+        setShapePointer(null)
       }
       if (e.code === 'Space' && !e.repeat) { e.preventDefault(); setSpaceHeld(true) }
     }
@@ -1089,12 +1458,14 @@ export function DxfJsonViewPage() {
         <main className="dxf-editor-main">
           <div className="dxf-main-tools" role="toolbar" aria-label="Editor tools">
             {([
-              { id: 'select' as const, label: 'Select' },
-              { id: 'hand' as const, label: 'Pan' },
-              { id: 'frame' as const, label: 'Frame' },
-              { id: 'drawLine' as const, label: 'Line' },
-              { id: 'drawPolyline' as const, label: 'Polyline' },
-              { id: 'text' as const, label: 'Text' },
+              { id: 'select'      as const, label: 'Select' },
+              { id: 'hand'        as const, label: 'Pan' },
+              { id: 'frame'       as const, label: 'Frame' },
+              { id: 'drawLine'    as const, label: 'Line' },
+              { id: 'drawPolyline'as const, label: 'Polyline' },
+              { id: 'drawArc'     as const, label: 'Arc' },
+              { id: 'drawCircle'  as const, label: 'Circle' },
+              { id: 'text'        as const, label: 'Text' },
             ]).map(({ id, label }) => (
               <button
                 key={id}
@@ -1112,12 +1483,23 @@ export function DxfJsonViewPage() {
                     setPolylineDraft([])
                     setPolylineHover(null)
                   }
+                  if (id !== 'drawArc') {
+                    setArcDraftCenter(null)
+                    setArcDraftRadius(null)
+                    setArcDraftStartAngle(null)
+                  }
+                  if (id !== 'drawCircle') {
+                    setCircleDraftCenter(null)
+                  }
+                  if (id !== 'drawArc' && id !== 'drawCircle') {
+                    setShapePointer(null)
+                  }
                   setActiveTool(id)
                 }}
               >
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                  {id === 'select' && <path d="M4 4l7 7-4 1-3-4z" />}
-                  {id === 'hand' && (
+                  {id === 'select'       && <path d="M4 4l7 7-4 1-3-4z" />}
+                  {id === 'hand'         && (
                     <>
                       <path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0" />
                       <path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2" />
@@ -1125,17 +1507,20 @@ export function DxfJsonViewPage() {
                       <path d="M18 11a2 2 0 1 1 4 0v5a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 19" />
                     </>
                   )}
-                  {id === 'frame' && <rect x="5" y="5" width="14" height="14" rx="1" />}
-                  {id === 'drawLine' && <path d="M3 21l4.5-4.5M12 3l6 6-9 9H3v-6l9-9z" />}
+                  {id === 'frame'        && <rect x="5" y="5" width="14" height="14" rx="1" />}
+                  {id === 'drawLine'     && <path d="M3 21l4.5-4.5M12 3l6 6-9 9H3v-6l9-9z" />}
                   {id === 'drawPolyline' && <path d="M4 16l4-6 4 5 4-8 4 6" />}
-                  {id === 'text' && <><path d="M4 6h16M10 6v14M14 6v14" /></>}
+                  {id === 'drawArc'      && <path d="M3 19 A10 10 0 0 1 21 19" />}
+                  {id === 'drawCircle'   && <circle cx="12" cy="12" r="9" />}
+                  {id === 'text'         && <><path d="M4 6h16M10 6v14M14 6v14" /></>}
                 </svg>
-                {(id === 'drawLine' || id === 'drawPolyline') && <span className="dxf-tool-caption">{label}</span>}
+                {(['drawLine','drawPolyline','drawArc','drawCircle'] as string[]).includes(id) &&
+                  <span className="dxf-tool-caption">{label}</span>}
               </button>
             ))}
           </div>
 
-          {(activeTool === 'drawLine' || activeTool === 'drawPolyline' || activeTool === 'text') && (
+          {(['drawLine','drawPolyline','drawArc','drawCircle','text'] as string[]).includes(activeTool) && (
             <p className="dxf-note" style={{ margin: '0 0 8px 0' }}>
               {activeTool === 'drawLine' && (
                 drawLineAnchor
@@ -1146,6 +1531,18 @@ export function DxfJsonViewPage() {
                 polylineDraft.length === 0
                   ? 'Polyline: each click adds a vertex. Turn on Close path if you want a loop, then Enter or Finish.'
                   : `Polyline: ${polylineDraft.length} vertex(ices). Enter or Finish to add to the plan; Esc cancels.`
+              )}
+              {activeTool === 'drawArc' && (
+                !arcDraftCenter
+                  ? 'Arc: click to place the center point.'
+                  : arcDraftRadius === null
+                    ? 'Arc: click to set the start angle and radius.'
+                    : 'Arc: click to set the end angle and place the arc (Esc cancels).'
+              )}
+              {activeTool === 'drawCircle' && (
+                !circleDraftCenter
+                  ? 'Circle: click to place the center point.'
+                  : 'Circle: click anywhere to set the radius and place the circle (Esc cancels).'
               )}
               {activeTool === 'text' && (
                 'Text: click empty space to place. Turn on Room labels if hidden. Select a label to move it, drag the blue handle to resize, or edit below.'
@@ -1174,7 +1571,7 @@ export function DxfJsonViewPage() {
                 ? 'crosshair'
                 : (activeTool === 'hand' || spaceHeld)
                   ? 'grab'
-                  : activeTool === 'drawLine' || activeTool === 'drawPolyline' || activeTool === 'text'
+                  : ['drawLine','drawPolyline','drawArc','drawCircle','text'].includes(activeTool)
                     ? 'crosshair'
                     : 'default',
             }}
@@ -1205,6 +1602,143 @@ export function DxfJsonViewPage() {
                     setSelectedRoomIndex(isRoomSel ? null : i)
                   }}
                 />
+                )
+              })}
+            </Layer>
+
+            {/* ── doors (arcs + frame lines) + windows — draggable in Select mode ── */}
+            <Layer listening={activeTool === 'select' && !spaceHeld}>
+
+              {/* ── Windows — grouped by key so they drag as one unit ── */}
+              {windowGroups.map(({ key, lines }) => {
+                const isSelWin = selectedWinKey === key
+                const winColor = isSelWin ? '#f59e0b' : strokeHex
+                const sw = (1.5 * strokeScale) / zoom
+                return (
+                  <Group
+                    key={`wingrp-${key}`}
+                    draggable
+                    onDragStart={e => {
+                      e.cancelBubble = true
+                      snapshot()
+                      setSelectedWinKey(key)
+                      setSelectedArcHandle(null)
+                      setSelectedId(null)
+                      setSelectedTextHandle(null)
+                      setSelectedRoomIndex(null)
+                    }}
+                    onDragEnd={e => {
+                      const dcx = e.target.x()
+                      const dcy = e.target.y()
+                      e.target.position({ x: 0, y: 0 })
+                      moveWindowLines(key, dcx / t.sc, -dcy / t.sc)
+                    }}
+                    onClick={e => {
+                      e.cancelBubble = true
+                      setSelectedId(null)
+                      setSelectedArcHandle(null)
+                      setSelectedTextHandle(null)
+                      setSelectedRoomIndex(null)
+                      setSelectedWinKey(isSelWin ? null : key)
+                    }}
+                    onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
+                    onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                  >
+                    {lines.map(ln => {
+                      const [x1, y1] = toC(ln.start.x, ln.start.y, t)
+                      const [x2, y2] = toC(ln.end.x, ln.end.y, t)
+                      return (
+                        <Line
+                          key={ln.handle}
+                          points={[x1, y1, x2, y2]}
+                          stroke={winColor}
+                          strokeWidth={sw}
+                          lineCap="round"
+                          hitStrokeWidth={10 / zoom}
+                        />
+                      )
+                    })}
+                  </Group>
+                )
+              })}
+
+              {/* ── Door arcs + associated frame lines ── */}
+              {planDoc.arcs.map((arc) => {
+                const isFullCircle = arc.end_angle - arc.start_angle >= 360
+                const isSelArc  = selectedArcHandle === arc.handle
+                const arcKey    = arc.handle.replace(/^arc-/, '')
+                const frameLines = planDoc.lines.filter(ln => ln.handle.startsWith(`dfl-${arcKey}`))
+                const arcColor  = isSelArc ? '#f59e0b' : strokeHex
+                const sw = (1.5 * strokeScale) / zoom
+                const [arcCx, arcCy] = toC(arc.center.x, arc.center.y, t)
+                const rCanvas = arc.radius * t.sc
+
+                return (
+                  <Group
+                    key={arc.handle}
+                    draggable
+                    onDragStart={e => {
+                      e.cancelBubble = true
+                      snapshot()
+                      setSelectedArcHandle(arc.handle)
+                      setSelectedWinKey(null)
+                      setSelectedId(null)
+                      setSelectedTextHandle(null)
+                      setSelectedRoomIndex(null)
+                    }}
+                    onDragEnd={e => {
+                      const dcx = e.target.x()
+                      const dcy = e.target.y()
+                      e.target.position({ x: 0, y: 0 })
+                      moveArcAndLines(arc.handle, dcx / t.sc, -dcy / t.sc)
+                    }}
+                    onClick={e => {
+                      e.cancelBubble = true
+                      setSelectedId(null)
+                      setSelectedWinKey(null)
+                      setSelectedTextHandle(null)
+                      setSelectedRoomIndex(null)
+                      setSelectedArcHandle(isSelArc ? null : arc.handle)
+                    }}
+                    onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
+                    onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                  >
+                    {/* arc sweep — or full circle */}
+                    {isFullCircle ? (
+                      <Circle
+                        x={arcCx} y={arcCy}
+                        radius={rCanvas}
+                        stroke={arcColor}
+                        strokeWidth={sw}
+                        fill="transparent"
+                        hitStrokeWidth={10 / zoom}
+                      />
+                    ) : (
+                      <Line
+                        points={arcPoints(arc, t)}
+                        stroke={arcColor}
+                        strokeWidth={sw}
+                        lineCap="round"
+                        lineJoin="round"
+                        hitStrokeWidth={10 / zoom}
+                      />
+                    )}
+                    {/* door frame lines */}
+                    {frameLines.map(ln => {
+                      const [x1, y1] = toC(ln.start.x, ln.start.y, t)
+                      const [x2, y2] = toC(ln.end.x, ln.end.y, t)
+                      return (
+                        <Line
+                          key={ln.handle}
+                          points={[x1, y1, x2, y2]}
+                          stroke={arcColor}
+                          strokeWidth={sw}
+                          lineCap="round"
+                          listening={false}
+                        />
+                      )
+                    })}
+                  </Group>
                 )
               })}
             </Layer>
@@ -1240,6 +1774,7 @@ export function DxfJsonViewPage() {
                         e.cancelBubble = true
                         setSelectedTextHandle(null)
                         setSelectedRoomIndex(null)
+                        setSelectedArcHandle(null)
                         if (activeTool !== 'select') return
                         setSelectedId(isSel ? null : wall.id)
                       }}
@@ -1434,6 +1969,80 @@ export function DxfJsonViewPage() {
                   />
                 </Group>
               )}
+
+              {/* ── Arc draw preview ── */}
+              {activeTool === 'drawArc' && shapePointer && arcDraftCenter && (() => {
+                const [cx, cy] = toC(arcDraftCenter.x, arcDraftCenter.y, t)
+                const [px, py] = toC(shapePointer.x, shapePointer.y, t)
+                const rawDx = shapePointer.x - arcDraftCenter.x
+                const rawDy = shapePointer.y - arcDraftCenter.y
+                const pAngle = Math.atan2(rawDy, rawDx) * (180 / Math.PI)
+                const pRadius = Math.hypot(rawDx, rawDy)
+
+                if (arcDraftRadius === null) {
+                  /* Phase 1: show radius line from center to pointer */
+                  return (
+                    <Group listening={false}>
+                      <Circle x={cx} y={cy} radius={5 / zoom} fill="#3b82f6" />
+                      <Line points={[cx, cy, px, py]} stroke="#3b82f6" strokeWidth={1.5 / zoom} dash={[6 / zoom, 4 / zoom]} />
+                      <Text x={px + 6 / zoom} y={py - 10 / zoom} text={fmtLen(pRadius)} fill="#3b82f6" fontSize={11 / zoom} listening={false} />
+                    </Group>
+                  )
+                }
+                /* Phase 2: show arc sweep from start angle to pointer angle */
+                let endAngle = pAngle
+                if (endAngle <= arcDraftStartAngle!) endAngle += 360
+                const previewArc: DxfArc = {
+                  entity_type: 'ARC', handle: '__preview__', layer: '0',
+                  center: { x: arcDraftCenter.x, y: arcDraftCenter.y, z: 0 }, radius: arcDraftRadius,
+                  start_angle: arcDraftStartAngle!, end_angle: endAngle,
+                }
+                return (
+                  <Group listening={false}>
+                    <Circle x={cx} y={cy} radius={5 / zoom} fill="#3b82f6" />
+                    <Line
+                      points={arcPoints(previewArc, t, 64)}
+                      stroke="#3b82f6" strokeWidth={1.5 / zoom}
+                      lineCap="round" lineJoin="round"
+                      dash={[6 / zoom, 4 / zoom]}
+                    />
+                  </Group>
+                )
+              })()}
+              {activeTool === 'drawArc' && !arcDraftCenter && shapePointer && (() => {
+                /* No center yet — just show crosshair dot at pointer */
+                const [px, py] = toC(shapePointer.x, shapePointer.y, t)
+                return <Circle x={px} y={py} radius={5 / zoom} fill="#3b82f6" listening={false} />
+              })()}
+
+              {/* ── Circle draw preview ── */}
+              {activeTool === 'drawCircle' && shapePointer && (() => {
+                if (!circleDraftCenter) {
+                  const [px, py] = toC(shapePointer.x, shapePointer.y, t)
+                  return <Circle x={px} y={py} radius={5 / zoom} fill="#3b82f6" listening={false} />
+                }
+                const [cx, cy] = toC(circleDraftCenter.x, circleDraftCenter.y, t)
+                const radius = Math.hypot(shapePointer.x - circleDraftCenter.x, shapePointer.y - circleDraftCenter.y)
+                if (radius < 0.01) return null
+                return (
+                  <Group listening={false}>
+                    <Circle x={cx} y={cy} radius={5 / zoom} fill="#3b82f6" />
+                    <Circle
+                      x={cx} y={cy}
+                      radius={radius * t.sc}
+                      stroke="#3b82f6" strokeWidth={1.5 / zoom}
+                      fill="transparent"
+                      dash={[6 / zoom, 4 / zoom]}
+                    />
+                    <Text
+                      x={cx + radius * t.sc / Math.SQRT2 + 4 / zoom}
+                      y={cy - radius * t.sc / Math.SQRT2 - 14 / zoom}
+                      text={`r = ${fmtLen(radius)}`}
+                      fill="#3b82f6" fontSize={11 / zoom} listening={false}
+                    />
+                  </Group>
+                )
+              })()}
 
             </Layer>
 

@@ -55,6 +55,9 @@ export function wallsFromDxfJson(doc: DxfJsonDocument): WallSeg[] {
   const ws: WallSeg[] = []
 
   for (const ln of doc.lines) {
+    /* Door-frame lines (dfl-*) and window lines (win-*) are rendered in the
+       dedicated arc/door layer, not as editable wall segments. */
+    if (ln.handle.startsWith('dfl-') || ln.handle.startsWith('win-')) continue
     const len = Math.hypot(ln.end.x - ln.start.x, ln.end.y - ln.start.y)
     if (len < 0.01) continue
     ws.push({

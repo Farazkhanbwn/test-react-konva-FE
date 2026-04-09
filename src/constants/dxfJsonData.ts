@@ -45,6 +45,16 @@ export interface DxfText {
   height: number;
 }
 
+export interface DxfArc {
+  entity_type: "ARC";
+  handle: string;
+  layer: string;
+  center: DxfPoint;
+  radius: number;
+  start_angle: number;
+  end_angle: number;
+}
+
 export interface DxfJsonDocument {
   source_file: string;
   meta: {
@@ -61,7 +71,7 @@ export interface DxfJsonDocument {
     total_vertex_count: number;
   };
   lines: DxfLine[];
-  arcs: unknown[];
+  arcs: DxfArc[];
   polylines: DxfPolyline[];
   texts: DxfText[];
 }
@@ -2780,13 +2790,14 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
   },
   stats: {
     entity_counts: {
-      LINE: 40,
+      LINE: 55,
       MTEXT: 8,
+      ARC: 6,
       INSERT: 7,
     },
     polyline_count: 0,
-    line_count: 40,
-    arc_count: 0,
+    line_count: 55,
+    arc_count: 6,
     text_count: 8,
     total_vertex_count: 0,
   },
@@ -3391,8 +3402,121 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
         z: 0.0,
       },
     },
+    /* ── Door-frame lines resolved from INSERT+block (flattened to world space) ─ */
+    // Door *U19 (rot=270°) – left jamb
+    { entity_type: "LINE", handle: "dfl-u19-1", layer: "0",
+      start: { x: 3.451493532527252, y: -0.750353888159623, z: 0.0 },
+      end:   { x: 3.603893532527252, y: -0.750353888159623, z: 0.0 } },
+    // Door *U19 (rot=270°) – right jamb
+    { entity_type: "LINE", handle: "dfl-u19-2", layer: "0",
+      start: { x: 3.451493532527252, y: -1.360153888159623, z: 0.0 },
+      end:   { x: 3.603893532527252, y: -1.360153888159623, z: 0.0 } },
+
+    // Door *U27-A (rot=0°) – left jamb
+    { entity_type: "LINE", handle: "dfl-u27a-1", layer: "0",
+      start: { x: 13.1499370087851, y: 4.033685732015, z: 0.0 },
+      end:   { x: 13.1499370087851, y: 3.932085732015, z: 0.0 } },
+    // Door *U27-A (rot=0°) – right jamb
+    { entity_type: "LINE", handle: "dfl-u27a-2", layer: "0",
+      start: { x: 12.5403370087851, y: 4.033685732015, z: 0.0 },
+      end:   { x: 12.5403370087851, y: 3.932085732015, z: 0.0 } },
+
+    // Door *U27-B (rot=0°) – left jamb
+    { entity_type: "LINE", handle: "dfl-u27b-1", layer: "0",
+      start: { x: 1.77184402002289, y: 4.07048327746712, z: 0.0 },
+      end:   { x: 1.77184402002289, y: 3.96888327746712, z: 0.0 } },
+    // Door *U27-B (rot=0°) – right jamb
+    { entity_type: "LINE", handle: "dfl-u27b-2", layer: "0",
+      start: { x: 1.16224402002289, y: 4.07048327746712, z: 0.0 },
+      end:   { x: 1.16224402002289, y: 3.96888327746712, z: 0.0 } },
+
+    // Door *U27-C (rot=0°) – left jamb
+    { entity_type: "LINE", handle: "dfl-u27c-1", layer: "0",
+      start: { x: 5.27847380376647, y: 4.8967965649563, z: 0.0 },
+      end:   { x: 5.27847380376647, y: 4.7951965649563, z: 0.0 } },
+    // Door *U27-C (rot=0°) – right jamb
+    { entity_type: "LINE", handle: "dfl-u27c-2", layer: "0",
+      start: { x: 4.66887380376647, y: 4.8967965649563, z: 0.0 },
+      end:   { x: 4.66887380376647, y: 4.7951965649563, z: 0.0 } },
+
+    // Door *U27-D (rot=0°) – left jamb
+    { entity_type: "LINE", handle: "dfl-u27d-1", layer: "0",
+      start: { x: 8.551014477021, y: 4.0467965649563, z: 0.0 },
+      end:   { x: 8.551014477021, y: 3.9451965649563, z: 0.0 } },
+    // Door *U27-D (rot=0°) – right jamb
+    { entity_type: "LINE", handle: "dfl-u27d-2", layer: "0",
+      start: { x: 7.941414477021, y: 4.0467965649563, z: 0.0 },
+      end:   { x: 7.941414477021, y: 3.9451965649563, z: 0.0 } },
+
+    // Door *U40 (rot=270°) – left jamb
+    { entity_type: "LINE", handle: "dfl-u40-1", layer: "0",
+      start: { x: 11.5693336730504, y: -0.721320489705647, z: 0.0 },
+      end:   { x: 11.4169336730504, y: -0.721320489705647, z: 0.0 } },
+    // Door *U40 (rot=270°) – right jamb
+    { entity_type: "LINE", handle: "dfl-u40-2", layer: "0",
+      start: { x: 11.5693336730504, y: -1.330920489705647, z: 0.0 },
+      end:   { x: 11.4169336730504, y: -1.330920489705647, z: 0.0 } },
+
+    /* ── Window lines resolved from *U45 INSERT ────────────────────────────── */
+    // Window *U45 – INSERT at (1.562330, 7.237460) scale=0.001 rot=0°
+    // Left sill line
+    { entity_type: "LINE", handle: "win-u45-1", layer: "0",
+      start: { x: 1.562330223185540, y: 7.387459516490110, z: 0.0 },
+      end:   { x: 1.562330223185540, y: 7.237459516490110, z: 0.0 } },
+    // Right sill line
+    { entity_type: "LINE", handle: "win-u45-2", layer: "0",
+      start: { x: 2.462330223185540, y: 7.387459516490110, z: 0.0 },
+      end:   { x: 2.462330223185540, y: 7.237459516490110, z: 0.0 } },
+    // Middle sill line
+    { entity_type: "LINE", handle: "win-u45-3", layer: "0",
+      start: { x: 1.562330223185540, y: 7.312459516490110, z: 0.0 },
+      end:   { x: 2.462330223185540, y: 7.312459516490110, z: 0.0 } },
   ],
-  arcs: [],
+  arcs: [
+    /* ── Doors – arcs resolved from INSERT+block geometry ──────────────────
+     * Each arc is computed by applying the INSERT's (position, scale, rotation)
+     * to the single visible ARC entity inside the referenced dynamic block.
+     * Block units are inches; scale = 0.0254 → metres.
+     * Angles are in degrees, CCW from positive X, matching AutoCAD convention.
+     * ─────────────────────────────────────────────────────────────────────── */
+
+    // Door *U19 – INSERT at (3.451, -0.750) rot=270°  → arc sweeps 180°→270°
+    {
+      entity_type: "ARC", handle: "arc-u19", layer: "0",
+      center: { x: 3.451493532527252, y: -0.750353888159623, z: 0.0 },
+      radius: 0.6096, start_angle: 180.0, end_angle: 270.0,
+    },
+    // Door *U27 – INSERT at (13.150, 4.034) rot=0°  → arc sweeps 90°→180°
+    {
+      entity_type: "ARC", handle: "arc-u27a", layer: "0",
+      center: { x: 13.1499370087851, y: 4.033685732015, z: 0.0 },
+      radius: 0.6096, start_angle: 90.0, end_angle: 180.0,
+    },
+    // Door *U27 – INSERT at (1.772, 4.070) rot=0°
+    {
+      entity_type: "ARC", handle: "arc-u27b", layer: "0",
+      center: { x: 1.77184402002289, y: 4.07048327746712, z: 0.0 },
+      radius: 0.6096, start_angle: 90.0, end_angle: 180.0,
+    },
+    // Door *U27 – INSERT at (5.278, 4.897) rot=0°
+    {
+      entity_type: "ARC", handle: "arc-u27c", layer: "0",
+      center: { x: 5.27847380376647, y: 4.8967965649563, z: 0.0 },
+      radius: 0.6096, start_angle: 90.0, end_angle: 180.0,
+    },
+    // Door *U27 – INSERT at (8.551, 4.047) rot=0°
+    {
+      entity_type: "ARC", handle: "arc-u27d", layer: "0",
+      center: { x: 8.551014477021, y: 4.0467965649563, z: 0.0 },
+      radius: 0.6096, start_angle: 90.0, end_angle: 180.0,
+    },
+    // Door *U40 – INSERT at (11.569, -0.721) rot=270°  → arc sweeps 270°→0°
+    {
+      entity_type: "ARC", handle: "arc-u40", layer: "0",
+      center: { x: 11.5693336730504, y: -0.721320489705647, z: 0.0 },
+      radius: 0.6096, start_angle: 270.0, end_angle: 0.0,
+    },
+  ],
   polylines: [],
   texts: [
     {
