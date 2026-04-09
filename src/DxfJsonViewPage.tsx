@@ -44,11 +44,11 @@ import {
   type DxfText,
 } from '@/constants/dxfJsonData'
 import type { WallSeg } from '@/utils/wallsFromDxfJson'
-import { wallsFromDxfJson, sortPolylineVertices, wallSegsFromPolyline } from '@/utils/wallsFromDxfJson'
 import {
   arcHandleFromArcSegWallId,
   isDoorStyleArc,
   wallSegsFromArc,
+  sortPolylineVertices,
   wallSegsFromPolyline,
   wallsFromDxfJson,
 } from '@/utils/wallsFromDxfJson'
@@ -1269,6 +1269,20 @@ export function DxfJsonViewPage() {
         }
       }
       return w
+    })
+  }, [])
+
+  const applyPolylineDrag = useCallback((ws: WallSeg[], drag: ActivePolylineDrag, delta: { dx: number; dy: number }): WallSeg[] => {
+    const { dx, dy } = delta
+    const orig = new Map(drag.segments.map(s => [s.id, s] as const))
+    return ws.map(w => {
+      const seg = orig.get(w.id)
+      if (!seg) return w
+      return {
+        ...w,
+        start: { x: seg.origStart.x + dx, y: seg.origStart.y + dy },
+        end: { x: seg.origEnd.x + dx, y: seg.origEnd.y + dy },
+      }
     })
   }, [])
 
