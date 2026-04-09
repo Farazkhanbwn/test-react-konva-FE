@@ -15,6 +15,49 @@ export interface WallSeg {
 const DETAIL_LEN_M = 1.5
 
 /**
+ * Given an array of WallSegs that all share the same groupId, returns them
+ * in chain order so that each segment's end point connects to the next
+ * segment's start point.  Segments are flipped (start↔end swapped) when
+ * needed to maintain connectivity.  Any disconnected tail is appended as-is.
+ *
+ * This is required before DXF export so grouped walls become a valid
+ * LWPOLYLINE (ordered vertex list) rather than an unordered bag of edges.
+ */
+export function sortPolylineVertices(walls: WallSeg[]): WallSeg[] {
+  if (walls.length <= 1) return [...walls]
+  const THRESH = 0.01
+  const near = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+    Math.abs(a.x - b.x) < THRESH && Math.abs(a.y - b.y) < THRESH
+
+  const remaining = [...walls]
+  const chain: WallSeg[] = [remaining.splice(0, 1)[0]]
+
+  while (remaining.length > 0) {
+    const tail = chain[chain.length - 1].end
+    let matched = false
+    for (let i = 0; i < remaining.length; i++) {
+      if (near(remaining[i].start, tail)) {
+        chain.push(remaining.splice(i, 1)[0])
+        matched = true
+        break
+      }
+      if (near(remaining[i].end, tail)) {
+        // segment is backwards — flip it
+        const w = remaining.splice(i, 1)[0]
+        chain.push({ ...w, start: w.end, end: w.start })
+        matched = true
+        break
+      }
+    }
+    if (!matched) {
+      // gap in chain — append the rest as-is (export will still work, just not closed)
+      chain.push(...remaining.splice(0))
+    }
+  }
+  return chain
+}
+
+/**
  * Build editable wall segments from a `DxfJsonDocument`.
  * Same shape your backend should return (or a subset) so the canvas stays in sync.
  */

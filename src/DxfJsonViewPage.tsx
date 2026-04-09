@@ -34,6 +34,7 @@ import polygonClipping from 'polygon-clipping'
 import { DXF_JSON_DATA, type DxfJsonDocument } from '@/constants/dxfJsonData'
 import type { WallSeg } from '@/utils/wallsFromDxfJson'
 import { wallsFromDxfJson } from '@/utils/wallsFromDxfJson'
+import { downloadDxf } from '@/utils/exportToDxf'
 
 /* ─── Types ──────────────────────────────────────── */
 interface Pt { x: number; y: number }
@@ -1729,19 +1730,18 @@ export function DxfJsonViewPage() {
                  screenX = stageLocalX * zoom + pos.x
                  screenY = stageLocalY * zoom + pos.y                              */}
           {effectiveSelBBox && selectedIds.size > 0 && activeTool === 'select' && !activeDrag && (() => {
-            // Convert canvas-local bbox corners to screen pixels
-            const toS = (cx: number, cy: number) => ({
-              x: cx * zoom + pos.x,
-              y: cy * zoom + pos.y,
-            })
+            /* ── All drawing is in canvas-local (pre-zoom) coordinates ──
+               The <g> transform mirrors the Konva Stage transform exactly:
+                 translate(pos.x, pos.y) scale(zoom)
+               so any canvas-local point (cx, cy) lands at the same screen
+               pixel as the corresponding Konva element.  Fixed-size items
+               (stroke widths, text, arrow heads) use /zoom to counteract
+               the scale so they stay a constant screen size.              */
             const { minCX, minCY, maxCX, maxCY } = effectiveSelBBox
-            const PAD_PX = 6                 // fixed screen pixels (no /zoom needed)
-            const sNW = toS(minCX, minCY)
-            const sSE = toS(maxCX, maxCY)
-            const rX  = sNW.x - PAD_PX
-            const rY  = sNW.y - PAD_PX
-            const rW  = sSE.x - sNW.x + PAD_PX * 2
-            const rH  = sSE.y - sNW.y + PAD_PX * 2
+            const pad = 6 / zoom          // canvas-local padding
+            const rX = minCX - pad, rY = minCY - pad
+            const rW = (maxCX - minCX) + pad * 2
+            const rH = (maxCY - minCY) + pad * 2
 
             // World-space dimensions for label text
             const selWalls = effectiveWalls.filter(ww => selectedIds.has(ww.id))
@@ -1757,35 +1757,32 @@ export function DxfJsonViewPage() {
             const dimWLabel = fmtLen(dimW)
             const dimHLabel = fmtLen(dimH)
 
-            // Fixed screen-pixel sizes — never scaled by zoom
-            const DIM_OFFSET = 22   // gap between bbox edge and dim line
-            const TICK       = 5    // extension line overshoot
-            const ARROW_SZ   = 6    // arrowhead size
-            const FS         = 11   // font size px
-            const LBL_PAD    = 4    // label horizontal padding
+            // Canvas-local sizes that appear as fixed screen pixels
+            const DIM_OFFSET = 22 / zoom
+            const TICK       = 5  / zoom
+            const ARROW_SZ   = 6  / zoom
+            const FS         = 11 / zoom
+            const LBL_PAD    = 4  / zoom
+            const SW         = 1  / zoom   // stroke width
+            const DASH       = `${5/zoom},${3/zoom}`
 
-            // Width dim (below selection)
             const wDimY = rY + rH + DIM_OFFSET
             const wMidX = rX + rW / 2
-
-            // Height dim (right of selection)
             const hDimX = rX + rW + DIM_OFFSET
             const hMidY = rY + rH / 2
 
-            // Arrow path builder — returns SVG path 'd' string for one arrowhead
             const arrowPath = (tipX: number, tipY: number, fromX: number, fromY: number) => {
               const angle = Math.atan2(tipY - fromY, tipX - fromX)
-              const p1x = tipX - ARROW_SZ * Math.cos(angle - 0.35)
-              const p1y = tipY - ARROW_SZ * Math.sin(angle - 0.35)
-              const p2x = tipX - ARROW_SZ * Math.cos(angle + 0.35)
-              const p2y = tipY - ARROW_SZ * Math.sin(angle + 0.35)
-              return `M${p1x},${p1y} L${tipX},${tipY} L${p2x},${p2y}`
+              return [
+                `M${tipX - ARROW_SZ * Math.cos(angle - 0.35)},${tipY - ARROW_SZ * Math.sin(angle - 0.35)}`,
+                `L${tipX},${tipY}`,
+                `L${tipX - ARROW_SZ * Math.cos(angle + 0.35)},${tipY - ARROW_SZ * Math.sin(angle + 0.35)}`,
+              ].join(' ')
             }
 
             const lblW  = dimWLabel.length * FS * 0.6 + LBL_PAD * 2
-            const lblH  = FS * 1.5
             const hlblW = dimHLabel.length * FS * 0.6 + LBL_PAD * 2
-            const hlblH = FS * 1.5
+            const lblH  = FS * 1.5
 
             return (
               <svg
@@ -1795,64 +1792,48 @@ export function DxfJsonViewPage() {
                   pointerEvents: 'none', overflow: 'visible',
                 }}
               >
-                {/* dashed selection rect */}
-                <rect
-                  x={rX} y={rY} width={rW} height={rH}
-                  fill="none" stroke="#3b82f6" strokeWidth={1}
-                  strokeDasharray="5,3"
-                />
-
-                {/* ── Width dimension (below bbox) ── */}
-                {dimW > 0.01 && <>
-                  {/* extension lines */}
-                  <line x1={rX} y1={rY + rH} x2={rX} y2={wDimY + TICK} stroke="#64748b" strokeWidth={0.8} />
-                  <line x1={rX + rW} y1={rY + rH} x2={rX + rW} y2={wDimY + TICK} stroke="#64748b" strokeWidth={0.8} />
-                  {/* dimension line */}
-                  <line x1={rX} y1={wDimY} x2={rX + rW} y2={wDimY} stroke="#64748b" strokeWidth={1} />
-                  {/* arrowheads */}
-                  <path d={arrowPath(rX, wDimY, rX + rW, wDimY)} stroke="#64748b" strokeWidth={1} fill="none" />
-                  <path d={arrowPath(rX + rW, wDimY, rX, wDimY)} stroke="#64748b" strokeWidth={1} fill="none" />
-                  {/* label background */}
+                {/* Mirror the Stage transform: translate by pos then scale by zoom.
+                    Everything inside is drawn in canvas-local coordinates. */}
+                <g transform={`translate(${pos.x},${pos.y}) scale(${zoom})`}>
+                  {/* dashed selection rect */}
                   <rect
-                    x={wMidX - lblW / 2} y={wDimY - lblH / 2}
-                    width={lblW} height={lblH}
-                    fill="white" rx={2}
+                    x={rX} y={rY} width={rW} height={rH}
+                    fill="none" stroke="#3b82f6" strokeWidth={SW}
+                    strokeDasharray={DASH}
                   />
-                  {/* label text */}
-                  <text
-                    x={wMidX} y={wDimY + FS * 0.35}
-                    textAnchor="middle" fontSize={FS}
-                    fill="#1e40af" fontWeight="bold"
-                    fontFamily="system-ui,-apple-system,'Segoe UI',sans-serif"
-                  >{dimWLabel}</text>
-                </>}
 
-                {/* ── Height dimension (right of bbox) ── */}
-                {dimH > 0.01 && <>
-                  {/* extension lines */}
-                  <line x1={rX + rW} y1={rY} x2={hDimX + TICK} y2={rY} stroke="#64748b" strokeWidth={0.8} />
-                  <line x1={rX + rW} y1={rY + rH} x2={hDimX + TICK} y2={rY + rH} stroke="#64748b" strokeWidth={0.8} />
-                  {/* dimension line */}
-                  <line x1={hDimX} y1={rY} x2={hDimX} y2={rY + rH} stroke="#64748b" strokeWidth={1} />
-                  {/* arrowheads */}
-                  <path d={arrowPath(hDimX, rY, hDimX, rY + rH)} stroke="#64748b" strokeWidth={1} fill="none" />
-                  <path d={arrowPath(hDimX, rY + rH, hDimX, rY)} stroke="#64748b" strokeWidth={1} fill="none" />
-                  {/* label background (rotated) */}
-                  <rect
-                    x={hDimX - hlblH / 2} y={hMidY - hlblW / 2}
-                    width={hlblH} height={hlblW}
-                    fill="white" rx={2}
-                    transform={`rotate(-90 ${hDimX} ${hMidY})`}
-                  />
-                  {/* label text (rotated) */}
-                  <text
-                    x={hDimX} y={hMidY + FS * 0.35}
-                    textAnchor="middle" fontSize={FS}
-                    fill="#1e40af" fontWeight="bold"
-                    fontFamily="system-ui,-apple-system,'Segoe UI',sans-serif"
-                    transform={`rotate(-90 ${hDimX} ${hMidY})`}
-                  >{dimHLabel}</text>
-                </>}
+                  {/* ── Width dimension (below bbox) ── */}
+                  {dimW > 0.01 && <>
+                    <line x1={rX} y1={rY + rH} x2={rX} y2={wDimY + TICK} stroke="#64748b" strokeWidth={SW * 0.8} />
+                    <line x1={rX + rW} y1={rY + rH} x2={rX + rW} y2={wDimY + TICK} stroke="#64748b" strokeWidth={SW * 0.8} />
+                    <line x1={rX} y1={wDimY} x2={rX + rW} y2={wDimY} stroke="#64748b" strokeWidth={SW} />
+                    <path d={arrowPath(rX, wDimY, rX + rW, wDimY)} stroke="#64748b" strokeWidth={SW} fill="none" />
+                    <path d={arrowPath(rX + rW, wDimY, rX, wDimY)} stroke="#64748b" strokeWidth={SW} fill="none" />
+                    <rect x={wMidX - lblW / 2} y={wDimY - lblH / 2} width={lblW} height={lblH} fill="white" rx={2 / zoom} />
+                    <text x={wMidX} y={wDimY + FS * 0.35} textAnchor="middle" fontSize={FS} fill="#1e40af" fontWeight="bold" fontFamily="system-ui,-apple-system,'Segoe UI',sans-serif">{dimWLabel}</text>
+                  </>}
+
+                  {/* ── Height dimension (right of bbox) ── */}
+                  {dimH > 0.01 && <>
+                    <line x1={rX + rW} y1={rY} x2={hDimX + TICK} y2={rY} stroke="#64748b" strokeWidth={SW * 0.8} />
+                    <line x1={rX + rW} y1={rY + rH} x2={hDimX + TICK} y2={rY + rH} stroke="#64748b" strokeWidth={SW * 0.8} />
+                    <line x1={hDimX} y1={rY} x2={hDimX} y2={rY + rH} stroke="#64748b" strokeWidth={SW} />
+                    <path d={arrowPath(hDimX, rY, hDimX, rY + rH)} stroke="#64748b" strokeWidth={SW} fill="none" />
+                    <path d={arrowPath(hDimX, rY + rH, hDimX, rY)} stroke="#64748b" strokeWidth={SW} fill="none" />
+                    <rect
+                      x={hDimX - lblH / 2} y={hMidY - hlblW / 2}
+                      width={lblH} height={hlblW}
+                      fill="white" rx={2 / zoom}
+                      transform={`rotate(-90,${hDimX},${hMidY})`}
+                    />
+                    <text
+                      x={hDimX} y={hMidY + FS * 0.35}
+                      textAnchor="middle" fontSize={FS} fill="#1e40af" fontWeight="bold"
+                      fontFamily="system-ui,-apple-system,'Segoe UI',sans-serif"
+                      transform={`rotate(-90,${hDimX},${hMidY})`}
+                    >{dimHLabel}</text>
+                  </>}
+                </g>
               </svg>
             )
           })()}
@@ -1917,6 +1898,12 @@ export function DxfJsonViewPage() {
               Ortho Mode (O)
             </label>
             <button className="dxf-action-btn" onClick={undo} disabled={!history.length}>Undo</button>
+            <button
+              type="button"
+              className="dxf-action-btn"
+              onClick={() => downloadDxf(walls, planDoc.texts)}
+              title="Export current plan as DXF (opens in AutoCAD, LibreCAD, etc.)"
+            >Export DXF</button>
             <button
               type="button"
               className="dxf-action-btn"
