@@ -23,6 +23,7 @@
  *                   pulled; other walls stay fixed).
  * • Room detection – recalculated live after every edit via useMemo.
  * • Undo (Ctrl-Z) – 20-step stack; Delete/Backspace removes selected wall.
+ * • Resize handles – scale selected items while maintaining relative positions.
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -41,7 +42,8 @@ interface Pt { x: number; y: number }
 const PAD = 55
 const STAGE_MIN_W = 320
 const STAGE_MIN_H = 280
-const SNAP_TH = 0.15   // world metres — snap threshold
+const SNAP_TH     = 0.15   // world metres — endpoint snap threshold
+const SNAP_LINE_TH = 0.25  // world metres — snap-to-line threshold (slightly wider)
 const HP_SCR  = 5      // endpoint handle radius in screen px
 const ROOM_COLORS = [
   'rgba(59,130,246,0.15)',
@@ -110,6 +112,51 @@ function applyRotation(ws: WallSeg[], ids: Set<string>, cx: number, cy: number, 
   })
 }
 
+/* ─── Resize helpers ────────────────────────────── */
+/** Scale point around center */
+function scalePoint(px: number, py: number, cx: number, cy: number, sx: number, sy: number): [number, number] {
+  return [cx + (px - cx) * sx, cy + (py - cy) * sy]
+}
+
+/** Apply scale to selected walls */
+function applyScale(ws: WallSeg[], ids: Set<string>, cx: number, cy: number, sx: number, sy: number): WallSeg[] {
+  if (sx === 1 && sy === 1) return ws
+  return ws.map(w => {
+    if (!ids.has(w.id)) return w
+    const [startX, startY] = scalePoint(w.start.x, w.start.y, cx, cy, sx, sy)
+    const [endX, endY] = scalePoint(w.end.x, w.end.y, cx, cy, sx, sy)
+    return { ...w, start: { x: startX, y: startY }, end: { x: endX, y: endY } }
+  })
+}
+
+/**
+ * Returns the closest point on segment (ax,ay)→(bx,by) to (px,py),
+ * and the parametric t ∈ [0,1] along the segment.
+ */
+function closestPointOnSegment(
+  px: number, py: number,
+  ax: number, ay: number,
+  bx: number, by: number,
+): { pt: { x: number; y: number }; t: number; dist: number } {
+  const dx = bx - ax, dy = by - ay
+  const lenSq = dx * dx + dy * dy
+  if (lenSq < 1e-12) return { pt: { x: ax, y: ay }, t: 0, dist: Math.hypot(px - ax, py - ay) }
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq))
+  const cx = ax + t * dx, cy = ay + t * dy
+  return { pt: { x: cx, y: cy }, t, dist: Math.hypot(px - cx, py - cy) }
+}
+
+/**
+ * Returns all wall IDs that belong to the same group as `wallId`.
+ * If the wall has no groupId, returns `[wallId]` (just itself).
+ */
+function getGroupWallIds(wallId: string, walls: WallSeg[]): string[] {
+  const target = walls.find(w => w.id === wallId)
+  if (!target?.groupId) return [wallId]
+  const gid = target.groupId
+  return walls.filter(w => w.groupId === gid).map(w => w.id)
+}
+
 /** Check if a line segment (a-b) intersects or is inside a box defined by (x1,y1) to (x2,y2). */
 function lineIntersectsRect(a: Pt, b: Pt, x1: number, y1: number, x2: number, y2: number): boolean {
   // 1. One endpoint inside
@@ -144,7 +191,13 @@ function lineIntersectsRect(a: Pt, b: Pt, x1: number, y1: number, x2: number, y2
  *     faces that the DCEL can produce when walls are nearly-collinear.
  */
 function detectRooms(walls: WallSeg[]): Pt[][] {
-  const segs = walls.filter(w => !w.isDetail)
+  // Only use LINE-derived walls for room detection.
+  // LWPOLYLINE segments (pl-*) are long boundary edges that bypass intermediate junction
+  // nodes (e.g., the full left wall y=22.8→34.8 skips junctions at 25.8 and 30.8), which
+  // prevents the DCEL from closing faces like KITCHEN, BATH, WC.
+  // The LINE entities already define every room boundary redundantly, so we can safely
+  // exclude polyline walls here. Also exclude isOuter (wall-thickness offset) and isDetail.
+  const segs = walls.filter(w => !w.isDetail && !w.isOuter && !w.id.startsWith('pl-'))
   if (segs.length < 3) return []
 
   /* Step 1 – merge coincident endpoints */
@@ -250,6 +303,132 @@ function detectRooms(walls: WallSeg[]): Pt[][] {
   return validFaces
 }
 
+/* ─── applyResizeToWalls ────────────────────────── */
+function applyResizeToWalls(
+  ws: WallSeg[], ids: Set<string>,
+  origBox: { minWX: number; minWY: number; maxWX: number; maxWY: number },
+  newBox:  { minWX: number; minWY: number; maxWX: number; maxWY: number },
+): WallSeg[] {
+  const origW = origBox.maxWX - origBox.minWX || 1e-9
+  const origH = origBox.maxWY - origBox.minWY || 1e-9
+  const newW  = newBox.maxWX - newBox.minWX
+  const newH  = newBox.maxWY - newBox.minWY
+  return ws.map(w => {
+    if (!ids.has(w.id)) return w
+    const scaleX = (p: number) => newBox.minWX + (p - origBox.minWX) / origW * newW
+    const scaleY = (p: number) => newBox.minWY + (p - origBox.minWY) / origH * newH
+    return {
+      ...w,
+      start: { x: scaleX(w.start.x), y: scaleY(w.start.y) },
+      end:   { x: scaleX(w.end.x),   y: scaleY(w.end.y) },
+    }
+  })
+}
+
+
+/* ─── detectRoomsWithWalls ─────────────────────── */
+/** Same DCEL logic as detectRooms but also returns the wall IDs that form each room boundary. */
+function detectRoomsWithWalls(walls: WallSeg[]): Array<{ polygon: Pt[]; wallIds: string[] }> {
+  // Only use LINE-derived walls for room detection.
+  // LWPOLYLINE segments (pl-*) are long boundary edges that bypass intermediate junction
+  // nodes (e.g., the full left wall y=22.8→34.8 skips junctions at 25.8 and 30.8), which
+  // prevents the DCEL from closing faces like KITCHEN, BATH, WC.
+  // The LINE entities already define every room boundary redundantly, so we can safely
+  // exclude polyline walls here. Also exclude isOuter (wall-thickness offset) and isDetail.
+  const segs = walls.filter(w => !w.isDetail && !w.isOuter && !w.id.startsWith('pl-'))
+  if (segs.length < 3) return []
+
+  const nodes: Pt[] = []
+  const getN = (x: number, y: number): number => {
+    for (let i = 0; i < nodes.length; i++)
+      if (Math.abs(nodes[i].x - x) < SNAP_TH && Math.abs(nodes[i].y - y) < SNAP_TH) return i
+    return nodes.push({ x, y }) - 1
+  }
+
+  const eKeys = new Set<string>()
+  const eList: [number, number][] = []
+  const eWallIds: string[] = []   // parallel to eList – the wall id for each undirected edge
+
+  for (const w of segs) {
+    const u = getN(w.start.x, w.start.y)
+    const v = getN(w.end.x, w.end.y)
+    if (u === v) continue
+    const k = `${Math.min(u, v)},${Math.max(u, v)}`
+    if (!eKeys.has(k)) {
+      eKeys.add(k)
+      eList.push([u, v])
+      eWallIds.push(w.id)
+    }
+  }
+  if (eList.length < 3) return []
+
+  const adj = new Map<number, number[]>()
+  for (const [u, v] of eList)
+    for (const [a, b] of [[u, v], [v, u]] as const) {
+      if (!adj.has(a)) adj.set(a, [])
+      adj.get(a)!.push(b)
+    }
+  for (const [n, nb] of adj) {
+    const pn = nodes[n]
+    nb.sort((a, b) =>
+      Math.atan2(nodes[a].y - pn.y, nodes[a].x - pn.x) -
+      Math.atan2(nodes[b].y - pn.y, nodes[b].x - pn.x),
+    )
+  }
+
+  // Build heWallId map: half-edge key → wall id
+  const heWallId = new Map<string, string>()
+  for (let idx = 0; idx < eList.length; idx++) {
+    const [u, v] = eList[idx]
+    const wid = eWallIds[idx]
+    heWallId.set(`${u},${v}`, wid)
+    heWallId.set(`${v},${u}`, wid)
+  }
+
+  const nextHE = new Map<string, string>()
+  for (const [u, v] of eList) {
+    for (const [s, e] of [[u, v], [v, u]] as const) {
+      const backA = Math.atan2(nodes[s].y - nodes[e].y, nodes[s].x - nodes[e].x)
+      let bestW = -1, bestCW = Infinity
+      for (const w of adj.get(e) ?? []) {
+        const outA = Math.atan2(nodes[w].y - nodes[e].y, nodes[w].x - nodes[e].x)
+        let cw = backA - outA
+        while (cw <= 0) cw += 2 * Math.PI
+        if (cw < bestCW) { bestCW = cw; bestW = w }
+      }
+      if (bestW !== -1) nextHE.set(`${s},${e}`, `${e},${bestW}`)
+    }
+  }
+
+  const traced = new Set<string>()
+  const result: Array<{ polygon: Pt[]; wallIds: string[] }> = []
+  for (const [u, v] of eList) {
+    for (const [s, e] of [[u, v], [v, u]] as const) {
+      const sk = `${s},${e}`
+      if (traced.has(sk) || !nextHE.has(sk)) continue
+      const ids: number[] = []
+      const faceWallIds: string[] = []
+      let cur = sk, guard = 0
+      do {
+        traced.add(cur)
+        ids.push(Number(cur.split(',')[0]))
+        const wid = heWallId.get(cur)
+        if (wid && !faceWallIds.includes(wid)) faceWallIds.push(wid)
+        cur = nextHE.get(cur) ?? ''
+        guard++
+      } while (cur !== sk && cur !== '' && guard < 60)
+      if (cur === sk && ids.length >= 3) {
+        const polygon = ids.map(i => nodes[i])
+        if (polyArea(polygon) > 0.05) {
+          result.push({ polygon, wallIds: faceWallIds })
+        }
+      }
+    }
+  }
+  return result
+}
+
+
 /* ─── Component ──────────────────────────────────── */
 export function DxfJsonViewPage() {
   const stageRef = useRef<Konva.Stage>(null)
@@ -293,6 +472,10 @@ export function DxfJsonViewPage() {
   const [showDetail, setShowDetail]   = useState(true)
   const [showLabels, setShowLabels]   = useState(true)
 
+  /** groupId being hovered — all walls with this groupId get a preview highlight. */
+  const [hoveredGroupId, setHoveredGroupId] = useState<string | null>(null)
+  const [hoveredRoomIdx, setHoveredRoomIdx] = useState<number | null>(null)
+
   /* editor chrome (Synaps-style) */
   const [activeTool, setActiveTool] = useState<'select' | 'hand' | 'frame' | 'draw' | 'text'>('select')
   const [units, setUnits] = useState<'m' | 'cm' | 'mm'>('m')
@@ -301,6 +484,9 @@ export function DxfJsonViewPage() {
 
   /* drag feedback */
   const [snapTarget, setSnapTarget]   = useState<Pt | null>(null)
+  /** When snapping to the interior of a wall (not its endpoint), records the target wall id
+   *  so we can split it on drag-end. null when snapping to an endpoint. */
+  const snapLineWallRef = useRef<{ wallId: string; t: number } | null>(null)
   const [isDraggingEp, setIsDraggingEp] = useState(false)
   /* Space-bar temporary pan mode */
   const [spaceHeld, setSpaceHeld] = useState(false)
@@ -325,6 +511,9 @@ export function DxfJsonViewPage() {
   /** Snapshot of selectedIds taken at mousedown — used by onClick to distinguish
    *  "already selected before this click" (→ toggle off) from "just added by mousedown" (→ keep). */
   const selBeforeMouseDown = useRef<Set<string>>(new Set())
+  /** Tracks which wall + which endpoint ('start'|'end') is actively being dragged,
+   *  so onEpDragEnd can auto-join when the endpoint snaps onto another wall. */
+  const draggingEpInfo = useRef<{ wallId: string; ep: 'start' | 'end' } | null>(null)
 
   /* ── rotation drag ── */
   interface RotationDrag {
@@ -338,6 +527,20 @@ export function DxfJsonViewPage() {
   const [rotationDrag, setRotationDrag] = useState<RotationDrag | null>(null)
   const rotationAngleDeltaRef = useRef(0)
   const [rotationAngleDelta, setRotationAngleDelta] = useState(0)
+
+  /* ── resize drag ── */
+  interface ResizeDrag {
+    handle: 'nw'|'n'|'ne'|'e'|'se'|'s'|'sw'|'w'
+    initBBox: { minWX: number; minWY: number; maxWX: number; maxWY: number }
+    initMouseWX: number
+    initMouseWY: number
+    wallIds: string[]
+    textHandles: string[]
+  }
+  const resizeDragRef = useRef<ResizeDrag | null>(null)
+  const [resizeDrag, setResizeDrag] = useState<ResizeDrag | null>(null)
+  const resizePreviewRef = useRef<{ minWX: number; minWY: number; maxWX: number; maxWY: number } | null>(null)
+  const [resizePreview, setResizePreview] = useState<{ minWX: number; minWY: number; maxWX: number; maxWY: number } | null>(null)
 
   /** Translate all selected walls by the current delta. */
   const applyDrag = useCallback((ws: WallSeg[], drag: ActiveDrag, delta: { dx: number; dy: number }): WallSeg[] => {
@@ -377,16 +580,40 @@ export function DxfJsonViewPage() {
         return { ...tx, position: { x: nx, y: ny, z: 0 } }
       })
     }
+    if (resizeDrag && resizePreview) {
+      const { textHandles, initBBox } = resizeDrag
+      const origW = initBBox.maxWX - initBBox.minWX || 1e-9
+      const origH = initBBox.maxWY - initBBox.minWY || 1e-9
+      const newW  = resizePreview.maxWX - resizePreview.minWX
+      const newH  = resizePreview.maxWY - resizePreview.minWY
+      // Scale font size proportionally with the geometric mean of the resize ratio
+      const scaleF = Math.sqrt((newW / origW) * (newH / origH))
+      const tSet = new Set(textHandles)
+      texts = texts.map(tx => {
+        if (!tSet.has(tx.handle)) return tx
+        const nx = resizePreview.minWX + (tx.position.x - initBBox.minWX) / origW * newW
+        const ny = resizePreview.minWY + (tx.position.y - initBBox.minWY) / origH * newH
+        return { ...tx, position: { x: nx, y: ny, z: 0 }, height: Math.max(0.05, tx.height * scaleF) }
+      })
+    }
     return texts
-  }, [planDoc.texts, activeDrag, dragDelta, rotationDrag, rotationAngleDelta])
+  }, [planDoc.texts, activeDrag, dragDelta, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
 
-  /* derived rooms — recalculates live during drag */
-  const rooms = useMemo(() => {
-    // Rooms only recalculate after drag ends for large performance gain, 
-    // or we can keep it live if the wall count is low. Let's keep it live for now.
-    const ws = activeDrag ? applyDrag(walls, activeDrag, dragDelta) : walls
-    return detectRooms(ws)
-  }, [walls, activeDrag, dragDelta, applyDrag])
+  /* derived rooms with wall IDs — recalculates live during drag */
+  const roomsWithWalls = useMemo(() => {
+    let ws = walls
+    if (activeDrag) {
+      ws = applyDrag(ws, activeDrag, dragDelta)
+    }
+    if (rotationDrag && rotationAngleDelta !== 0) {
+      ws = applyRotation(ws, new Set(rotationDrag.wallIds), rotationDrag.centerWX, rotationDrag.centerWY, rotationAngleDelta)
+    }
+    if (resizeDrag && resizePreview) {
+      ws = applyResizeToWalls(ws, new Set(resizeDrag.wallIds), resizeDrag.initBBox, resizePreview)
+    }
+    return detectRoomsWithWalls(ws)
+  }, [walls, activeDrag, dragDelta, applyDrag, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
+  const rooms = roomsWithWalls.map(r => r.polygon)
 
   /* ── undo ── */
   const snapshot = useCallback(() => {
@@ -401,18 +628,38 @@ export function DxfJsonViewPage() {
     })
   }, [])
 
-  /* ── snap helper ── */
+  /* ── snap helper — endpoint-priority then snap-to-line interior ── */
   const getSnap = useCallback((x: number, y: number, excludeIds: string[]): Pt => {
-    if (!snapEnabled) return { x, y }
-    let best: Pt | null = null, bestD = SNAP_TH
+    if (!snapEnabled) { snapLineWallRef.current = null; return { x, y } }
+
+    // Phase 1: snap to any endpoint (highest priority, tight threshold)
+    let bestEp: Pt | null = null, bestEpD = SNAP_TH
     for (const w of walls) {
       if (excludeIds.includes(w.id)) continue
       for (const ep of [w.start, w.end]) {
         const d = Math.hypot(ep.x - x, ep.y - y)
-        if (d < bestD) { bestD = d; best = ep }
+        if (d < bestEpD) { bestEpD = d; bestEp = ep }
       }
     }
-    return best ?? { x, y }
+    if (bestEp) { snapLineWallRef.current = null; return bestEp }
+
+    // Phase 2: snap to nearest point along any wall segment interior
+    let bestSeg: { wallId: string; t: number; pt: Pt } | null = null, bestSegD = SNAP_LINE_TH
+    for (const w of walls) {
+      if (excludeIds.includes(w.id)) continue
+      const { pt, t, dist } = closestPointOnSegment(x, y, w.start.x, w.start.y, w.end.x, w.end.y)
+      // Exclude t≈0 and t≈1 (those are the endpoints, already checked above)
+      if (t > 0.01 && t < 0.99 && dist < bestSegD) {
+        bestSegD = dist; bestSeg = { wallId: w.id, t, pt }
+      }
+    }
+    if (bestSeg) {
+      snapLineWallRef.current = { wallId: bestSeg.wallId, t: bestSeg.t }
+      return bestSeg.pt
+    }
+
+    snapLineWallRef.current = null
+    return { x, y }
   }, [walls, snapEnabled])
 
   /* ── endpoint drag ── */
@@ -436,6 +683,74 @@ export function DxfJsonViewPage() {
   const onEpDragEnd = useCallback(() => {
     setSnapTarget(null)
     setIsDraggingEp(false)
+
+    const info = draggingEpInfo.current
+    const lineSnap = snapLineWallRef.current
+    draggingEpInfo.current = null
+    snapLineWallRef.current = null
+    if (!info) return
+
+    setWalls(prev => {
+      const moved = prev.find(w => w.id === info.wallId)
+      if (!moved) return prev
+      const pt = moved[info.ep]
+
+      // ── Case A: snapped to the interior of another wall → split that wall ──
+      if (lineSnap) {
+        const target = prev.find(w => w.id === lineSnap.wallId)
+        if (target) {
+          const splitPt = pt  // moved endpoint IS the snap point on the target wall
+          // Create two new wall segments replacing the target
+          const segA: WallSeg = {
+            ...target,
+            id: `${target.id}-a`,
+            end: splitPt,
+          }
+          const segB: WallSeg = {
+            ...target,
+            id: `${target.id}-b`,
+            start: splitPt,
+          }
+          // Unify group: moved wall + both split halves
+          const existingGroups = new Set<string>(
+            [moved, target].map(w => w.groupId).filter(Boolean) as string[]
+          )
+          const unified = existingGroups.size > 0 ? [...existingGroups][0] : `g-${Date.now()}`
+          const toJoin = new Set([
+            moved.id,
+            segA.id, segB.id,
+            ...prev.filter(w => w.groupId && existingGroups.has(w.groupId)).map(w => w.id),
+          ])
+          return [
+            ...prev
+              .filter(w => w.id !== target.id)
+              .map(w => toJoin.has(w.id) ? { ...w, groupId: unified } : w),
+            { ...segA, groupId: unified },
+            { ...segB, groupId: unified },
+          ]
+        }
+      }
+
+      // ── Case B: snapped to another wall's endpoint → auto-group ──
+      const connected = prev.filter(w =>
+        w.id !== moved.id && (
+          (Math.abs(w.start.x - pt.x) < SNAP_TH && Math.abs(w.start.y - pt.y) < SNAP_TH) ||
+          (Math.abs(w.end.x   - pt.x) < SNAP_TH && Math.abs(w.end.y   - pt.y) < SNAP_TH)
+        )
+      )
+      if (connected.length === 0) return prev
+
+      const existingGroupIds = new Set<string>(
+        [moved, ...connected].map(w => w.groupId).filter(Boolean) as string[]
+      )
+      const unified = existingGroupIds.size > 0 ? [...existingGroupIds][0] : `g-${Date.now()}`
+      const toJoin = new Set([
+        moved.id,
+        ...connected.map(w => w.id),
+        ...prev.filter(w => w.groupId && existingGroupIds.has(w.groupId)).map(w => w.id),
+      ])
+      return prev.map(w => toJoin.has(w.id) ? { ...w, groupId: unified } : w)
+    })
   }, [])
 
   /* ── commit pending rotation to wall state ── */
@@ -459,12 +774,69 @@ export function DxfJsonViewPage() {
     }))
   }, [])
 
+  /* ── commit pending resize to wall state ── */
+  const commitResize = useCallback(() => {
+    const rd = resizeDragRef.current
+    const preview = resizePreviewRef.current
+    resizeDragRef.current = null
+    resizePreviewRef.current = null
+    setResizeDrag(null)
+    setResizePreview(null)
+    if (!rd || !preview) return
+    const ids = new Set(rd.wallIds)
+    setWalls(prev => applyResizeToWalls(prev, ids, rd.initBBox, preview))
+    setPlanDoc(prev => ({
+      ...prev,
+      texts: prev.texts.map(tx => {
+        if (!rd.textHandles.includes(tx.handle)) return tx
+        const origW = rd.initBBox.maxWX - rd.initBBox.minWX || 1e-9
+        const origH = rd.initBBox.maxWY - rd.initBBox.minWY || 1e-9
+        const newW  = preview.maxWX - preview.minWX
+        const newH  = preview.maxWY - preview.minWY
+        const scaleF = Math.sqrt((newW / origW) * (newH / origH))
+        const nx = preview.minWX + (tx.position.x - rd.initBBox.minWX) / origW * newW
+        const ny = preview.minWY + (tx.position.y - rd.initBBox.minWY) / origH * newH
+        return { ...tx, position: { x: nx, y: ny, z: 0 }, height: Math.max(0.05, tx.height * scaleF) }
+      })
+    }))
+  }, [])
+
+  /* ── grouping ── */
+  /**
+   * Join all currently selected walls into a single polyline group.
+   * After joining, clicking any member selects the entire group as one element.
+   */
+  const joinSelected = useCallback(() => {
+    const wallIds = walls.filter(w => selectedIds.has(w.id)).map(w => w.id)
+    if (wallIds.length < 2) return
+    snapshot()
+    const newGroupId = `g-${Date.now()}`
+    setWalls(prev => prev.map(w => wallIds.includes(w.id) ? { ...w, groupId: newGroupId } : w))
+  }, [walls, selectedIds, snapshot])
+
+  /**
+   * Remove groupId from all selected walls (and every sibling in the same group).
+   * Each segment becomes an independent wall again.
+   */
+  const ungroupSelected = useCallback(() => {
+    // Collect the groupIds touched by the current selection
+    const touchedGroups = new Set(
+      walls.filter(w => selectedIds.has(w.id) && w.groupId).map(w => w.groupId!)
+    )
+    if (touchedGroups.size === 0) return
+    snapshot()
+    setWalls(prev => prev.map(w =>
+      (w.groupId && touchedGroups.has(w.groupId)) ? { ...w, groupId: undefined } : w
+    ))
+  }, [walls, selectedIds, snapshot])
+
   /* ── rubber-band selection ── */
   const onStageMouseDown = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     const isStage = e.target === stageRef.current || e.target.name() === 'background-rect'
     if (!isStage || activeTool !== 'select' || spaceHeld) return
 
-    const pos = stageRef.current?.getPointerPosition()
+    // getRelativePointerPosition accounts for stage zoom + pan; getPointerPosition does not.
+    const pos = stageRef.current?.getRelativePointerPosition()
     if (!pos) return
 
     const [wx, wy] = toW(pos.x, pos.y, t)
@@ -473,7 +845,7 @@ export function DxfJsonViewPage() {
   }, [activeTool, spaceHeld, t])
 
   const onStageMouseMove = useCallback((_e: Konva.KonvaEventObject<MouseEvent>) => {
-    const pos = stageRef.current?.getPointerPosition()
+    const pos = stageRef.current?.getRelativePointerPosition()
     if (!pos) return
     const [wx, wy] = toW(pos.x, pos.y, t)
 
@@ -492,15 +864,29 @@ export function DxfJsonViewPage() {
     } else if (rotationDragRef.current) { // Rotation Drag
       const rd = rotationDragRef.current
       const [ccx, ccy] = toC(rd.centerWX, rd.centerWY, t)
+      // pos is already in logical canvas coords (getRelativePointerPosition), same space as toC output
       const currentAngle = Math.atan2(pos.y - ccy, pos.x - ccx)
       const delta = currentAngle - rd.startMouseAngle
       rotationAngleDeltaRef.current = delta
       setRotationAngleDelta(delta)
+    } else if (resizeDragRef.current) { // Resize Drag
+      const rd = resizeDragRef.current
+      const dWX = wx - rd.initMouseWX
+      const dWY = wy - rd.initMouseWY
+      const h = rd.handle
+      const nb = { ...rd.initBBox }
+      if (h.includes('e')) nb.maxWX = Math.max(rd.initBBox.minWX + 0.1, rd.initBBox.maxWX + dWX)
+      if (h.includes('w')) nb.minWX = Math.min(rd.initBBox.maxWX - 0.1, rd.initBBox.minWX + dWX)
+      if (h.includes('n')) nb.maxWY = Math.max(rd.initBBox.minWY + 0.1, rd.initBBox.maxWY + dWY)
+      if (h.includes('s')) nb.minWY = Math.min(rd.initBBox.maxWY - 0.1, rd.initBBox.minWY + dWY)
+      resizePreviewRef.current = nb
+      setResizePreview(nb)
     }
   }, [selectionBox, activeDrag, t, orthoEnabled])
 
   const onStageMouseUp = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     if (rotationDragRef.current) { commitRotation(); return }
+    if (resizeDragRef.current) { commitResize(); return }
     if (!selectionBox) return
     const { start, current } = selectionBox
     setSelectionBox(null)
@@ -537,7 +923,7 @@ export function DxfJsonViewPage() {
       }
       return newlySelected
     })
-  }, [selectionBox, walls, commitRotation])
+  }, [selectionBox, walls, commitRotation, commitResize])
 
   /* ── mid-handle drag (move whole wall + stretch connected walls live) ── */
   const onMidDragStart = useCallback((
@@ -546,7 +932,7 @@ export function DxfJsonViewPage() {
     currentSel: Set<string>
   ) => {
     snapshot()
-    const pos = stageRef.current?.getPointerPosition()
+    const pos = stageRef.current?.getRelativePointerPosition()
     if (!pos) return
     const [wx, wy] = toW(pos.x, pos.y, t)
 
@@ -565,8 +951,6 @@ export function DxfJsonViewPage() {
     dragDeltaRef.current = { dx: 0, dy: 0 }
     setDragDelta({ dx: 0, dy: 0 })
   }, [snapshot, walls, planDoc.texts, t])
-
-  // Removed onMidDragMove as it's now handled by onStageMouseMove
 
   const onMidDragEnd = useCallback(() => {
     const drag = activeDragRef.current
@@ -622,11 +1006,18 @@ export function DxfJsonViewPage() {
           rotationAngleDeltaRef.current = 0
           setRotationDrag(null)
           setRotationAngleDelta(0)
+        } else if (resizeDragRef.current) {
+          resizeDragRef.current = null
+          resizePreviewRef.current = null
+          setResizeDrag(null)
+          setResizePreview(null)
         } else {
           setSelectedIds(new Set())
         }
       }
       if (e.key === 'o' || e.key === 'O') setOrthoEnabled(v => !v)
+      if (e.key === 'j' || e.key === 'J') { e.preventDefault(); joinSelected() }
+      if (e.key === 'u' || e.key === 'U') { e.preventDefault(); ungroupSelected() }
       /* Space = temporary pan */
       if (e.code === 'Space' && !e.repeat) { e.preventDefault(); setSpaceHeld(true) }
     }
@@ -639,7 +1030,21 @@ export function DxfJsonViewPage() {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
     }
-  }, [selectedIds, snapshot, undo])
+  }, [selectedIds, snapshot, undo, joinSelected, ungroupSelected])
+
+  /* ── global mouseup: commit any in-progress drag/rotate/resize even if pointer
+     leaves the canvas or the browser window (prevents "stuck" drag state) ── */
+  useEffect(() => {
+    const onGlobalMouseUp = () => {
+      if (activeDragRef.current)     { onMidDragEnd() }
+      if (rotationDragRef.current)   { commitRotation() }
+      if (resizeDragRef.current)     { commitResize() }
+      if (selectionBox)              { /* selectionBox commits via onStageMouseUp; safe to leave */ }
+      if (isDraggingEp)              { onEpDragEnd() }
+    }
+    window.addEventListener('mouseup', onGlobalMouseUp)
+    return () => window.removeEventListener('mouseup', onGlobalMouseUp)
+  }, [onMidDragEnd, commitRotation, commitResize, onEpDragEnd, selectionBox, isDraggingEp])
 
   /* ── derived values ── */
   const HR  = HP_SCR / zoom   // endpoint handle radius in canvas units
@@ -661,14 +1066,27 @@ export function DxfJsonViewPage() {
     return `${(Math.abs(m2) * 1e6).toFixed(0)} mm²`
   }, [units])
 
-  /** Walls with the active midpoint drag and/or live rotation preview applied. */
+  /** Walls with the active midpoint drag and/or live rotation/resize preview applied. */
   const effectiveWalls = useMemo(() => {
-    let ws = activeDrag ? applyDrag(visWalls, activeDrag, dragDelta) : visWalls
+    let ws = visWalls
+    
+    // Apply drag transformation
+    if (activeDrag) {
+      ws = applyDrag(ws, activeDrag, dragDelta)
+    }
+    
+    // Apply rotation transformation
     if (rotationDrag && rotationAngleDelta !== 0) {
       ws = applyRotation(ws, new Set(rotationDrag.wallIds), rotationDrag.centerWX, rotationDrag.centerWY, rotationAngleDelta)
     }
+    
+    // Apply resize transformation
+    if (resizeDrag && resizePreview) {
+      ws = applyResizeToWalls(ws, new Set(resizeDrag.wallIds), resizeDrag.initBBox, resizePreview)
+    }
+    
     return ws
-  }, [visWalls, activeDrag, dragDelta, applyDrag, rotationDrag, rotationAngleDelta])
+  }, [visWalls, activeDrag, dragDelta, applyDrag, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
 
   /** Bounding box of selected walls in canvas (pixel) coordinates — used to position rotation handle. */
   const effectiveSelBBox = useMemo(() => {
@@ -686,8 +1104,8 @@ export function DxfJsonViewPage() {
     return { minCX, minCY, maxCX, maxCY }
   }, [effectiveWalls, selectedIds, t])
 
-  /** World-space centre of selected walls — stored at rotation-drag start as the rotation pivot. */
-  const baseSelCenter = useMemo(() => {
+  /** World-space bounds of selected walls */
+  const worldSelBounds = useMemo(() => {
     const selWalls = walls.filter(w => selectedIds.has(w.id))
     if (selWalls.length === 0) return null
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -697,7 +1115,28 @@ export function DxfJsonViewPage() {
         minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y)
       }
     }
-    return { wx: (minX + maxX) / 2, wy: (minY + maxY) / 2 }
+    return { minX, minY, maxX, maxY }
+  }, [walls, selectedIds])
+
+  /** World-space centre of selected walls — stored at rotation/resize-drag start as the pivot. */
+  const baseSelCenter = useMemo(() => {
+    if (!worldSelBounds) return null
+    return { 
+      wx: (worldSelBounds.minX + worldSelBounds.maxX) / 2, 
+      wy: (worldSelBounds.minY + worldSelBounds.maxY) / 2 
+    }
+  }, [worldSelBounds])
+
+  /** World-space bbox of selected walls — used as the initBBox for resize drags. */
+  const baseSelWBox = useMemo(() => {
+    const selWalls = walls.filter(w => selectedIds.has(w.id))
+    if (!selWalls.length) return null
+    let minWX = Infinity, minWY = Infinity, maxWX = -Infinity, maxWY = -Infinity
+    for (const w of selWalls) for (const p of [w.start, w.end]) {
+      minWX = Math.min(minWX, p.x); maxWX = Math.max(maxWX, p.x)
+      minWY = Math.min(minWY, p.y); maxWY = Math.max(maxWY, p.y)
+    }
+    return { minWX, minWY, maxWX, maxWY }
   }, [walls, selectedIds])
 
   /** Wall length in metres */
@@ -831,15 +1270,17 @@ export function DxfJsonViewPage() {
             onClick={e => { if (e.target === stageRef.current) setSelectedIds(new Set()) }}
             style={{
               display: 'block',
-              cursor: (isDraggingEp || rotationDrag)
-                ? 'crosshair'
-                : (activeTool === 'hand' || spaceHeld)
-                  ? 'grab'
-                  : selectionBox
-                    ? 'default'
-                    : activeTool === 'draw' || activeTool === 'text'
-                      ? 'crosshair'
-                      : 'default',
+              cursor: resizeDrag
+                ? `${resizeDrag.handle}-resize`
+                : (isDraggingEp || rotationDrag)
+                  ? 'crosshair'
+                  : (activeTool === 'hand' || spaceHeld)
+                    ? 'grab'
+                    : selectionBox
+                      ? 'default'
+                      : activeTool === 'draw' || activeTool === 'text'
+                        ? 'crosshair'
+                        : 'default',
             }}
           >
 
@@ -850,17 +1291,50 @@ export function DxfJsonViewPage() {
             </Layer>
 
             {/* ── room colour fills ── */}
-            <Layer listening={false}>
-              {rooms.map((room, i) => (
-                <Line
-                  key={`room-${i}`}
-                  points={room.flatMap(p => toC(p.x, p.y, t))}
-                  closed
-                  fill={ROOM_COLORS[i % ROOM_COLORS.length]}
-                  stroke={ROOM_STROKES[i % ROOM_STROKES.length]}
-                  strokeWidth={1 / zoom}
-                />
-              ))}
+            <Layer>
+              {roomsWithWalls.map((r, i) => {
+                const isHovered = hoveredRoomIdx === i
+                return (
+                  <Group key={`room-${i}`}>
+                    <Line
+                      points={r.polygon.flatMap(p => toC(p.x, p.y, t))}
+                      closed
+                      fill={ROOM_COLORS[i % ROOM_COLORS.length]}
+                      stroke={ROOM_STROKES[i % ROOM_STROKES.length]}
+                      strokeWidth={isHovered ? 2.5 / zoom : 1 / zoom}
+                      listening={true}
+                      onClick={e => {
+                        e.cancelBubble = true
+                        const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                        setSelectedIds(prev => {
+                          if (isCtrl) {
+                            const next = new Set(prev)
+                            r.wallIds.forEach(id => next.add(id))
+                            return next
+                          }
+                          return new Set(r.wallIds)
+                        })
+                      }}
+                      onMouseDown={e => {
+                        if (rotationDragRef.current) return
+                        e.cancelBubble = true
+                        const currentSel = new Set(r.wallIds)
+                        setSelectedIds(currentSel)
+                        onMidDragStart(e as any, r.wallIds[0] ?? '', currentSel)
+                      }}
+                      onMouseUp={e => { e.cancelBubble = true; onMidDragEnd() }}
+                      onMouseEnter={ev => {
+                        ev.target.getStage()!.container().style.cursor = 'move'
+                        setHoveredRoomIdx(i)
+                      }}
+                      onMouseLeave={ev => {
+                        ev.target.getStage()!.container().style.cursor = 'default'
+                        setHoveredRoomIdx(null)
+                      }}
+                    />
+                  </Group>
+                )
+              })}
             </Layer>
 
             {/* ── walls + handles ── */}
@@ -894,15 +1368,15 @@ export function DxfJsonViewPage() {
                       strokeWidth={16 / zoom}
                       onMouseDown={e => {
                         e.cancelBubble = true
-                        // Capture selection state BEFORE this interaction so onClick can
-                        // correctly decide whether to toggle-off or keep the item.
                         selBeforeMouseDown.current = new Set(selectedIds)
+                        // Resolve the full group so drag always moves the whole element
+                        const groupIds = getGroupWallIds(wall.id, walls)
+                        const groupFullySelected = groupIds.every(id => selectedIds.has(id))
                         let currentSel = selectedIds
-                        if (!selectedIds.has(wall.id)) {
-                          // Immediately add to selection so a subsequent drag moves all selected items
+                        if (!groupFullySelected) {
                           const isCtrl = e.evt.ctrlKey || e.evt.metaKey
                           currentSel = new Set(isCtrl ? selectedIds : [])
-                          currentSel.add(wall.id)
+                          groupIds.forEach(id => currentSel.add(id))
                           setSelectedIds(currentSel)
                         }
                         onMidDragStart(e as any, wall.id, currentSel)
@@ -911,40 +1385,51 @@ export function DxfJsonViewPage() {
                       onClick={e => {
                         e.cancelBubble = true
                         const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                        const groupIds = getGroupWallIds(wall.id, walls)
                         setSelectedIds(prev => {
                           if (!isCtrl) {
-                            // Plain click → select only this wall
-                            return new Set([wall.id])
+                            // Plain click → select entire group (or just this wall if ungrouped)
+                            return new Set(groupIds)
                           }
-                          // Ctrl+click: toggle based on state BEFORE mousedown.
-                          // If it was selected before → remove it.
-                          // If it wasn't → mousedown already added it, keep current set.
+                          // Ctrl+click: toggle the entire group based on pre-mousedown state
                           if (selBeforeMouseDown.current.has(wall.id)) {
                             const next = new Set(prev)
-                            next.delete(wall.id)
+                            groupIds.forEach(id => next.delete(id))
                             return next
                           }
-                          return prev // already added by mousedown, nothing to change
+                          return prev // mousedown already added all group members
                         })
                       }}
-                      onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
-                      onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                      onMouseEnter={ev => {
+                        ev.target.getStage()!.container().style.cursor = 'move'
+                        if (wall.groupId) setHoveredGroupId(wall.groupId)
+                      }}
+                      onMouseLeave={ev => {
+                        ev.target.getStage()!.container().style.cursor = 'default'
+                        setHoveredGroupId(null)
+                      }}
                     />
 
                     {/* ── visible wall line ── */}
-                    <Line
-                      points={[sx, sy, ex, ey]}
-                      stroke={
-                        isDragging ? '#3b82f6'
-                        : isSel    ? '#f59e0b'
-                        : wallColor
-                      }
-                      strokeWidth={
-                        (isDragging || isSel) ? 2.2 / zoom : strokeW
-                      }
-                      lineCap="round"
-                      listening={false}
-                    />
+                    {(() => {
+                      const isHoverGroup = !isSel && !isDragging && !!wall.groupId && wall.groupId === hoveredGroupId
+                      return (
+                        <Line
+                          points={[sx, sy, ex, ey]}
+                          stroke={
+                            isDragging   ? '#3b82f6'
+                            : isSel      ? '#f59e0b'
+                            : isHoverGroup ? '#a855f7'
+                            : wallColor
+                          }
+                          strokeWidth={
+                            (isDragging || isSel || isHoverGroup) ? 2.2 / zoom : strokeW
+                          }
+                          lineCap="round"
+                          listening={false}
+                        />
+                      )
+                    })()}
 
                     {/* ── live dimension label (Synaps-style blue pill) ── */}
                     {lenLabel && (
@@ -973,56 +1458,34 @@ export function DxfJsonViewPage() {
                       </Group>
                     )}
 
-                    {/* ── handles (only for non-detail walls) ── */}
-                    {!wall.isDetail && (
-                      <>
-                        {/* mid-point square → drag to translate this wall only */}
-                        <Rect
-                          x={midX - MH} y={midY - MH}
-                          width={MH * 2} height={MH * 2}
-                          fill={isDragging ? '#2563eb' : '#334155'}
-                          stroke="#64748b" strokeWidth={0.8 / zoom}
-                          cornerRadius={2 / zoom}
-                          draggable
-                          onDragStart={e => {
-                            e.cancelBubble = true
-                            selBeforeMouseDown.current = new Set(selectedIds)
-                            let currentSel = selectedIds
-                            if (!selectedIds.has(wall.id)) {
-                              const isCtrl = e.evt.ctrlKey || e.evt.metaKey
-                              currentSel = new Set(isCtrl ? selectedIds : [])
-                              currentSel.add(wall.id)
-                              setSelectedIds(currentSel)
-                            }
-                            onMidDragStart(e as any, wall.id, currentSel)
-                          }}
-                          onDragEnd={onMidDragEnd}
-                          onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
-                          onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
-                        />
 
-                        {/* start endpoint */}
+
+                    {/* ── endpoint handles (ALL walls when selected, enables snapping + auto-join) ── */}
+                    {isSel && (
+                      <>
                         <Circle
                           x={sx} y={sy} radius={HR}
-                          fill={isSel ? '#3b82f6' : 'transparent'}
-                          stroke={isSel ? '#fff' : 'transparent'}
-                          strokeWidth={isSel ? 1.2 / zoom : 0}
-                          draggable={isSel}
-                          onDragStart={() => { snapshot(); setIsDraggingEp(true) }}
+                          fill="#3b82f6" stroke="#fff" strokeWidth={1.2 / zoom}
+                          draggable
+                          onDragStart={() => {
+                            snapshot()
+                            setIsDraggingEp(true)
+                            draggingEpInfo.current = { wallId: wall.id, ep: 'start' }
+                          }}
                           onDragMove={e => onEpDragMove(e, wall.id, 'start')}
                           onDragEnd={onEpDragEnd}
                           onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'crosshair' }}
                           onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                         />
-
-                        {/* end endpoint */}
                         <Circle
                           x={ex} y={ey} radius={HR}
-                          fill={isSel ? '#3b82f6' : 'transparent'}
-                          stroke={isSel ? '#fff' : 'transparent'}
-                          strokeWidth={isSel ? 1.2 / zoom : 0}
-                          draggable={isSel}
-                          onDragStart={() => { snapshot(); setIsDraggingEp(true) }}
+                          fill="#3b82f6" stroke="#fff" strokeWidth={1.2 / zoom}
+                          draggable
+                          onDragStart={() => {
+                            snapshot()
+                            setIsDraggingEp(true)
+                            draggingEpInfo.current = { wallId: wall.id, ep: 'end' }
+                          }}
                           onDragMove={e => onEpDragMove(e, wall.id, 'end')}
                           onDragEnd={onEpDragEnd}
                           onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'crosshair' }}
@@ -1135,42 +1598,94 @@ export function DxfJsonViewPage() {
               </Layer>
             )}
 
-            {/* ── Selection bounding box + rotation handle overlay ── */}
+            {/* ── Dim overlay moved to SVG outside Stage — see below ── */}
+
+            {/* ── Resize + rotation handles (separate interactive layer) ── */}
             {effectiveSelBBox && selectedIds.size > 0 && activeTool === 'select' && !activeDrag && (() => {
               const { minCX, minCY, maxCX, maxCY } = effectiveSelBBox
               const pad = 6 / zoom
+              const w = maxCX - minCX
+              const h = maxCY - minCY
+              const handleSize = 8 / zoom
+              const halfHandle = handleSize / 2
+              const corners = {
+                nw: { x: minCX - pad, y: minCY - pad },
+                ne: { x: maxCX + pad, y: minCY - pad },
+                sw: { x: minCX - pad, y: maxCY + pad },
+                se: { x: maxCX + pad, y: maxCY + pad },
+                n: { x: minCX + w / 2, y: minCY - pad },
+                s: { x: minCX + w / 2, y: maxCY + pad },
+                e: { x: maxCX + pad, y: minCY + h / 2 },
+                w: { x: minCX - pad, y: minCY + h / 2 },
+              }
               const cx = (minCX + maxCX) / 2
               const topY = minCY - pad
               const stemLen = 28 / zoom
               const handleY = topY - stemLen
-              const handleR = 7 / zoom
+              const rotHandleR = 7 / zoom
               return (
                 <Layer>
-                  {/* dashed selection rect */}
-                  <Rect
-                    x={minCX - pad} y={minCY - pad}
-                    width={maxCX - minCX + pad * 2} height={maxCY - minCY + pad * 2}
-                    stroke="#3b82f6" strokeWidth={1 / zoom}
-                    dash={[4 / zoom, 2 / zoom]}
-                    fill="transparent"
-                    listening={false}
-                  />
-                  {/* stem line */}
+                  {/* Resize handles */}
+                  {Object.entries(corners).map(([pos, pt]) => (
+                    <Rect
+                      key={pos}
+                      x={pt.x - halfHandle}
+                      y={pt.y - halfHandle}
+                      width={handleSize}
+                      height={handleSize}
+                      fill="white"
+                      stroke="#3b82f6"
+                      strokeWidth={1.5 / zoom}
+                      onMouseDown={e => {
+                        e.cancelBubble = true
+                        if (!baseSelWBox) return
+                        const mpos = stageRef.current?.getRelativePointerPosition()
+                        if (!mpos) return
+                        const [mwx, mwy] = toW(mpos.x, mpos.y, t)
+                        snapshot()
+                        const rd: ResizeDrag = {
+                          handle: pos as ResizeDrag['handle'],
+                          initBBox: { ...baseSelWBox },
+                          initMouseWX: mwx,
+                          initMouseWY: mwy,
+                          wallIds: walls.filter(w => selectedIds.has(w.id)).map(w => w.id),
+                          textHandles: planDoc.texts.filter(tx => selectedIds.has(tx.handle)).map(tx => tx.handle),
+                        }
+                        resizeDragRef.current = rd
+                        resizePreviewRef.current = { ...baseSelWBox }
+                        setResizeDrag(rd)
+                        setResizePreview({ ...baseSelWBox })
+                      }}
+                      onMouseUp={e => { e.cancelBubble = true; commitResize() }}
+                      onMouseEnter={ev => {
+                        const cursor = pos.includes('n') ? 'n' : pos.includes('s') ? 's' : ''
+                        ev.target.getStage()!.container().style.cursor = 
+                          pos === 'n' || pos === 's' ? 'ns-resize'
+                          : pos === 'e' || pos === 'w' ? 'ew-resize'
+                          : pos === 'nw' || pos === 'se' ? 'nwse-resize'
+                          : 'nesw-resize'
+                      }}
+                      onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                    />
+                  ))}
+                  
+                  {/* stem line for rotation handle */}
                   <Line
                     points={[cx, topY, cx, handleY]}
                     stroke="#3b82f6" strokeWidth={1 / zoom}
                     listening={false}
                   />
+                  
                   {/* rotation handle circle */}
                   <Circle
                     x={cx} y={handleY}
-                    radius={handleR}
+                    radius={rotHandleR}
                     fill={rotationDrag ? '#3b82f6' : 'white'}
                     stroke="#3b82f6" strokeWidth={1.5 / zoom}
                     onMouseDown={e => {
                       e.cancelBubble = true
                       if (!baseSelCenter) return
-                      const mpos = stageRef.current?.getPointerPosition()
+                      const mpos = stageRef.current?.getRelativePointerPosition()
                       if (!mpos) return
                       const [ccx, ccy] = toC(baseSelCenter.wx, baseSelCenter.wy, t)
                       const startAngle = Math.atan2(mpos.y - ccy, mpos.x - ccx)
@@ -1191,12 +1706,13 @@ export function DxfJsonViewPage() {
                     onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'crosshair' }}
                     onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                   />
+                  
                   {/* small curved arrow icon inside handle */}
                   <Text
-                    x={cx - handleR} y={handleY - handleR}
-                    width={handleR * 2} height={handleR * 2}
+                    x={cx - rotHandleR} y={handleY - rotHandleR}
+                    width={rotHandleR * 2} height={rotHandleR * 2}
                     text="↻"
-                    fontSize={handleR * 1.3}
+                    fontSize={rotHandleR * 1.3}
                     align="center"
                     verticalAlign="middle"
                     fill={rotationDrag ? 'white' : '#3b82f6'}
@@ -1206,6 +1722,140 @@ export function DxfJsonViewPage() {
               )
             })()}
           </Stage>
+
+          {/* ── Dimension / selection overlay (SVG, absolutely positioned over canvas) ──
+               Rendered OUTSIDE the Konva Stage so it is completely immune to
+               Stage zoom/pan transforms.  All coordinates are in screen pixels:
+                 screenX = stageLocalX * zoom + pos.x
+                 screenY = stageLocalY * zoom + pos.y                              */}
+          {effectiveSelBBox && selectedIds.size > 0 && activeTool === 'select' && !activeDrag && (() => {
+            // Convert canvas-local bbox corners to screen pixels
+            const toS = (cx: number, cy: number) => ({
+              x: cx * zoom + pos.x,
+              y: cy * zoom + pos.y,
+            })
+            const { minCX, minCY, maxCX, maxCY } = effectiveSelBBox
+            const PAD_PX = 6                 // fixed screen pixels (no /zoom needed)
+            const sNW = toS(minCX, minCY)
+            const sSE = toS(maxCX, maxCY)
+            const rX  = sNW.x - PAD_PX
+            const rY  = sNW.y - PAD_PX
+            const rW  = sSE.x - sNW.x + PAD_PX * 2
+            const rH  = sSE.y - sNW.y + PAD_PX * 2
+
+            // World-space dimensions for label text
+            const selWalls = effectiveWalls.filter(ww => selectedIds.has(ww.id))
+            let dimW = 0, dimH = 0
+            if (selWalls.length > 0) {
+              let mnX = Infinity, mxX = -Infinity, mnY = Infinity, mxY = -Infinity
+              for (const ww of selWalls) for (const p of [ww.start, ww.end]) {
+                mnX = Math.min(mnX, p.x); mxX = Math.max(mxX, p.x)
+                mnY = Math.min(mnY, p.y); mxY = Math.max(mxY, p.y)
+              }
+              dimW = Math.abs(mxX - mnX); dimH = Math.abs(mxY - mnY)
+            }
+            const dimWLabel = fmtLen(dimW)
+            const dimHLabel = fmtLen(dimH)
+
+            // Fixed screen-pixel sizes — never scaled by zoom
+            const DIM_OFFSET = 22   // gap between bbox edge and dim line
+            const TICK       = 5    // extension line overshoot
+            const ARROW_SZ   = 6    // arrowhead size
+            const FS         = 11   // font size px
+            const LBL_PAD    = 4    // label horizontal padding
+
+            // Width dim (below selection)
+            const wDimY = rY + rH + DIM_OFFSET
+            const wMidX = rX + rW / 2
+
+            // Height dim (right of selection)
+            const hDimX = rX + rW + DIM_OFFSET
+            const hMidY = rY + rH / 2
+
+            // Arrow path builder — returns SVG path 'd' string for one arrowhead
+            const arrowPath = (tipX: number, tipY: number, fromX: number, fromY: number) => {
+              const angle = Math.atan2(tipY - fromY, tipX - fromX)
+              const p1x = tipX - ARROW_SZ * Math.cos(angle - 0.35)
+              const p1y = tipY - ARROW_SZ * Math.sin(angle - 0.35)
+              const p2x = tipX - ARROW_SZ * Math.cos(angle + 0.35)
+              const p2y = tipY - ARROW_SZ * Math.sin(angle + 0.35)
+              return `M${p1x},${p1y} L${tipX},${tipY} L${p2x},${p2y}`
+            }
+
+            const lblW  = dimWLabel.length * FS * 0.6 + LBL_PAD * 2
+            const lblH  = FS * 1.5
+            const hlblW = dimHLabel.length * FS * 0.6 + LBL_PAD * 2
+            const hlblH = FS * 1.5
+
+            return (
+              <svg
+                style={{
+                  position: 'absolute', top: 0, left: 0,
+                  width: stageSize.w, height: stageSize.h,
+                  pointerEvents: 'none', overflow: 'visible',
+                }}
+              >
+                {/* dashed selection rect */}
+                <rect
+                  x={rX} y={rY} width={rW} height={rH}
+                  fill="none" stroke="#3b82f6" strokeWidth={1}
+                  strokeDasharray="5,3"
+                />
+
+                {/* ── Width dimension (below bbox) ── */}
+                {dimW > 0.01 && <>
+                  {/* extension lines */}
+                  <line x1={rX} y1={rY + rH} x2={rX} y2={wDimY + TICK} stroke="#64748b" strokeWidth={0.8} />
+                  <line x1={rX + rW} y1={rY + rH} x2={rX + rW} y2={wDimY + TICK} stroke="#64748b" strokeWidth={0.8} />
+                  {/* dimension line */}
+                  <line x1={rX} y1={wDimY} x2={rX + rW} y2={wDimY} stroke="#64748b" strokeWidth={1} />
+                  {/* arrowheads */}
+                  <path d={arrowPath(rX, wDimY, rX + rW, wDimY)} stroke="#64748b" strokeWidth={1} fill="none" />
+                  <path d={arrowPath(rX + rW, wDimY, rX, wDimY)} stroke="#64748b" strokeWidth={1} fill="none" />
+                  {/* label background */}
+                  <rect
+                    x={wMidX - lblW / 2} y={wDimY - lblH / 2}
+                    width={lblW} height={lblH}
+                    fill="white" rx={2}
+                  />
+                  {/* label text */}
+                  <text
+                    x={wMidX} y={wDimY + FS * 0.35}
+                    textAnchor="middle" fontSize={FS}
+                    fill="#1e40af" fontWeight="bold"
+                    fontFamily="system-ui,-apple-system,'Segoe UI',sans-serif"
+                  >{dimWLabel}</text>
+                </>}
+
+                {/* ── Height dimension (right of bbox) ── */}
+                {dimH > 0.01 && <>
+                  {/* extension lines */}
+                  <line x1={rX + rW} y1={rY} x2={hDimX + TICK} y2={rY} stroke="#64748b" strokeWidth={0.8} />
+                  <line x1={rX + rW} y1={rY + rH} x2={hDimX + TICK} y2={rY + rH} stroke="#64748b" strokeWidth={0.8} />
+                  {/* dimension line */}
+                  <line x1={hDimX} y1={rY} x2={hDimX} y2={rY + rH} stroke="#64748b" strokeWidth={1} />
+                  {/* arrowheads */}
+                  <path d={arrowPath(hDimX, rY, hDimX, rY + rH)} stroke="#64748b" strokeWidth={1} fill="none" />
+                  <path d={arrowPath(hDimX, rY + rH, hDimX, rY)} stroke="#64748b" strokeWidth={1} fill="none" />
+                  {/* label background (rotated) */}
+                  <rect
+                    x={hDimX - hlblH / 2} y={hMidY - hlblW / 2}
+                    width={hlblH} height={hlblW}
+                    fill="white" rx={2}
+                    transform={`rotate(-90 ${hDimX} ${hMidY})`}
+                  />
+                  {/* label text (rotated) */}
+                  <text
+                    x={hDimX} y={hMidY + FS * 0.35}
+                    textAnchor="middle" fontSize={FS}
+                    fill="#1e40af" fontWeight="bold"
+                    fontFamily="system-ui,-apple-system,'Segoe UI',sans-serif"
+                    transform={`rotate(-90 ${hDimX} ${hMidY})`}
+                  >{dimHLabel}</text>
+                </>}
+              </svg>
+            )
+          })()}
             </div>
           </div>
         </main>
@@ -1289,6 +1939,27 @@ export function DxfJsonViewPage() {
                 }))
                 setSelectedIds(new Set())
               }}>Delete Selection</button>
+            )}
+          </div>
+
+          <div className="dxf-prop-panel">
+            <div className="dxf-prop-label">Grouping</div>
+            <div className="dxf-prop-hint">
+              Select ≥ 2 walls then Join to treat them as one element.
+              Hover a joined wall to preview all members (purple).
+            </div>
+            <button
+              className="dxf-action-btn"
+              disabled={walls.filter(w => selectedIds.has(w.id)).length < 2}
+              onClick={joinSelected}
+              title="J"
+            >
+              Join selected (J)
+            </button>
+            {walls.some(w => selectedIds.has(w.id) && !!w.groupId) && (
+              <button className="dxf-action-btn" onClick={ungroupSelected} title="U">
+                Break group (U)
+              </button>
             )}
           </div>
 

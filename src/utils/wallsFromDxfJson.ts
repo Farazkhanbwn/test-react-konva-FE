@@ -7,6 +7,9 @@ export interface WallSeg {
   end: { x: number; y: number }
   isOuter: boolean
   isDetail: boolean
+  /** When set, this segment belongs to a named polyline group. Clicking any member
+   *  selects the entire group; drag / rotate / resize operate on the group as a unit. */
+  groupId?: string
 }
 
 const DETAIL_LEN_M = 1.5
@@ -45,6 +48,9 @@ export function wallsFromDxfJson(doc: DxfJsonDocument): WallSeg[] {
   for (let pi = 0; pi < doc.polylines.length; pi++) {
     const pl = doc.polylines[pi]
     const isOuter = perims[pi] >= maxPerim
+    // All segments of the same LWPOLYLINE share a groupId — they are one DXF entity.
+    // On export, grouped walls → LWPOLYLINE; ungrouped walls → LINE.
+    const groupId = `pl-${pl.handle}`
     for (let i = 0; i < pl.vertices.length - 1; i++) {
       const v0 = pl.vertices[i]
       const v1 = pl.vertices[i + 1]
@@ -55,6 +61,7 @@ export function wallsFromDxfJson(doc: DxfJsonDocument): WallSeg[] {
         end: { x: v1.x, y: v1.y },
         isOuter,
         isDetail: false,
+        groupId,
       })
     }
   }
