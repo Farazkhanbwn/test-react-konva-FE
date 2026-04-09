@@ -42,7 +42,13 @@ import {
   type DxfText,
 } from '@/constants/dxfJsonData'
 import type { WallSeg } from '@/utils/wallsFromDxfJson'
-import { wallSegsFromPolyline, wallsFromDxfJson } from '@/utils/wallsFromDxfJson'
+import {
+  arcHandleFromArcSegWallId,
+  isDoorStyleArc,
+  wallSegsFromArc,
+  wallSegsFromPolyline,
+  wallsFromDxfJson,
+} from '@/utils/wallsFromDxfJson'
 
 /* ─── Types ──────────────────────────────────────── */
 interface Pt { x: number; y: number }
@@ -85,7 +91,7 @@ function appendUserArc(
   startAngle: number,
   endAngle: number,
 ): { next: DxfJsonDocument; arc: DxfArc } {
-  const handle = `arc-user-${Date.now()}`
+  const handle = `user-ar-${Date.now()}`
   const arc: DxfArc = {
     entity_type: 'ARC',
     handle,
@@ -99,9 +105,26 @@ function appendUserArc(
   next.arcs = [...next.arcs, arc]
   next.stats = {
     ...next.stats,
+    arc_count: (next.stats.arc_count ?? 0) + 1,
     entity_counts: { ...next.stats.entity_counts, ARC: (next.stats.entity_counts.ARC ?? 0) + 1 },
   }
   return { next, arc }
+}
+
+function removeArcFromDocByHandle(doc: DxfJsonDocument, handle: string): DxfJsonDocument {
+  const arcs = doc.arcs.filter(a => a.handle !== handle)
+  if (arcs.length === doc.arcs.length) return doc
+  const next = cloneDoc(doc)
+  next.arcs = arcs
+  next.stats = {
+    ...next.stats,
+    arc_count: Math.max(0, (next.stats.arc_count ?? 0) - 1),
+    entity_counts: {
+      ...next.stats.entity_counts,
+      ARC: Math.max(0, (next.stats.entity_counts.ARC ?? 0) - 1),
+    },
+  }
+  return next
 }
 
 function appendUserPolyline(
@@ -584,6 +607,26 @@ function applyRoomDeltaToDoc(doc: DxfJsonDocument, wallIds: string[], dx: number
       return { ...pl, vertices }
     })
   }
+
+  const arcHandles = new Set<string>()
+  for (const wid of wallIds) {
+    const ah = arcHandleFromArcSegWallId(wid)
+    if (ah) arcHandles.add(ah)
+  }
+  if (arcHandles.size) {
+    next.arcs = next.arcs.map(a => {
+      if (!arcHandles.has(a.handle)) return a
+      return {
+        ...a,
+        center: {
+          ...a.center,
+          x: a.center.x + dx,
+          y: a.center.y + dy,
+        },
+      }
+    })
+  }
+
   return next
 }
 
@@ -612,6 +655,14 @@ const toW = (cx: number, cy: number, t: T): [number, number] => [
   (cx - t.oX) / t.sc + t.emin[0],
   t.emin[1] + t.wH - (cy - t.oY) / t.sc,
 ]
+
+/** Pointer in stage content-space after undoing Stage pan/zoom. */
+function getStageCanvasPointer(stage: Konva.Stage): { x: number; y: number } | null {
+  const p = stage.getPointerPosition()
+  if (!p) return null
+  const inv = stage.getAbsoluteTransform().copy().invert()
+  return inv.point(p)
+}
 
 /**
  * Generate canvas-space points for a DXF ARC (CCW, degrees).
@@ -851,10 +902,23 @@ export function DxfJsonViewPage() {
     initCX:    number   // canvas-space handle position when drag started
     initCY:    number
   }
+  /** Midpoint drag on any edge of an LWPOLYLINE: translate all chords + doc vertices together. */
+  interface ActivePolylineDrag {
+    polyHandle: string
+    leaderSegId: string
+    segments: { id: string; origStart: Pt; origEnd: Pt }[]
+    initCX: number
+    initCY: number
+  }
   const activeDragRef = useRef<ActiveDrag | null>(null)
   const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null)
   const [dragDelta, setDragDelta]   = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
   const dragDeltaRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
+
+  const activePolyDragRef = useRef<ActivePolylineDrag | null>(null)
+  const [activePolyDrag, setActivePolyDrag] = useState<ActivePolylineDrag | null>(null)
+  const [polyDragDelta, setPolyDragDelta] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
+  const polyDragDeltaRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
 
   /** Rigid move of every wall segment on a detected room boundary. */
   interface RoomDrag {
@@ -877,10 +941,28 @@ export function DxfJsonViewPage() {
     return ws.map(w => (w.id === wallId ? { ...w, start: newStart, end: newEnd } : w))
   }, [])
 
+  const applyPolylineDrag = useCallback((ws: WallSeg[], drag: ActivePolylineDrag, delta: { dx: number; dy: number }): WallSeg[] => {
+    const { dx, dy } = delta
+    const orig = new Map(drag.segments.map(s => [s.id, s] as const))
+    return ws.map(w => {
+      const o = orig.get(w.id)
+      if (!o) return w
+      return {
+        ...w,
+        start: { x: o.origStart.x + dx, y: o.origStart.y + dy },
+        end: { x: o.origEnd.x + dx, y: o.origEnd.y + dy },
+      }
+    })
+  }, [])
+
   /** Walls with midpoint-drag preview only (baseline for room detection + room move). */
   const wallsBase = useMemo(
-    () => (activeDrag ? applyDrag(walls, activeDrag, dragDelta) : walls),
-    [walls, activeDrag, dragDelta, applyDrag],
+    () => {
+      if (activePolyDrag) return applyPolylineDrag(walls, activePolyDrag, polyDragDelta)
+      if (activeDrag) return applyDrag(walls, activeDrag, dragDelta)
+      return walls
+    },
+    [walls, activeDrag, dragDelta, activePolyDrag, polyDragDelta, applyDrag, applyPolylineDrag],
   )
 
   /* derived rooms — includes live room-translation preview */
@@ -946,14 +1028,40 @@ export function DxfJsonViewPage() {
     setIsDraggingEp(false)
   }, [])
 
-  /* ── mid-handle drag (move whole wall + stretch connected walls live) ── */
+  /* ── mid-handle drag (move whole wall, or whole LWPOLYLINE) ── */
   const onMidDragStart = useCallback((
     e: Konva.KonvaEventObject<DragEvent>,
     wall: WallSeg,
   ) => {
+    if (wall.fromArc) return
     if (roomDragRef.current) return
     setSelectedRoomIndex(null)
     snapshot()
+    const ph = polylineHandleFromWallId(wall.id)
+    if (ph) {
+      activeDragRef.current = null
+      setActiveDrag(null)
+      dragDeltaRef.current = { dx: 0, dy: 0 }
+      setDragDelta({ dx: 0, dy: 0 })
+      const segs = walls.filter(w => w.id.startsWith(`pl-${ph}-`))
+      const segments = segs.map(w => ({ id: w.id, origStart: { ...w.start }, origEnd: { ...w.end } }))
+      const pDrag: ActivePolylineDrag = {
+        polyHandle: ph,
+        leaderSegId: wall.id,
+        segments,
+        initCX: e.target.x(),
+        initCY: e.target.y(),
+      }
+      activePolyDragRef.current = pDrag
+      setActivePolyDrag(pDrag)
+      polyDragDeltaRef.current = { dx: 0, dy: 0 }
+      setPolyDragDelta({ dx: 0, dy: 0 })
+      return
+    }
+    activePolyDragRef.current = null
+    setActivePolyDrag(null)
+    polyDragDeltaRef.current = { dx: 0, dy: 0 }
+    setPolyDragDelta({ dx: 0, dy: 0 })
     const drag: ActiveDrag = {
       wallId:    wall.id,
       origStart: { ...wall.start },
@@ -965,18 +1073,49 @@ export function DxfJsonViewPage() {
     setActiveDrag(drag)
     dragDeltaRef.current = { dx: 0, dy: 0 }
     setDragDelta({ dx: 0, dy: 0 })
-  }, [snapshot])
+  }, [snapshot, walls, setActiveDrag, setDragDelta, setActivePolyDrag, setPolyDragDelta])
 
   const onMidDragMove = useCallback((e: Konva.KonvaEventObject<DragEvent>) => {
+    const pDrag = activePolyDragRef.current
+    if (pDrag) {
+      const dx = (e.target.x() - pDrag.initCX) / t.sc
+      const dy = -(e.target.y() - pDrag.initCY) / t.sc
+      polyDragDeltaRef.current = { dx, dy }
+      setPolyDragDelta({ dx, dy })
+      return
+    }
     const drag = activeDragRef.current
     if (!drag) return
     const dx =  (e.target.x() - drag.initCX) / t.sc
     const dy = -(e.target.y() - drag.initCY) / t.sc   // Y-axis is inverted in DXF
     dragDeltaRef.current = { dx, dy }
     setDragDelta({ dx, dy })
-  }, [t.sc])
+  }, [t.sc, setPolyDragDelta, setDragDelta])
 
   const onMidDragEnd = useCallback(() => {
+    const pDrag = activePolyDragRef.current
+    if (pDrag) {
+      const { dx, dy } = polyDragDeltaRef.current
+      if (Math.abs(dx) > 1e-9 || Math.abs(dy) > 1e-9) {
+        setWalls(prev => applyPolylineDrag(prev, pDrag, { dx, dy }))
+        setPlanDoc(prev => ({
+          ...prev,
+          polylines: prev.polylines.map(pl =>
+            pl.handle !== pDrag.polyHandle
+              ? pl
+              : {
+                  ...pl,
+                  vertices: pl.vertices.map(v => ({ ...v, x: v.x + dx, y: v.y + dy })),
+                },
+          ),
+        }))
+      }
+      activePolyDragRef.current = null
+      setActivePolyDrag(null)
+      polyDragDeltaRef.current = { dx: 0, dy: 0 }
+      setPolyDragDelta({ dx: 0, dy: 0 })
+      return
+    }
     const drag = activeDragRef.current
     if (!drag) return
     const delta = dragDeltaRef.current
@@ -985,7 +1124,7 @@ export function DxfJsonViewPage() {
     setActiveDrag(null)
     dragDeltaRef.current = { dx: 0, dy: 0 }
     setDragDelta({ dx: 0, dy: 0 })
-  }, [applyDrag])
+  }, [applyDrag, applyPolylineDrag, setWalls, setPlanDoc, setActivePolyDrag, setPolyDragDelta, setActiveDrag, setDragDelta])
 
   /** Move an arc and all its associated door-frame lines by (dx, dy) in world metres. */
   const moveArcAndLines = useCallback((arcHandle: string, dx: number, dy: number) => {
@@ -1008,6 +1147,27 @@ export function DxfJsonViewPage() {
         }
       }),
     }))
+  }, [])
+
+  /** Move a standalone user arc / circle and its tessellated wall chords together. */
+  const moveStandaloneArc = useCallback((arcHandle: string, dx: number, dy: number) => {
+    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return
+    setPlanDoc(prev => ({
+      ...prev,
+      arcs: prev.arcs.map(a =>
+        a.handle !== arcHandle ? a : {
+          ...a,
+          center: { x: a.center.x + dx, y: a.center.y + dy, z: a.center.z },
+        },
+      ),
+    }))
+    setWalls(prev => prev.map(w =>
+      w.fromArc !== arcHandle ? w : {
+        ...w,
+        start: { x: w.start.x + dx, y: w.start.y + dy },
+        end: { x: w.end.x + dx, y: w.end.y + dy },
+      },
+    ))
   }, [])
 
   /** Move all window lines that belong to `winKey` by (dx, dy) in world metres. */
@@ -1122,10 +1282,12 @@ export function DxfJsonViewPage() {
     let ws = visWalls
     if (roomDrag)
       ws = translateWallsByIds(ws, roomDrag.wallIds, roomDragDelta.dx, roomDragDelta.dy)
-    if (activeDrag)
+    if (activePolyDrag)
+      ws = applyPolylineDrag(ws, activePolyDrag, polyDragDelta)
+    else if (activeDrag)
       ws = applyDrag(ws, activeDrag, dragDelta)
     return ws
-  }, [visWalls, roomDrag, roomDragDelta, activeDrag, dragDelta, applyDrag])
+  }, [visWalls, roomDrag, roomDragDelta, activePolyDrag, polyDragDelta, activeDrag, dragDelta, applyDrag, applyPolylineDrag])
 
   /** Wall length in metres */
   const wallLength = (w: WallSeg) =>
@@ -1166,7 +1328,7 @@ export function DxfJsonViewPage() {
   const handleStageMouseMove = useCallback(() => {
     const stage = stageRef.current
     if (!stage) return
-    const p = stage.getPointerPosition()
+    const p = getStageCanvasPointer(stage)
     if (!p) return
     const [wx, wy] = toW(p.x, p.y, t)
     if (activeTool === 'drawLine' && drawLineAnchorRef.current) {
@@ -1183,13 +1345,13 @@ export function DxfJsonViewPage() {
     if (activeTool === 'drawArc' || activeTool === 'drawCircle') {
       setShapePointer({ x: wx, y: wy })
     }
-  }, [activeTool, t, getSnap])
+  }, [activeTool, t, getSnap, setDrawLinePointer, setPolylineHover, setShapePointer])
 
   const handleStageClick = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     if (e.target !== stageRef.current) return
     const stage = stageRef.current
     if (!stage) return
-    const p = stage.getPointerPosition()
+    const p = getStageCanvasPointer(stage)
     if (!p) return
     const [wx, wy] = toW(p.x, p.y, t)
 
@@ -1266,12 +1428,17 @@ export function DxfJsonViewPage() {
       let endAngle = angle
       if (endAngle <= arcDraftStartAngle!) endAngle += 360
       snapshot()
-      const { next } = appendUserArc(planDoc, arcDraftCenter, arcDraftRadius, arcDraftStartAngle!, endAngle)
+      const { next, arc } = appendUserArc(planDoc, arcDraftCenter, arcDraftRadius, arcDraftStartAngle!, endAngle)
       setPlanDoc(next)
+      setWalls(w => [...w, ...wallSegsFromArc(arc, false)])
       setArcDraftCenter(null)
       setArcDraftRadius(null)
       setArcDraftStartAngle(null)
       setShapePointer(null)
+      setSelectedArcHandle(arc.handle)
+      setSelectedId(null)
+      setSelectedRoomIndex(null)
+      setSelectedTextHandle(null)
       setActiveTool('select')
       return
     }
@@ -1284,10 +1451,15 @@ export function DxfJsonViewPage() {
       const radius = Math.hypot(wx - circleDraftCenter.x, wy - circleDraftCenter.y)
       if (radius < 0.01) return
       snapshot()
-      const { next } = appendUserArc(planDoc, circleDraftCenter, radius, 0, 360)
+      const { next, arc } = appendUserArc(planDoc, circleDraftCenter, radius, 0, 360)
       setPlanDoc(next)
+      setWalls(w => [...w, ...wallSegsFromArc(arc, false)])
       setCircleDraftCenter(null)
       setShapePointer(null)
+      setSelectedArcHandle(arc.handle)
+      setSelectedId(null)
+      setSelectedRoomIndex(null)
+      setSelectedTextHandle(null)
       setActiveTool('select')
       return
     }
@@ -1297,8 +1469,34 @@ export function DxfJsonViewPage() {
     setSelectedTextHandle(null)
     setSelectedArcHandle(null)
     setSelectedWinKey(null)
-  }, [activeTool, t, getSnap, planDoc, snapshot, setActiveTool,
-      arcDraftCenter, arcDraftRadius, arcDraftStartAngle, circleDraftCenter])
+  }, [
+    activeTool,
+    t,
+    getSnap,
+    planDoc,
+    snapshot,
+    setActiveTool,
+    arcDraftCenter,
+    arcDraftRadius,
+    arcDraftStartAngle,
+    circleDraftCenter,
+    setDrawLineAnchor,
+    setDrawLinePointer,
+    setPlanDoc,
+    setWalls,
+    setSelectedId,
+    setSelectedRoomIndex,
+    setSelectedTextHandle,
+    setPolylineDraft,
+    setShowLabels,
+    setArcDraftCenter,
+    setArcDraftRadius,
+    setArcDraftStartAngle,
+    setShapePointer,
+    setSelectedArcHandle,
+    setCircleDraftCenter,
+    setSelectedWinKey,
+  ])
 
   const finishPolyline = useCallback(() => {
     const pts = polylineDraftRef.current
@@ -1336,6 +1534,16 @@ export function DxfJsonViewPage() {
           setPlanDoc(p => removeTextFromDoc(p, selectedTextHandle))
           setSelectedTextHandle(null)
         }
+        else if (selectedArcHandle) {
+          const arc = planDoc.arcs.find(a => a.handle === selectedArcHandle)
+          if (arc && !isDoorStyleArc(planDoc, arc)) {
+            snapshot()
+            const h = selectedArcHandle
+            setPlanDoc(p => removeArcFromDocByHandle(p, h))
+            setWalls(w => w.filter(seg => seg.fromArc !== h))
+            setSelectedArcHandle(null)
+          }
+        }
         else if (selectedId) {
           snapshot()
           const ph = polylineHandleFromWallId(selectedId)
@@ -1344,8 +1552,18 @@ export function DxfJsonViewPage() {
             setWalls(p => p.filter(w => !w.id.startsWith(`pl-${ph}-`)))
           }
           else {
-            setPlanDoc(p => removeLineFromDocByWallId(p, selectedId))
-            setWalls(p => p.filter(w => w.id !== selectedId))
+            const ah = arcHandleFromArcSegWallId(selectedId)
+            if (ah) {
+              const a = planDoc.arcs.find(x => x.handle === ah)
+              if (a && !isDoorStyleArc(planDoc, a)) {
+                setPlanDoc(p => removeArcFromDocByHandle(p, ah))
+                setWalls(w => w.filter(seg => seg.fromArc !== ah))
+              }
+            }
+            else {
+              setPlanDoc(p => removeLineFromDocByWallId(p, selectedId))
+              setWalls(p => p.filter(w => w.id !== selectedId))
+            }
           }
           setSelectedId(null)
         }
@@ -1374,6 +1592,14 @@ export function DxfJsonViewPage() {
         setArcDraftStartAngle(null)
         setCircleDraftCenter(null)
         setShapePointer(null)
+        activeDragRef.current = null
+        setActiveDrag(null)
+        dragDeltaRef.current = { dx: 0, dy: 0 }
+        setDragDelta({ dx: 0, dy: 0 })
+        activePolyDragRef.current = null
+        setActivePolyDrag(null)
+        polyDragDeltaRef.current = { dx: 0, dy: 0 }
+        setPolyDragDelta({ dx: 0, dy: 0 })
       }
       if (e.code === 'Space' && !e.repeat) { e.preventDefault(); setSpaceHeld(true) }
     }
@@ -1386,12 +1612,39 @@ export function DxfJsonViewPage() {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
     }
-  }, [selectedId, selectedTextHandle, snapshot, undo, activeTool])
+  }, [selectedId, selectedArcHandle, selectedTextHandle, planDoc, snapshot, undo, activeTool])
 
   const doc = planDoc
   const selectedTextEntity = selectedTextHandle
     ? doc.texts.find(tx => tx.handle === selectedTextHandle)
     : undefined
+
+  const activateTool = (
+    id: 'select' | 'hand' | 'frame' | 'drawLine' | 'drawPolyline' | 'text' | 'drawArc' | 'drawCircle',
+  ) => {
+    if (id !== 'drawLine') {
+      drawLineAnchorRef.current = null
+      setDrawLineAnchor(null)
+      setDrawLinePointer(null)
+    }
+    if (id !== 'drawPolyline') {
+      polylineDraftRef.current = []
+      setPolylineDraft([])
+      setPolylineHover(null)
+    }
+    if (id !== 'drawArc') {
+      setArcDraftCenter(null)
+      setArcDraftRadius(null)
+      setArcDraftStartAngle(null)
+    }
+    if (id !== 'drawCircle') {
+      setCircleDraftCenter(null)
+    }
+    if (id !== 'drawArc' && id !== 'drawCircle') {
+      setShapePointer(null)
+    }
+    setActiveTool(id)
+  }
 
   return (
     <div className="dxf-editor">
@@ -1457,67 +1710,82 @@ export function DxfJsonViewPage() {
         {/* ── Center: toolbar + white canvas + prompt ── */}
         <main className="dxf-editor-main">
           <div className="dxf-main-tools" role="toolbar" aria-label="Editor tools">
-            {([
-              { id: 'select'      as const, label: 'Select' },
-              { id: 'hand'        as const, label: 'Pan' },
-              { id: 'frame'       as const, label: 'Frame' },
-              { id: 'drawLine'    as const, label: 'Line' },
-              { id: 'drawPolyline'as const, label: 'Polyline' },
-              { id: 'drawArc'     as const, label: 'Arc' },
-              { id: 'drawCircle'  as const, label: 'Circle' },
-              { id: 'text'        as const, label: 'Text' },
-            ]).map(({ id, label }) => (
-              <button
-                key={id}
-                type="button"
-                title={label}
-                className={`dxf-tool-icon dxf-tool-labeled${activeTool === id ? ' active' : ''}`}
-                onClick={() => {
-                  if (id !== 'drawLine') {
-                    drawLineAnchorRef.current = null
-                    setDrawLineAnchor(null)
-                    setDrawLinePointer(null)
-                  }
-                  if (id !== 'drawPolyline') {
-                    polylineDraftRef.current = []
-                    setPolylineDraft([])
-                    setPolylineHover(null)
-                  }
-                  if (id !== 'drawArc') {
-                    setArcDraftCenter(null)
-                    setArcDraftRadius(null)
-                    setArcDraftStartAngle(null)
-                  }
-                  if (id !== 'drawCircle') {
-                    setCircleDraftCenter(null)
-                  }
-                  if (id !== 'drawArc' && id !== 'drawCircle') {
-                    setShapePointer(null)
-                  }
-                  setActiveTool(id)
-                }}
-              >
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                  {id === 'select'       && <path d="M4 4l7 7-4 1-3-4z" />}
-                  {id === 'hand'         && (
-                    <>
-                      <path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0" />
-                      <path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2" />
-                      <path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8" />
-                      <path d="M18 11a2 2 0 1 1 4 0v5a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 19" />
-                    </>
-                  )}
-                  {id === 'frame'        && <rect x="5" y="5" width="14" height="14" rx="1" />}
-                  {id === 'drawLine'     && <path d="M3 21l4.5-4.5M12 3l6 6-9 9H3v-6l9-9z" />}
-                  {id === 'drawPolyline' && <path d="M4 16l4-6 4 5 4-8 4 6" />}
-                  {id === 'drawArc'      && <path d="M3 19 A10 10 0 0 1 21 19" />}
-                  {id === 'drawCircle'   && <circle cx="12" cy="12" r="9" />}
-                  {id === 'text'         && <><path d="M4 6h16M10 6v14M14 6v14" /></>}
-                </svg>
-                {(['drawLine','drawPolyline','drawArc','drawCircle'] as string[]).includes(id) &&
-                  <span className="dxf-tool-caption">{label}</span>}
-              </button>
-            ))}
+            <div className="dxf-tool-cluster">
+              {([
+                { id: 'select' as const, label: 'Select' },
+                { id: 'hand'   as const, label: 'Pan' },
+                { id: 'frame'  as const, label: 'Frame' },
+                { id: 'text'   as const, label: 'Text' },
+              ]).map(({ id, label }) => (
+                <button
+                  key={id}
+                  type="button"
+                  title={label}
+                  className={`dxf-tool-icon${activeTool === id ? ' active' : ''}`}
+                  onClick={() => activateTool(id)}
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                    {id === 'select' && <path d="M4 4l7 7-4 1-3-4z" />}
+                    {id === 'hand' && (
+                      <>
+                        <path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0" />
+                        <path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2" />
+                        <path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8" />
+                        <path d="M18 11a2 2 0 1 1 4 0v5a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 19" />
+                      </>
+                    )}
+                    {id === 'frame' && <rect x="5" y="5" width="14" height="14" rx="1" />}
+                    {id === 'text' && <><path d="M4 6h16M10 6v14M14 6v14" /></>}
+                  </svg>
+                </button>
+              ))}
+            </div>
+
+            <div className="dxf-tool-sep" aria-hidden />
+
+            <div className="dxf-tool-cluster dxf-draw-tool-cluster">
+              {([
+                { id: 'drawLine'     as const, label: 'Line' },
+                { id: 'drawPolyline' as const, label: 'Polyline' },
+                { id: 'drawCircle'   as const, label: 'Circle' },
+                { id: 'drawArc'      as const, label: 'Arc' },
+              ]).map(({ id, label }) => (
+                <button
+                  key={id}
+                  type="button"
+                  title={label}
+                  className={`dxf-tool-icon dxf-tool-labeled${activeTool === id ? ' active' : ''}`}
+                  onClick={() => activateTool(id)}
+                >
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                    {id === 'drawLine' && (
+                      <>
+                        <path d="M5 19L19 5" />
+                        <circle cx="5" cy="19" r="1.35" fill="currentColor" stroke="none" />
+                        <circle cx="19" cy="5" r="1.35" fill="currentColor" stroke="none" />
+                      </>
+                    )}
+                    {id === 'drawPolyline' && (
+                      <>
+                        <path d="M4 18L9 8L15 8Q20 8 20 13" />
+                        <circle cx="4" cy="18" r="1.2" fill="currentColor" stroke="none" />
+                        <circle cx="9" cy="8" r="1.2" fill="currentColor" stroke="none" />
+                        <circle cx="20" cy="13" r="1.2" fill="currentColor" stroke="none" />
+                      </>
+                    )}
+                    {id === 'drawCircle' && (
+                      <>
+                        <circle cx="12" cy="12" r="8" />
+                        <path d="M12 12l4-4" />
+                        <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+                      </>
+                    )}
+                    {id === 'drawArc' && <path d="M4 18A11 11 0 0 1 20 7" />}
+                  </svg>
+                  <span className="dxf-tool-caption">{label}</span>
+                </button>
+              ))}
+            </div>
           </div>
 
           {(['drawLine','drawPolyline','drawArc','drawCircle','text'] as string[]).includes(activeTool) && (
@@ -1662,8 +1930,8 @@ export function DxfJsonViewPage() {
                 )
               })}
 
-              {/* ── Door arcs + associated frame lines ── */}
-              {planDoc.arcs.map((arc) => {
+              {/* ── Door arcs + associated frame lines (non-door arcs draw as wall chords) ── */}
+              {planDoc.arcs.filter(arc => isDoorStyleArc(planDoc, arc)).map((arc) => {
                 const isFullCircle = arc.end_angle - arc.start_angle >= 360
                 const isSelArc  = selectedArcHandle === arc.handle
                 const arcKey    = arc.handle.replace(/^arc-/, '')
@@ -1741,6 +2009,7 @@ export function DxfJsonViewPage() {
                   </Group>
                 )
               })}
+
             </Layer>
 
             {/* ── walls + midpoint handles (pass 1 — bodies only) ── */}
@@ -1749,9 +2018,12 @@ export function DxfJsonViewPage() {
                 const [sx, sy] = toC(wall.start.x, wall.start.y, t)
                 const [ex, ey] = toC(wall.end.x,   wall.end.y,   t)
                 const midX = (sx + ex) / 2, midY = (sy + ey) / 2
-                const isSel      = selectedId === wall.id
-                const isDragging = activeDrag?.wallId === wall.id
-                const showDim = (isSel || isDragging) && !wall.isDetail
+                const isArcSel   = wall.fromArc != null && selectedArcHandle === wall.fromArc
+                const isSel      = selectedId === wall.id || isArcSel
+                const isPolyDragging = !!activePolyDrag && activePolyDrag.segments.some(s => s.id === wall.id)
+                const isDragging = activeDrag?.wallId === wall.id || isPolyDragging
+                const isDragLeader = activeDrag?.wallId === wall.id || activePolyDrag?.leaderSegId === wall.id
+                const showDim = (isSel || isDragLeader) && !wall.isDetail && !wall.fromArc
 
                 const wallColor = wall.isDetail ? '#60a5fa' : strokeHex
                 const strokeW   = ((wall.isOuter ? 2.8 : wall.isDetail ? 0.65 : 1.15) * strokeScale) / zoom
@@ -1774,6 +2046,13 @@ export function DxfJsonViewPage() {
                         e.cancelBubble = true
                         setSelectedTextHandle(null)
                         setSelectedRoomIndex(null)
+                        setSelectedWinKey(null)
+                        if (wall.fromArc) {
+                          setSelectedId(null)
+                          if (activeTool !== 'select') return
+                          setSelectedArcHandle(isArcSel ? null : wall.fromArc!)
+                          return
+                        }
                         setSelectedArcHandle(null)
                         if (activeTool !== 'select') return
                         setSelectedId(isSel ? null : wall.id)
@@ -1817,7 +2096,7 @@ export function DxfJsonViewPage() {
 
                     {/* mid-point square — only for non-selected, non-detail walls.
                         The selected wall's midpoint is re-rendered in pass 2c (on top). */}
-                    {!wall.isDetail && wall.id !== selectedId && (
+                    {!wall.isDetail && !wall.fromArc && wall.id !== selectedId && (
                       <Rect
                         x={midX - MH} y={midY - MH}
                         width={MH * 2} height={MH * 2}
@@ -1847,7 +2126,7 @@ export function DxfJsonViewPage() {
                */}
               {/* 2a — unselected endpoint dots (invisible, no interaction when not selected) */}
               {effectiveWalls
-                .filter(w => !w.isDetail && w.id !== selectedId)
+                .filter(w => !w.isDetail && !w.fromArc && w.id !== selectedId)
                 .map(wall => {
                   const [sx, sy] = toC(wall.start.x, wall.start.y, t)
                   const [ex, ey] = toC(wall.end.x,   wall.end.y,   t)
@@ -1862,19 +2141,19 @@ export function DxfJsonViewPage() {
 
               {/* 2c — SELECTED wall: midpoint square + endpoint circles, on top of everything */}
               {(() => {
-                const wall = effectiveWalls.find(w => w.id === selectedId && !w.isDetail)
+                const wall = effectiveWalls.find(w => w.id === selectedId && !w.isDetail && !w.fromArc)
                 if (!wall) return null
                 const [sx, sy] = toC(wall.start.x, wall.start.y, t)
                 const [ex, ey] = toC(wall.end.x,   wall.end.y,   t)
                 const midX = (sx + ex) / 2, midY = (sy + ey) / 2
-                const isDragging = activeDrag?.wallId === wall.id
+                const isMidDragging = activeDrag?.wallId === wall.id || activePolyDrag?.leaderSegId === wall.id
                 return (
                   <Group key={`ep-sel-${wall.id}`}>
                     {/* midpoint square re-rendered on top so it's also above crossings */}
                     <Rect
                       x={midX - MH} y={midY - MH}
                       width={MH * 2} height={MH * 2}
-                      fill={isDragging ? '#2563eb' : '#334155'}
+                      fill={isMidDragging ? '#2563eb' : '#334155'}
                       stroke="#64748b" strokeWidth={0.8 / zoom}
                       cornerRadius={2 / zoom}
                       draggable
@@ -2046,6 +2325,79 @@ export function DxfJsonViewPage() {
 
             </Layer>
 
+            {/* Selected standalone arcs / circles must sit above the wall layer to receive drags. */}
+            <Layer listening={activeTool === 'select' && !spaceHeld}>
+              {planDoc.arcs
+                .filter(arc => !isDoorStyleArc(planDoc, arc) && arc.handle === selectedArcHandle)
+                .map((arc) => {
+                  const isFullCircle = arc.end_angle - arc.start_angle >= 360
+                  const [arcCx, arcCy] = toC(arc.center.x, arc.center.y, t)
+                  const rCanvas = arc.radius * t.sc
+                  const sw = (1.8 * strokeScale) / zoom
+                  return (
+                    <Group
+                      key={`sel-standalone-${arc.handle}`}
+                      draggable
+                      onDragStart={(e) => {
+                        e.cancelBubble = true
+                        snapshot()
+                        setSelectedId(null)
+                        setSelectedWinKey(null)
+                        setSelectedTextHandle(null)
+                        setSelectedRoomIndex(null)
+                        setSelectedArcHandle(arc.handle)
+                      }}
+                      onDragEnd={(e) => {
+                        const dcx = e.target.x()
+                        const dcy = e.target.y()
+                        e.target.position({ x: 0, y: 0 })
+                        moveStandaloneArc(arc.handle, dcx / t.sc, -dcy / t.sc)
+                      }}
+                      onClick={(e) => {
+                        e.cancelBubble = true
+                        setSelectedId(null)
+                        setSelectedWinKey(null)
+                        setSelectedTextHandle(null)
+                        setSelectedRoomIndex(null)
+                        setSelectedArcHandle(arc.handle)
+                      }}
+                      onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
+                      onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                    >
+                      {isFullCircle ? (
+                        <Circle
+                          x={arcCx}
+                          y={arcCy}
+                          radius={rCanvas}
+                          stroke="#f59e0b"
+                          strokeWidth={sw}
+                          fill="transparent"
+                          hitStrokeWidth={12 / zoom}
+                        />
+                      ) : (
+                        <Line
+                          points={arcPoints(arc, t)}
+                          stroke="#f59e0b"
+                          strokeWidth={sw}
+                          lineCap="round"
+                          lineJoin="round"
+                          hitStrokeWidth={12 / zoom}
+                        />
+                      )}
+                      <Circle
+                        x={arcCx}
+                        y={arcCy}
+                        radius={Math.max(5 / zoom, HR * 0.8)}
+                        fill="#f59e0b"
+                        stroke="#fff"
+                        strokeWidth={1.1 / zoom}
+                        listening={false}
+                      />
+                    </Group>
+                  )
+                })}
+            </Layer>
+
             {/* ── room labels (MTEXT) ── */}
             {showLabels && (
               <Layer>
@@ -2210,31 +2562,35 @@ export function DxfJsonViewPage() {
         <aside className="dxf-right-rail">
           <div className="dxf-prop-panel">
             <div className="dxf-prop-label">Add walls</div>
-            <p className="dxf-prop-hint">Add LINE (two clicks) or LWPOLYLINE (multi-vertex) to the JSON plan.</p>
+            <p className="dxf-prop-hint">Add LINE, LWPOLYLINE, ARC, or CIRCLE — same entities as the top toolbar.</p>
             <div className="dxf-add-wall-btns">
               <button
                 type="button"
                 className={`dxf-action-btn${activeTool === 'drawLine' ? ' dxf-action-btn-active' : ''}`}
-                onClick={() => {
-                  polylineDraftRef.current = []
-                  setPolylineDraft([])
-                  setPolylineHover(null)
-                  setActiveTool('drawLine')
-                }}
+                onClick={() => activateTool('drawLine')}
               >
                 Line
               </button>
               <button
                 type="button"
                 className={`dxf-action-btn${activeTool === 'drawPolyline' ? ' dxf-action-btn-active' : ''}`}
-                onClick={() => {
-                  drawLineAnchorRef.current = null
-                  setDrawLineAnchor(null)
-                  setDrawLinePointer(null)
-                  setActiveTool('drawPolyline')
-                }}
+                onClick={() => activateTool('drawPolyline')}
               >
                 Polyline
+              </button>
+              <button
+                type="button"
+                className={`dxf-action-btn${activeTool === 'drawCircle' ? ' dxf-action-btn-active' : ''}`}
+                onClick={() => activateTool('drawCircle')}
+              >
+                Circle
+              </button>
+              <button
+                type="button"
+                className={`dxf-action-btn${activeTool === 'drawArc' ? ' dxf-action-btn-active' : ''}`}
+                onClick={() => activateTool('drawArc')}
+              >
+                Arc
               </button>
             </div>
             {activeTool === 'drawPolyline' && (
@@ -2322,28 +2678,60 @@ export function DxfJsonViewPage() {
                 setSelectedId(null)
                 setSelectedRoomIndex(null)
                 setSelectedTextHandle(null)
+                setSelectedArcHandle(null)
+                setSelectedWinKey(null)
                 drawLineAnchorRef.current = null
                 setDrawLineAnchor(null)
                 setDrawLinePointer(null)
                 polylineDraftRef.current = []
                 setPolylineDraft([])
                 setPolylineHover(null)
+                setArcDraftCenter(null)
+                setArcDraftRadius(null)
+                setArcDraftStartAngle(null)
+                setCircleDraftCenter(null)
+                setShapePointer(null)
+                activeDragRef.current = null
+                setActiveDrag(null)
+                dragDeltaRef.current = { dx: 0, dy: 0 }
+                setDragDelta({ dx: 0, dy: 0 })
+                activePolyDragRef.current = null
+                setActivePolyDrag(null)
+                polyDragDeltaRef.current = { dx: 0, dy: 0 }
+                setPolyDragDelta({ dx: 0, dy: 0 })
               }}
             >
               Reset plan
             </button>
-            {selectedId && (
+            {(selectedId || (selectedArcHandle && planDoc.arcs.some(a => a.handle === selectedArcHandle && !isDoorStyleArc(planDoc, a)))) && (
               <button type="button" className="dxf-action-btn danger" onClick={() => {
                 snapshot()
-                const id = selectedId
+                if (selectedArcHandle && planDoc.arcs.some(a => a.handle === selectedArcHandle && !isDoorStyleArc(planDoc, a))) {
+                  const h = selectedArcHandle
+                  setPlanDoc(p => removeArcFromDocByHandle(p, h))
+                  setWalls(w => w.filter(seg => seg.fromArc !== h))
+                  setSelectedArcHandle(null)
+                  return
+                }
+                const id = selectedId!
                 const ph = polylineHandleFromWallId(id)
                 if (ph) {
                   setPlanDoc(p => removePolylineFromDocByHandle(p, ph))
                   setWalls(p => p.filter(w => !w.id.startsWith(`pl-${ph}-`)))
                 }
                 else {
-                  setPlanDoc(p => removeLineFromDocByWallId(p, id))
-                  setWalls(p => p.filter(w => w.id !== id))
+                  const ah = arcHandleFromArcSegWallId(id)
+                  if (ah) {
+                    const a = planDoc.arcs.find(x => x.handle === ah)
+                    if (a && !isDoorStyleArc(planDoc, a)) {
+                      setPlanDoc(p => removeArcFromDocByHandle(p, ah))
+                      setWalls(w => w.filter(seg => seg.fromArc !== ah))
+                    }
+                  }
+                  else {
+                    setPlanDoc(p => removeLineFromDocByWallId(p, id))
+                    setWalls(p => p.filter(w => w.id !== id))
+                  }
                 }
                 setSelectedId(null)
               }}>Delete selected</button>
