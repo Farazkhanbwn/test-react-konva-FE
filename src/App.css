@@ -1583,3 +1583,54 @@ button.dxf-furn-palette-item.active {
   background: rgba(30, 41, 59, 0.8);
   color: #fff;
 }
+
+/* ── Room Library Panel ─────────────────────────────────────── */
+.dxf-room-library-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.dxf-room-library-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  cursor: grab;
+  background: rgba(30, 41, 59, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  transition: background 0.15s, border-color 0.15s;
+  user-select: none;
+}
+
+.dxf-room-library-item:hover {
+  background: rgba(51, 65, 85, 0.75);
+  border-color: rgba(148, 163, 184, 0.28);
+}
+
+.dxf-room-library-item:active {
+  cursor: grabbing;
+}
+
+.dxf-room-library-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.dxf-room-library-name {
+  flex: 1;
+  font-size: 0.75rem;
+  color: #cbd5e1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dxf-room-library-size {
+  font-size: 0.68rem;
+  color: #64748b;
+  flex-shrink: 0;
+}

@@ -49,6 +49,7 @@ import { FurnitureLibraryPanel, FURNITURE_DXF_DRAG_MIME } from '@/components/Fur
 import {
   buildFurnitureLinesFromLibraryId,
   getFurnitureDxfTemplate,
+  FURNITURE_DXF_TEMPLATES,
 } from '@/data/furnitureLibraryDxf'
 import { clientXYToWorldXY } from '@/utils/konvaDropToWorld'
 import type { WallSeg } from '@/utils/wallsFromDxfJson'
@@ -194,6 +195,39 @@ function removePolylineFromDocByHandle(doc: DxfJsonDocument, handle: string): Dx
   }
   return next
 }
+
+/* ─── Furniture category colours ──────────────────────────── */
+const FURNITURE_CATEGORY_COLORS: Record<string, string> = {
+  'Kitchen':      '#f97316',
+  'Bedroom':      '#8b5cf6',
+  'Living Room':  '#3b82f6',
+  'Dining Room':  '#10b981',
+  'Bathroom':     '#06b6d4',
+  'Office':       '#ef4444',
+  'Conference':   '#6366f1',
+  'Break Room':   '#84cc16',
+  'Reception':    '#f59e0b',
+  'Corridor':     '#78716c',
+}
+
+/** Maps block_name / template label → category (built once at module load). */
+const FURNITURE_LABEL_TO_CATEGORY = new Map<string, string>(
+  FURNITURE_DXF_TEMPLATES.map(t => [t.label, t.category as string])
+)
+
+/* ─── Room library templates ───────────────────────────────── */
+export const ROOM_TEMPLATE_MIME = 'application/x-room-template'
+
+export const ROOM_TEMPLATES = [
+  { id: 'bedroom',        label: 'Bedroom',        w: 3.0, h: 3.6, color: '#8b5cf6' },
+  { id: 'master-bedroom', label: 'Master Bedroom',  w: 4.0, h: 4.5, color: '#7c3aed' },
+  { id: 'living-room',    label: 'Living Room',     w: 5.0, h: 4.0, color: '#3b82f6' },
+  { id: 'kitchen',        label: 'Kitchen',         w: 3.0, h: 3.0, color: '#f97316' },
+  { id: 'bathroom',       label: 'Bathroom',        w: 2.0, h: 2.5, color: '#06b6d4' },
+  { id: 'dining-room',    label: 'Dining Room',     w: 4.0, h: 3.5, color: '#10b981' },
+  { id: 'office',         label: 'Office',          w: 3.0, h: 3.0, color: '#ef4444' },
+  { id: 'hallway',        label: 'Hallway',         w: 1.5, h: 4.0, color: '#78716c' },
+] as const
 
 /* ─── DXF Export ─────────────────────────────────────────── */
 /* ─── Build DxfJsonDocument from current canvas walls ── */
@@ -845,13 +879,19 @@ function exportToDxfString(
   return out
 }
 
+/** Returns `room-lbl-{polyHandle}` — used to link a room label to its polyline. */
+function roomLabelHandle(polyHandle: string): string {
+  return `room-lbl-${polyHandle}`
+}
+
 function appendUserText(
   doc: DxfJsonDocument,
   position: Pt,
   text = 'Label',
   height = 0.2,
+  overrideHandle?: string,
 ): { next: DxfJsonDocument; handle: string } {
-  const handle = `user-t-${Date.now()}`
+  const handle = overrideHandle ?? `user-t-${Date.now()}`
   const entity: DxfText = {
     entity_type: 'MTEXT',
     handle,
@@ -1380,7 +1420,8 @@ export function DxfJsonViewPage() {
   const [snapEnabled, setSnapEnabled] = useState(true)
   const [orthoEnabled, setOrthoEnabled] = useState(false)
   const [showDetail, setShowDetail]   = useState(true)
-  const [showLabels, setShowLabels]   = useState(true)
+  const [showLabels, setShowLabels]           = useState(true)
+  const [showFurnitureLabels, setShowFurnitureLabels] = useState(true)
   const [selectedArcHandle, setSelectedArcHandle] = useState<string | null>(null)
   const [selectedWinKey, setSelectedWinKey]       = useState<string | null>(null)
   const [selectedFurnKey, setSelectedFurnKey]     = useState<string | null>(null)
@@ -1437,7 +1478,8 @@ export function DxfJsonViewPage() {
     wallIds: string[]
     textHandles: string[]
     arcHandles: string[]
-    winKey?: string   // window group key if rotating a window
+    winKey?: string    // window group key if rotating a window
+    furnKey?: string   // furniture group key if rotating furniture
   }
   const rotationDragRef = useRef<RotationDrag | null>(null)
   const [rotationDrag, setRotationDrag] = useState<RotationDrag | null>(null)
@@ -1452,7 +1494,8 @@ export function DxfJsonViewPage() {
     wallIds: string[]
     textHandles: string[]
     arcHandles: string[]
-    winKey?: string   // window group key if resizing a window
+    winKey?: string    // window group key if resizing a window
+    furnKey?: string   // furniture group key if resizing furniture
   }
   const resizeDragRef = useRef<ResizeDrag | null>(null)
   const [resizeDrag, setResizeDrag] = useState<ResizeDrag | null>(null)
@@ -1628,6 +1671,33 @@ export function DxfJsonViewPage() {
     }
     return lines
   }, [planDoc.door_lines, planDoc.window_lines, activeDrag, dragDelta, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
+
+  /** Like effectiveLines but for furniture — applies live rotation/resize preview. */
+  const effectiveFurnitureLines = useMemo(() => {
+    let lines = planDoc.furniture_lines ?? []
+    if (rotationDrag?.furnKey && rotationAngleDelta !== 0) {
+      lines = lines.map(l => {
+        if (furnitureGroupKeyFromHandle(l.handle) !== rotationDrag.furnKey) return l
+        const [sx, sy] = rotatePoint(l.start.x, l.start.y, rotationDrag.centerWX, rotationDrag.centerWY, rotationAngleDelta)
+        const [ex, ey] = rotatePoint(l.end.x, l.end.y, rotationDrag.centerWX, rotationDrag.centerWY, rotationAngleDelta)
+        return { ...l, start: { ...l.start, x: sx, y: sy }, end: { ...l.end, x: ex, y: ey } }
+      })
+    }
+    if (resizeDrag?.furnKey && resizePreview) {
+      const { initBBox } = resizeDrag
+      const origW = initBBox.maxWX - initBBox.minWX || 1e-9
+      const origH = initBBox.maxWY - initBBox.minWY || 1e-9
+      const newW  = resizePreview.maxWX - resizePreview.minWX
+      const newH  = resizePreview.maxWY - resizePreview.minWY
+      const scaleX = (x: number) => resizePreview.minWX + (x - initBBox.minWX) / origW * newW
+      const scaleY = (y: number) => resizePreview.minWY + (y - initBBox.minWY) / origH * newH
+      lines = lines.map(l => {
+        if (furnitureGroupKeyFromHandle(l.handle) !== resizeDrag.furnKey) return l
+        return { ...l, start: { ...l.start, x: scaleX(l.start.x), y: scaleY(l.start.y) }, end: { ...l.end, x: scaleX(l.end.x), y: scaleY(l.end.y) } }
+      })
+    }
+    return lines
+  }, [planDoc.furniture_lines, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
 
   const roomsWithWalls = useMemo(() => {
     let ws = walls
@@ -1827,6 +1897,12 @@ export function DxfJsonViewPage() {
         const [ex, ey] = rotatePoint(l.end.x, l.end.y, rd.centerWX, rd.centerWY, angle)
         return { ...l, start: { ...l.start, x: sx, y: sy }, end: { ...l.end, x: ex, y: ey } }
       }),
+      furniture_lines: rd.furnKey ? (prev.furniture_lines ?? []).map(l => {
+        if (furnitureGroupKeyFromHandle(l.handle) !== rd.furnKey) return l
+        const [sx, sy] = rotatePoint(l.start.x, l.start.y, rd.centerWX, rd.centerWY, angle)
+        const [ex, ey] = rotatePoint(l.end.x, l.end.y, rd.centerWX, rd.centerWY, angle)
+        return { ...l, start: { ...l.start, x: sx, y: sy }, end: { ...l.end, x: ex, y: ey } }
+      }) : prev.furniture_lines,
     }))
   }, [])
 
@@ -1886,6 +1962,12 @@ export function DxfJsonViewPage() {
         const e = scalePos(l.end.x, l.end.y)
         return { ...l, start: { ...l.start, x: s.x, y: s.y }, end: { ...l.end, x: e.x, y: e.y } }
       }),
+      furniture_lines: rd.furnKey ? (prev.furniture_lines ?? []).map(l => {
+        if (furnitureGroupKeyFromHandle(l.handle) !== rd.furnKey) return l
+        const s = scalePos(l.start.x, l.start.y)
+        const e = scalePos(l.end.x, l.end.y)
+        return { ...l, start: { ...l.start, x: s.x, y: s.y }, end: { ...l.end, x: e.x, y: e.y } }
+      }) : prev.furniture_lines,
     }))
   }, [planDoc.arcs, applyResizeToWalls])
 
@@ -2070,13 +2152,13 @@ export function DxfJsonViewPage() {
   /** Furniture lines grouped so each piece drags together (see `furnitureGroupKeyFromHandle`). */
   const furnitureGroups = useMemo(() => {
     const groups = new Map<string, DxfLine[]>()
-    for (const ln of planDoc.furniture_lines ?? []) {
+    for (const ln of effectiveFurnitureLines) {
       const key = furnitureGroupKeyFromHandle(ln.handle)
       if (!groups.has(key)) groups.set(key, [])
       groups.get(key)!.push(ln)
     }
     return Array.from(groups.entries()).map(([key, lines]) => ({ key, lines }))
-  }, [planDoc.furniture_lines])
+  }, [effectiveFurnitureLines])
 
   /** Maps each furniture group key → the block_name from the nearest furniture insert. */
   const furnitureLabels = useMemo(() => {
@@ -2249,7 +2331,7 @@ export function DxfJsonViewPage() {
   }, [visWalls, activeDrag, dragDelta, applyDrag, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
 
   const effectiveSelBBox = useMemo(() => {
-    if (selectedIds.size === 0 && !selectedWinKey) return null
+    if (selectedIds.size === 0 && !selectedWinKey && !selectedFurnKey) return null
     let minCX = Infinity, minCY = Infinity, maxCX = -Infinity, maxCY = -Infinity
     let hasAny = false
     for (const w of effectiveWalls.filter(w => selectedIds.has(w.id))) {
@@ -2288,9 +2370,20 @@ export function DxfJsonViewPage() {
         }
       }
     }
+    // Include selected furniture lines
+    if (selectedFurnKey) {
+      for (const ln of effectiveFurnitureLines.filter(l => furnitureGroupKeyFromHandle(l.handle) === selectedFurnKey)) {
+        for (const p of [ln.start, ln.end]) {
+          const [cx, cy] = toC(p.x, p.y, t)
+          minCX = Math.min(minCX, cx); maxCX = Math.max(maxCX, cx)
+          minCY = Math.min(minCY, cy); maxCY = Math.max(maxCY, cy)
+          hasAny = true
+        }
+      }
+    }
     if (!hasAny) return null
     return { minCX, minCY, maxCX, maxCY }
-  }, [effectiveWalls, effectiveTexts, effectiveArcs, effectiveLines, selectedIds, selectedWinKey, t, zoom])
+  }, [effectiveWalls, effectiveTexts, effectiveArcs, effectiveLines, effectiveFurnitureLines, selectedIds, selectedWinKey, selectedFurnKey, t, zoom])
 
   const worldSelBounds = useMemo(() => {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -2305,9 +2398,14 @@ export function DxfJsonViewPage() {
         for (const p of [ln.start, ln.end]) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); hasAny = true }
       }
     }
+    if (selectedFurnKey) {
+      for (const ln of (planDoc.furniture_lines ?? []).filter(l => furnitureGroupKeyFromHandle(l.handle) === selectedFurnKey)) {
+        for (const p of [ln.start, ln.end]) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); hasAny = true }
+      }
+    }
     if (!hasAny) return null
     return { minX, minY, maxX, maxY }
-  }, [walls, planDoc.texts, planDoc.arcs, planDoc.window_lines, selectedIds, selectedWinKey])
+  }, [walls, planDoc.texts, planDoc.arcs, planDoc.window_lines, planDoc.furniture_lines, selectedIds, selectedWinKey, selectedFurnKey])
 
   const baseSelCenter = useMemo(() => {
     if (!worldSelBounds) return null
@@ -2342,24 +2440,53 @@ export function DxfJsonViewPage() {
   const handleFurnitureDrop = useCallback(
     (e: ReactDragEvent<HTMLDivElement>) => {
       e.preventDefault()
-      const id = e.dataTransfer.getData(FURNITURE_DXF_DRAG_MIME)
-      if (!id || !getFurnitureDxfTemplate(id)) return
       const stage = stageRef.current
       if (!stage) return
       const [wx, wy] = clientXYToWorldXY(stage, e.clientX, e.clientY, t)
       const snapped = getSnap(wx, wy, [])
+
+      // ── Room template drop ──────────────────────────────────
+      const roomPayload = e.dataTransfer.getData(ROOM_TEMPLATE_MIME)
+      if (roomPayload) {
+        const { w, h, label } = JSON.parse(roomPayload) as { id: string; w: number; h: number; label: string }
+        const hw = w / 2, hh = h / 2
+        snapshot()
+        const { next: nextDoc, poly } = appendUserPolyline(
+          planDoc,
+          [
+            { x: snapped.x - hw, y: snapped.y + hh },
+            { x: snapped.x + hw, y: snapped.y + hh },
+            { x: snapped.x + hw, y: snapped.y - hh },
+            { x: snapped.x - hw, y: snapped.y - hh },
+          ],
+          true,
+        )
+        // Add a label text at the centre — handle is linked to the polyline for co-selection/deletion
+        const lblHandle = roomLabelHandle(poly.handle)
+        const { next: finalDoc } = appendUserText(nextDoc, { x: snapped.x, y: snapped.y }, label, 0.2, lblHandle)
+        setPlanDoc(finalDoc)
+        const newSegs = wallSegsFromPolyline(poly, false, `pl-${poly.handle}`)
+        setWalls(prev => [...prev, ...newSegs])
+        const allIds = new Set([...newSegs.map(s => s.id), lblHandle])
+        setSelectedIds(allIds); setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
+        setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null)
+        return
+      }
+
+      // ── Furniture item drop ─────────────────────────────────
+      const id = e.dataTransfer.getData(FURNITURE_DXF_DRAG_MIME)
+      if (!id || !getFurnitureDxfTemplate(id)) return
       snapshot()
       const tmpl = getFurnitureDxfTemplate(id)!
       const newLines = buildFurnitureLinesFromLibraryId(id, snapped.x, snapped.y)
       if (!newLines.length) return
-      // Derive a stable insert handle from the group key so the label lookup works.
       const groupSuffix = newLines[0]!.handle.slice('furn-'.length).split('-')[0]
       const syntheticInsert: DxfInsert = {
         entity_type: 'INSERT',
         handle: `furn-ins-${groupSuffix}`,
         layer: '0',
         block_name: tmpl.label,
-        category: 'furniture',
+        category: tmpl.category,
         is_anonymous_block: false,
         position: { x: snapped.x, y: snapped.y, z: 0 },
         rotation: 0,
@@ -2381,7 +2508,7 @@ export function DxfJsonViewPage() {
       setSelectedArcHandle(null)
       setSelectedIds(new Set())
     },
-    [t, getSnap, snapshot],
+    [t, getSnap, snapshot, planDoc],
   )
 
   /**
@@ -2396,7 +2523,7 @@ export function DxfJsonViewPage() {
    */
   const exportDxf = useCallback(() => {
     const base = (planDoc.source_file ?? 'floor-plan').replace(/\.dxf$/i, '')
-    const allLines = [...(planDoc.door_lines ?? []), ...(planDoc.window_lines ?? [])]
+    const allLines = [...(planDoc.door_lines ?? []), ...(planDoc.window_lines ?? []), ...(planDoc.furniture_lines ?? [])]
     downloadDxf(walls, planDoc.texts, planDoc.arcs, allLines, `${base}-exported.dxf`)
   }, [walls, planDoc])
 
@@ -2545,7 +2672,11 @@ export function DxfJsonViewPage() {
         else if (selectedId) {
           snapshot()
           const ph = polylineHandleFromWallId(selectedId)
-          if (ph) { setPlanDoc(p => removePolylineFromDocByHandle(p, ph)); setWalls(p => p.filter(w => !w.id.startsWith(`pl-${ph}-`))) }
+          if (ph) {
+            const lbl = roomLabelHandle(ph)
+            setPlanDoc(p => { let d = removePolylineFromDocByHandle(p, ph); d = { ...d, texts: d.texts.filter(tx => tx.handle !== lbl) }; return d })
+            setWalls(p => p.filter(w => !w.id.startsWith(`pl-${ph}-`)))
+          }
           else {
             const ah = arcHandleFromArcSegWallId(selectedId)
             if (ah) {
@@ -2657,6 +2788,9 @@ export function DxfJsonViewPage() {
             <button type="button" className={`dxf-layer-item${showLabels ? ' active' : ''}`} onClick={() => setShowLabels(v => !v)}>
               <span className="dxf-layer-icon dxf-layer-text" /> Room labels
             </button>
+            <button type="button" className={`dxf-layer-item${showFurnitureLabels ? ' active' : ''}`} onClick={() => setShowFurnitureLabels(v => !v)}>
+              <span className="dxf-layer-icon dxf-layer-text" /> Furniture labels
+            </button>
           </div>
           <div className="dxf-rail-section compact">
             <div className="dxf-rail-label">Rooms</div>
@@ -2671,6 +2805,29 @@ export function DxfJsonViewPage() {
                   R{i + 1} · <strong>{formatArea(polyArea(r))}</strong>
                 </button>
               ))}
+          </div>
+          <div className="dxf-rail-section compact">
+            <div className="dxf-rail-label">Room Library</div>
+            <p className="dxf-note" style={{ marginBottom: 6 }}>Drag a room onto the canvas to place it.</p>
+            <div className="dxf-room-library-grid">
+              {ROOM_TEMPLATES.map(rm => (
+                <div
+                  key={rm.id}
+                  className="dxf-room-library-item"
+                  draggable
+                  style={{ '--room-color': rm.color } as React.CSSProperties}
+                  onDragStart={e => {
+                    e.dataTransfer.setData(ROOM_TEMPLATE_MIME, JSON.stringify({ id: rm.id, w: rm.w, h: rm.h, label: rm.label }))
+                    e.dataTransfer.effectAllowed = 'copy'
+                  }}
+                  title={`${rm.label} (${rm.w}m × ${rm.h}m)`}
+                >
+                  <div className="dxf-room-library-swatch" style={{ background: rm.color }} />
+                  <span className="dxf-room-library-name">{rm.label}</span>
+                  <span className="dxf-room-library-size">{rm.w}×{rm.h}m</span>
+                </div>
+              ))}
+            </div>
           </div>
           <div className="dxf-rail-section compact" style={{ minHeight: 0, display: 'flex', flexDirection: 'column' }}>
             <FurnitureLibraryPanel />
@@ -2844,20 +3001,23 @@ export function DxfJsonViewPage() {
                   {/* Furniture groups */}
                   {furnitureGroups.map(({ key, lines }) => {
                     const isSel = selectedFurnKey === key
-                    const furnColor = isSel ? '#f59e0b' : strokeHex
-                    const sw = (1.5 * strokeScale) / zoom
                     const label = furnitureLabels.get(key)
+                    const category = label ? FURNITURE_LABEL_TO_CATEGORY.get(label) : undefined
+                    const categoryColor = category ? FURNITURE_CATEGORY_COLORS[category] : undefined
+                    const baseColor = categoryColor ?? strokeHex
+                    const furnColor = isSel ? '#f59e0b' : baseColor
+                    const sw = (1.5 * strokeScale) / zoom
                     let cx = 0, cy = 0
-                    if (label && lines.length > 0) {
+                    if (lines.length > 0) {
                       let sx = 0, sy = 0, n = 0
                       for (const ln of lines) { sx += ln.start.x + ln.end.x; sy += ln.start.y + ln.end.y; n += 2 }
                       ;[cx, cy] = toC(sx / n, sy / n, t)
                     }
                     return (
                       <Group key={`furngrp-${key}`} draggable
-                        onDragStart={e => { e.cancelBubble = true; snapshot(); setSelectedFurnKey(key); setSelectedWinKey(null); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null) }}
+                        onDragStart={e => { e.cancelBubble = true; snapshot(); setSelectedFurnKey(key); setSelectedIds(new Set()); setSelectedWinKey(null); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null) }}
                         onDragEnd={e => { const dcx = e.target.x(), dcy = e.target.y(); e.target.position({ x: 0, y: 0 }); moveFurnitureGroupByKey(key, dcx / t.sc, -dcy / t.sc) }}
-                        onClick={e => { e.cancelBubble = true; setSelectedFurnKey(isSel ? null : key); setSelectedWinKey(null); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null) }}
+                        onClick={e => { e.cancelBubble = true; setSelectedFurnKey(isSel ? null : key); setSelectedIds(new Set()); setSelectedWinKey(null); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null) }}
                         onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
                         onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                       >
@@ -2866,8 +3026,8 @@ export function DxfJsonViewPage() {
                           const [x2, y2] = toC(ln.end.x, ln.end.y, t)
                           return <Line key={ln.handle} points={[x1, y1, x2, y2]} stroke={furnColor} strokeWidth={sw} lineCap="round" hitStrokeWidth={10 / zoom} />
                         })}
-                        {label && (
-                          <Text x={cx} y={cy} text={label} fontSize={11 / zoom} fill={isSel ? '#f59e0b' : '#64748b'} listening={false} />
+                        {showFurnitureLabels && label && (
+                          <Text x={cx} y={cy} text={label} fontSize={11 / zoom} fill={isSel ? '#f59e0b' : (categoryColor ?? '#64748b')} listening={false} />
                         )}
                       </Group>
                     )
@@ -2973,6 +3133,11 @@ export function DxfJsonViewPage() {
                             e.cancelBubble = true
                             selBeforeMouseDown.current = new Set(selectedIds)
                             const groupIds = getGroupWallIds(wall.id, walls)
+                            // If this polyline has a linked room label, include it
+                            if (wall.groupId?.startsWith('pl-')) {
+                              const lbl = roomLabelHandle(wall.groupId.slice(3))
+                              if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
+                            }
                             const groupFullySelected = groupIds.every(id => selectedIds.has(id))
                             let currentSel = selectedIds
                             if (!groupFullySelected) {
@@ -2989,6 +3154,10 @@ export function DxfJsonViewPage() {
                             e.cancelBubble = true
                             const isCtrl = e.evt.ctrlKey || e.evt.metaKey
                             const groupIds = getGroupWallIds(wall.id, walls)
+                            if (wall.groupId?.startsWith('pl-')) {
+                              const lbl = roomLabelHandle(wall.groupId.slice(3))
+                              if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
+                            }
                             setSelectedIds(prev => {
                               if (!isCtrl) return new Set(groupIds)
                               if (selBeforeMouseDown.current.has(wall.id)) { const next = new Set(prev); groupIds.forEach(id => next.delete(id)); return next }
@@ -3219,12 +3388,12 @@ export function DxfJsonViewPage() {
                 )}
 
                 {/* ── resize + rotation handles ── */}
-                {effectiveSelBBox && (selectedIds.size > 0 || selectedWinKey !== null) && activeTool === 'select' && !activeDrag && (() => {
+                {effectiveSelBBox && (selectedIds.size > 0 || selectedWinKey !== null || selectedFurnKey !== null) && activeTool === 'select' && !activeDrag && (() => {
                   const { minCX, minCY, maxCX, maxCY } = effectiveSelBBox
                   const pad = 6 / zoom
                   const w = maxCX - minCX, h = maxCY - minCY
                   // For text-only selection, show only a selection outline + rotation — no resize squares
-                  const onlyTexts = selectedWinKey ? false : [...selectedIds].every(id => planDoc.texts.some(tx => tx.handle === id))
+                  const onlyTexts = (selectedWinKey || selectedFurnKey) ? false : [...selectedIds].every(id => planDoc.texts.some(tx => tx.handle === id))
                   const handleSize = 8 / zoom, halfHandle = handleSize / 2
                   const corners = {
                     nw: { x: minCX - pad, y: minCY - pad }, ne: { x: maxCX + pad, y: minCY - pad },
@@ -3253,6 +3422,7 @@ export function DxfJsonViewPage() {
                               textHandles: planDoc.texts.filter(tx => selectedIds.has(tx.handle)).map(tx => tx.handle),
                               arcHandles: planDoc.arcs.filter(a => selectedIds.has(a.handle)).map(a => a.handle),
                               winKey: selectedWinKey ?? undefined,
+                              furnKey: selectedFurnKey ?? undefined,
                             }
                             resizeDragRef.current = rd; resizePreviewRef.current = { ...baseSelWBox }
                             setResizeDrag(rd); setResizePreview({ ...baseSelWBox })
@@ -3282,6 +3452,7 @@ export function DxfJsonViewPage() {
                             textHandles: planDoc.texts.filter(tx => selectedIds.has(tx.handle)).map(tx => tx.handle),
                             arcHandles: planDoc.arcs.filter(a => selectedIds.has(a.handle)).map(a => a.handle),
                             winKey: selectedWinKey ?? undefined,
+                            furnKey: selectedFurnKey ?? undefined,
                           }
                           rotationDragRef.current = rd; rotationAngleDeltaRef.current = 0
                           setRotationDrag(rd); setRotationAngleDelta(0)
