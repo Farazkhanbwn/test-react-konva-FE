@@ -881,6 +881,31 @@
   color: #737373;
 }
 
+.dxf-editor-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.dxf-export-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: #e5e5e5;
+  background: #1d4ed8;
+  border: none;
+  padding: 0.35rem 0.85rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.dxf-export-btn:hover {
+  background: #1e40af;
+  color: #fff;
+}
+
 .dxf-editor-home {
   font-size: 0.8rem;
   color: #a3a3a3;
