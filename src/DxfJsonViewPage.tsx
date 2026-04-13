@@ -30,6 +30,7 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { DragEvent as ReactDragEvent } from 'react'
 import { Stage, Layer, Line, Text, Group, Rect, Circle } from 'react-konva'
 import type Konva from 'konva'
 import { Link } from 'react-router-dom'
@@ -38,11 +39,18 @@ import {
   DXF_JSON_DATA,
   type DxfJsonDocument,
   type DxfArc,
+  type DxfInsert,
   type DxfLine,
   type DxfPolyline,
   type DxfPolylineVertex,
   type DxfText,
 } from '@/constants/dxfJsonData'
+import { FurnitureLibraryPanel, FURNITURE_DXF_DRAG_MIME } from '@/components/FurnitureLibraryPanel'
+import {
+  buildFurnitureLinesFromLibraryId,
+  getFurnitureDxfTemplate,
+} from '@/data/furnitureLibraryDxf'
+import { clientXYToWorldXY } from '@/utils/konvaDropToWorld'
 import type { WallSeg } from '@/utils/wallsFromDxfJson'
 import {
   arcHandleFromArcSegWallId,
@@ -188,6 +196,321 @@ function removePolylineFromDocByHandle(doc: DxfJsonDocument, handle: string): Dx
 }
 
 /* ─── DXF Export ─────────────────────────────────────────── */
+/* ─── Build DxfJsonDocument from current canvas walls ── */
+// buildDocFromWalls and docToDxfString removed — use downloadDxf from exportToDxf.ts
+function buildDocFromWalls(doc: DxfJsonDocument, walls: WallSeg[]): DxfJsonDocument {
+  const ungrouped = walls.filter(w => !w.groupId)
+  const grouped = new Map<string, WallSeg[]>()
+  for (const w of walls) {
+    if (!w.groupId) continue
+    if (!grouped.has(w.groupId)) grouped.set(w.groupId, [])
+    grouped.get(w.groupId)!.push(w)
+  }
+
+  const lines: DxfLine[] = ungrouped.map(w => ({
+    entity_type: 'LINE' as const,
+    handle: w.id.replace(/^ln-/, ''),
+    layer: '0',
+    start: { x: w.start.x, y: w.start.y, z: 0 },
+    end:   { x: w.end.x,   y: w.end.y,   z: 0 },
+  }))
+
+  const polylines: DxfPolyline[] = [...grouped.entries()].map(([gid, segs]) => {
+    const ordered = sortPolylineVertices(segs)
+    const verts: DxfPolylineVertex[] = []
+    for (const s of ordered) {
+      const last = verts[verts.length - 1]
+      if (!last || Math.abs(last.x - s.start.x) > 0.01 || Math.abs(last.y - s.start.y) > 0.01)
+        verts.push({ x: s.start.x, y: s.start.y, z: 0, bulge: 0 })
+      verts.push({ x: s.end.x, y: s.end.y, z: 0, bulge: 0 })
+    }
+    const closed =
+      verts.length > 2 &&
+      Math.abs(verts[0].x - verts[verts.length - 1].x) < 0.01 &&
+      Math.abs(verts[0].y - verts[verts.length - 1].y) < 0.01
+    if (closed) verts.pop()
+    return {
+      entity_type: 'LWPOLYLINE' as const,
+      handle: gid.replace(/^pl-/, ''),
+      layer: '0',
+      closed,
+      vertex_count: verts.length,
+      vertices: verts,
+    }
+  })
+
+  return { ...doc, lines, polylines }
+}
+
+/* ─── DXF exporter ─────────────────────────────── */
+/**
+ * Serialises a DxfJsonDocument to a standards-compliant AutoCAD ASCII DXF.
+ *
+ * Produces the sections Autodesk Viewer requires:
+ *   HEADER → TABLES (VPORT/LTYPE/LAYER/STYLE/VIEW/UCS/APPID/DIMSTYLE/BLOCK_RECORD)
+ *   → BLOCKS (*Model_Space + *Paper_Space) → ENTITIES → OBJECTS (root DICTIONARY)
+ *
+ * Group-code formatting matches AutoCAD output:
+ *   • codes right-aligned in 3-char field ("  0", " 10", "100")
+ *   • integer values right-aligned in 6-char field ("     1", "   256")
+ *   • float / string values written verbatim
+ */
+function docToDxfString(doc: DxfJsonDocument): string {
+  const out: string[] = []
+
+  const push = (code: number, value: string | number) => {
+    out.push(String(code).padStart(3, ' '))
+    if (typeof value === 'number' && Number.isInteger(value)) {
+      out.push(String(value).padStart(6, ' '))
+    } else {
+      out.push(String(value))
+    }
+  }
+
+  const n = (v: number) => v.toFixed(8)
+
+  /* Fixed handle assignments (matching standard AutoCAD layout) */
+  const H_BLOCK_REC_TABLE  = '1'
+  const H_LAYER_TABLE      = '2'
+  const H_STYLE_TABLE      = '3'
+  const H_LTYPE_TABLE      = '5'
+  const H_VIEW_TABLE       = '6'
+  const H_UCS_TABLE        = '7'
+  const H_VPORT_TABLE      = '8'
+  const H_APPID_TABLE      = '9'
+  const H_DIMSTYLE_TABLE   = 'A'
+  const H_ROOT_DICT        = 'C'
+  const H_LAYER_0          = '10'
+  const H_LTYPE_BYBLOCK    = '14'
+  const H_LTYPE_BYLAYER    = '15'
+  const H_LTYPE_CONTINUOUS = '16'
+  const H_DIMSTYLE_STD     = '27'
+  const H_STYLE_STD        = '11'
+  const H_APPID_ACAD       = '12'
+  const H_VPORT_ACTIVE     = '94'
+  const H_MS_BLOCK_REC     = '1F'
+  const H_MS_BLOCK         = '20'
+  const H_MS_ENDBLK        = '21'
+  const H_MS_LAYOUT        = '22'
+  const H_PS_BLOCK_REC     = '58'
+  const H_PS_BLOCK         = '5A'
+  const H_PS_ENDBLK        = '5B'
+  const H_PS_LAYOUT        = '59'
+
+  let handleSeed = 0x300
+  const nextH = () => (handleSeed++).toString(16).toUpperCase()
+
+  const layerSet = new Set<string>()
+  for (const ln of doc.lines ?? [])              layerSet.add(ln.layer || '0')
+  for (const ln of doc.furniture_lines ?? [])    layerSet.add(ln.layer || '0')
+  for (const pl of doc.polylines ?? []) layerSet.add(pl.layer || '0')
+  for (const tx of doc.texts ?? [])     layerSet.add(tx.layer || '0')
+  for (const ar of doc.arcs ?? [])      layerSet.add(ar.layer || '0')
+  layerSet.add('0')
+  const layers = [...layerSet].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+
+  const extmin = doc.meta?.extmin ?? [0, 0, 0]
+  const extmax = doc.meta?.extmax ?? [1, 1, 0]
+  const cx = (extmin[0] + extmax[0]) / 2
+  const cy = (extmin[1] + extmax[1]) / 2
+  const vHeight = Math.max(1, extmax[1] - extmin[1])
+
+  /* ── HEADER ─────────────────────────────────────── */
+  push(0, 'SECTION'); push(2, 'HEADER')
+  push(9, '$ACADVER');   push(1, 'AC1015')
+  push(9, '$INSUNITS');  push(70, 6)
+  push(9, '$INSBASE');   push(10, 0); push(20, 0); push(30, 0)
+  push(9, '$EXTMIN');    push(10, n(extmin[0])); push(20, n(extmin[1])); push(30, '0.0')
+  push(9, '$EXTMAX');    push(10, n(extmax[0])); push(20, n(extmax[1])); push(30, '0.0')
+  push(9, '$LIMMIN');    push(10, 0); push(20, 0)
+  push(9, '$LIMMAX');    push(10, 50); push(20, 50)
+  push(9, '$ORTHOMODE'); push(70, 0)
+  push(9, '$LTSCALE');   push(40, '1.0')
+  push(9, '$TEXTSIZE');  push(40, '0.2')
+  push(9, '$TEXTSTYLE'); push(7, 'Standard')
+  push(9, '$CLAYER');    push(8, '0')
+  push(9, '$CELTYPE');   push(6, 'ByLayer')
+  push(9, '$CECOLOR');   push(62, 256)
+  push(9, '$DIMSCALE');  push(40, '1.0')
+  push(9, '$DIMSTYLE');  push(2, 'Standard')
+  push(0, 'ENDSEC')
+
+  /* ── TABLES ──────────────────────────────────────── */
+  push(0, 'SECTION'); push(2, 'TABLES')
+
+  push(0, 'TABLE'); push(2, 'VPORT')
+  push(5, H_VPORT_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 1)
+  push(0, 'VPORT'); push(5, H_VPORT_ACTIVE); push(330, H_VPORT_TABLE)
+  push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbViewportTableRecord')
+  push(2, '*Active'); push(70, 0)
+  push(10, 0); push(20, 0); push(11, 1); push(21, 1)
+  push(12, n(cx)); push(22, n(cy)); push(13, 0); push(23, 0)
+  push(14, 0.5); push(24, 0.5); push(15, 0.5); push(25, 0.5)
+  push(16, 0); push(26, 0); push(36, 1); push(17, 0); push(27, 0); push(37, 0)
+  push(40, n(vHeight)); push(41, '1.0'); push(42, '50.0'); push(43, 0); push(44, 0)
+  push(50, 0); push(51, 0); push(71, 0); push(72, 1000); push(73, 1); push(74, 3)
+  push(75, 0); push(76, 0); push(77, 0); push(78, 0)
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'LTYPE')
+  push(5, H_LTYPE_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 3)
+  for (const [h, name, desc] of [
+    [H_LTYPE_BYBLOCK, 'ByBlock', ''],
+    [H_LTYPE_BYLAYER, 'ByLayer', ''],
+    [H_LTYPE_CONTINUOUS, 'Continuous', 'Solid line'],
+  ] as const) {
+    push(0, 'LTYPE'); push(5, h); push(330, H_LTYPE_TABLE)
+    push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbLinetypeTableRecord')
+    push(2, name); push(70, 0); push(3, desc); push(72, 65); push(73, 0); push(40, 0)
+  }
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'LAYER')
+  push(5, H_LAYER_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, layers.length)
+  for (const layerName of layers) {
+    const h = layerName === '0' ? H_LAYER_0 : nextH()
+    push(0, 'LAYER'); push(5, h); push(330, H_LAYER_TABLE)
+    push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbLayerTableRecord')
+    push(2, layerName); push(70, 0); push(62, 7); push(6, 'Continuous')
+    push(370, -3); push(390, 'F')
+  }
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'STYLE')
+  push(5, H_STYLE_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 1)
+  push(0, 'STYLE'); push(5, H_STYLE_STD); push(330, H_STYLE_TABLE)
+  push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbTextStyleTableRecord')
+  push(2, 'Standard'); push(70, 0); push(40, 0); push(41, '1.0'); push(50, 0); push(71, 0); push(42, '0.2')
+  push(3, 'arial.ttf'); push(4, '')
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'VIEW')
+  push(5, H_VIEW_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 0)
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'UCS')
+  push(5, H_UCS_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 0)
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'APPID')
+  push(5, H_APPID_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 1)
+  push(0, 'APPID'); push(5, H_APPID_ACAD); push(330, H_APPID_TABLE)
+  push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbRegAppTableRecord')
+  push(2, 'ACAD'); push(70, 0)
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'DIMSTYLE')
+  push(5, H_DIMSTYLE_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 1)
+  push(0, 'DIMSTYLE'); push(5, H_DIMSTYLE_STD); push(330, H_DIMSTYLE_TABLE)
+  push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbDimStyleTableRecord')
+  push(2, 'Standard'); push(70, 0)
+  push(0, 'ENDTAB')
+
+  push(0, 'TABLE'); push(2, 'BLOCK_RECORD')
+  push(5, H_BLOCK_REC_TABLE); push(330, 0); push(100, 'AcDbSymbolTable'); push(70, 2)
+  push(0, 'BLOCK_RECORD'); push(5, H_MS_BLOCK_REC); push(330, H_BLOCK_REC_TABLE)
+  push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbBlockTableRecord')
+  push(2, '*Model_Space'); push(340, H_MS_LAYOUT); push(70, 0); push(280, 1); push(281, 0)
+  push(0, 'BLOCK_RECORD'); push(5, H_PS_BLOCK_REC); push(330, H_BLOCK_REC_TABLE)
+  push(100, 'AcDbSymbolTableRecord'); push(100, 'AcDbBlockTableRecord')
+  push(2, '*Paper_Space'); push(340, H_PS_LAYOUT); push(70, 0); push(280, 1); push(281, 0)
+  push(0, 'ENDTAB')
+
+  push(0, 'ENDSEC')
+
+  /* ── BLOCKS ──────────────────────────────────────── */
+  push(0, 'SECTION'); push(2, 'BLOCKS')
+
+  push(0, 'BLOCK'); push(5, H_MS_BLOCK); push(330, H_MS_BLOCK_REC)
+  push(100, 'AcDbEntity'); push(8, '0')
+  push(100, 'AcDbBlockBegin')
+  push(2, '*Model_Space'); push(70, 0); push(10, 0); push(20, 0); push(30, 0)
+  push(3, '*Model_Space'); push(1, '')
+  push(0, 'ENDBLK'); push(5, H_MS_ENDBLK); push(330, H_MS_BLOCK_REC)
+  push(100, 'AcDbEntity'); push(8, '0'); push(100, 'AcDbBlockEnd')
+
+  push(0, 'BLOCK'); push(5, H_PS_BLOCK); push(330, H_PS_BLOCK_REC)
+  push(100, 'AcDbEntity'); push(67, 1); push(8, '0')
+  push(100, 'AcDbBlockBegin')
+  push(2, '*Paper_Space'); push(70, 0); push(10, 0); push(20, 0); push(30, 0)
+  push(3, '*Paper_Space'); push(1, '')
+  push(0, 'ENDBLK'); push(5, H_PS_ENDBLK); push(330, H_PS_BLOCK_REC)
+  push(100, 'AcDbEntity'); push(67, 1); push(8, '0'); push(100, 'AcDbBlockEnd')
+
+  push(0, 'ENDSEC')
+
+  /* ── ENTITIES ────────────────────────────────────── */
+  push(0, 'SECTION'); push(2, 'ENTITIES')
+
+  for (const ln of doc.lines ?? []) {
+    push(0, 'LINE')
+    push(5, nextH()); push(330, H_MS_BLOCK_REC)
+    push(100, 'AcDbEntity'); push(8, ln.layer || '0')
+    push(100, 'AcDbLine')
+    push(10, n(ln.start.x)); push(20, n(ln.start.y)); push(30, n(ln.start.z ?? 0))
+    push(11, n(ln.end.x));   push(21, n(ln.end.y));   push(31, n(ln.end.z ?? 0))
+  }
+
+  for (const ln of doc.furniture_lines ?? []) {
+    push(0, 'LINE')
+    push(5, nextH()); push(330, H_MS_BLOCK_REC)
+    push(100, 'AcDbEntity'); push(8, ln.layer || '0')
+    push(100, 'AcDbLine')
+    push(10, n(ln.start.x)); push(20, n(ln.start.y)); push(30, n(ln.start.z ?? 0))
+    push(11, n(ln.end.x));   push(21, n(ln.end.y));   push(31, n(ln.end.z ?? 0))
+  }
+
+  for (const ar of doc.arcs ?? []) {
+    push(0, 'ARC')
+    push(5, nextH()); push(330, H_MS_BLOCK_REC)
+    push(100, 'AcDbEntity'); push(8, ar.layer || '0')
+    push(100, 'AcDbCircle')
+    push(10, n(ar.center.x)); push(20, n(ar.center.y)); push(30, '0.0')
+    push(40, n(ar.radius))
+    push(100, 'AcDbArc')
+    push(50, n(ar.start_angle)); push(51, n(ar.end_angle))
+  }
+
+  for (const pl of doc.polylines ?? []) {
+    push(0, 'LWPOLYLINE')
+    push(5, nextH()); push(330, H_MS_BLOCK_REC)
+    push(100, 'AcDbEntity'); push(8, pl.layer || '0')
+    push(100, 'AcDbLwPolyline')
+    push(90, pl.vertices.length); push(70, pl.closed ? 1 : 0)
+    for (const v of pl.vertices) {
+      push(10, n(v.x)); push(20, n(v.y))
+      if (v.bulge !== 0) push(42, n(v.bulge))
+    }
+  }
+
+  for (const tx of doc.texts ?? []) {
+    push(0, 'MTEXT')
+    push(5, nextH()); push(330, H_MS_BLOCK_REC)
+    push(100, 'AcDbEntity'); push(8, tx.layer || '0')
+    push(100, 'AcDbMText')
+    push(10, n(tx.position.x)); push(20, n(tx.position.y)); push(30, '0.0')
+    push(40, n(tx.height))
+    push(41, '10.0')
+    push(46, '0.0')
+    push(71, 1)
+    push(72, 1)
+    push(1, tx.text.replace(/\n/g, '\\P'))
+    push(73, 1); push(44, '1.0')
+  }
+
+  push(0, 'ENDSEC')
+
+  /* ── OBJECTS ─────────────────────────────────────── */
+  push(0, 'SECTION'); push(2, 'OBJECTS')
+  push(0, 'DICTIONARY'); push(5, H_ROOT_DICT); push(330, 0)
+  push(100, 'AcDbDictionary'); push(281, 1)
+  push(3, 'ACAD_GROUP'); push(350, 'D')
+  push(0, 'ENDSEC')
+
+  push(0, 'EOF')
+
+  return out.join('\n') + '\n'
+}
 
 /** Trigger a browser download from a data-url or blob-url. */
 function triggerDownload(href: string, filename: string) {
@@ -988,6 +1311,24 @@ function detectRoomsWithWalls(walls: WallSeg[]): Array<{ polygon: Pt[]; wallIds:
 }
 
 /* ─── Component ──────────────────────────────────────────────── */
+/** Group id for draggable furniture — lines with the same key move as one object. */
+function furnitureGroupKeyFromHandle(handle: string): string {
+  if (!handle.startsWith('furn-')) return handle
+  // Use only the first word after "furn-" so that component handles like
+  // furn-bed-pillow-1 and furn-bed-1 all fall into the same "furn-bed" group.
+  // Timestamp-based drag-drop handles (furn-1234567890-0) are also handled
+  // correctly since the timestamp becomes the sole group identifier.
+  return `furn-${handle.slice('furn-'.length).split('-')[0]}`
+}
+
+/** Returns a concise display name from an INSERT block_name, e.g. "Bed - Queen" → "Bed". */
+function shortFurnLabel(blockName: string): string {
+  if (blockName.includes(' - ')) return blockName.split(' - ')[0]
+  const words = blockName.split(' ')
+  return words.slice(0, 2).join(' ')
+}
+
+/* ─── Component ──────────────────────────────────── */
 export function DxfJsonViewPage() {
   const stageRef = useRef<Konva.Stage>(null)
   const canvasHostRef = useRef<HTMLDivElement>(null)
@@ -1042,6 +1383,7 @@ export function DxfJsonViewPage() {
   const [showLabels, setShowLabels]   = useState(true)
   const [selectedArcHandle, setSelectedArcHandle] = useState<string | null>(null)
   const [selectedWinKey, setSelectedWinKey]       = useState<string | null>(null)
+  const [selectedFurnKey, setSelectedFurnKey]     = useState<string | null>(null)
 
   const [arcDraftCenter,     setArcDraftCenter]     = useState<Pt | null>(null)
   const [arcDraftRadius,     setArcDraftRadius]     = useState<number | null>(null)
@@ -1227,7 +1569,7 @@ export function DxfJsonViewPage() {
 
   const effectiveLines = useMemo(() => {
     const arcKey = (h: string) => h.replace(/^arc-/, '')
-    let lines = planDoc.lines
+    let lines = [...(planDoc.door_lines ?? []), ...(planDoc.window_lines ?? [])]
     if (activeDrag && activeDrag.toMoveArcHandles.length > 0) {
       const { dx, dy } = dragDelta
       const dflPrefixes = activeDrag.toMoveArcHandles.map(h => `dfl-${arcKey(h)}`)
@@ -1285,7 +1627,7 @@ export function DxfJsonViewPage() {
       })
     }
     return lines
-  }, [planDoc.lines, activeDrag, dragDelta, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
+  }, [planDoc.door_lines, planDoc.window_lines, activeDrag, dragDelta, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
 
   const roomsWithWalls = useMemo(() => {
     let ws = walls
@@ -1473,10 +1815,14 @@ export function DxfJsonViewPage() {
         const angleDeg = angle * (180 / Math.PI)
         return { ...a, center: { ...a.center, x: nx, y: ny }, start_angle: a.start_angle + angleDeg, end_angle: a.end_angle + angleDeg }
       }),
-      lines: prev.lines.map(l => {
-        const belongsToRotatedArc = rd.arcHandles.some(h => l.handle.startsWith(`dfl-${arcKey(h)}`))
-        const belongsToWindow = rd.winKey ? l.handle.startsWith(`win-${rd.winKey}-`) : false
-        if (!belongsToRotatedArc && !belongsToWindow) return l
+      door_lines: (prev.door_lines ?? []).map(l => {
+        if (!rd.arcHandles.some(h => l.handle.startsWith(`dfl-${arcKey(h)}`))) return l
+        const [sx, sy] = rotatePoint(l.start.x, l.start.y, rd.centerWX, rd.centerWY, angle)
+        const [ex, ey] = rotatePoint(l.end.x, l.end.y, rd.centerWX, rd.centerWY, angle)
+        return { ...l, start: { ...l.start, x: sx, y: sy }, end: { ...l.end, x: ex, y: ey } }
+      }),
+      window_lines: (prev.window_lines ?? []).map(l => {
+        if (!rd.winKey || !l.handle.startsWith(`win-${rd.winKey}-`)) return l
         const [sx, sy] = rotatePoint(l.start.x, l.start.y, rd.centerWX, rd.centerWY, angle)
         const [ex, ey] = rotatePoint(l.end.x, l.end.y, rd.centerWX, rd.centerWY, angle)
         return { ...l, start: { ...l.start, x: sx, y: sy }, end: { ...l.end, x: ex, y: ey } }
@@ -1528,10 +1874,14 @@ export function DxfJsonViewPage() {
         const { x: nx, y: ny } = scalePos(a.center.x, a.center.y)
         return { ...a, center: { ...a.center, x: nx, y: ny }, radius: Math.max(0.01, a.radius * scaleF) }
       }),
-      lines: prev.lines.map(l => {
-        const belongsToResizedArc = rd.arcHandles.some(h => l.handle.startsWith(`dfl-${arcKey(h)}`))
-        const belongsToWindow = rd.winKey ? l.handle.startsWith(`win-${rd.winKey}-`) : false
-        if (!belongsToResizedArc && !belongsToWindow) return l
+      door_lines: (prev.door_lines ?? []).map(l => {
+        if (!rd.arcHandles.some(h => l.handle.startsWith(`dfl-${arcKey(h)}`))) return l
+        const s = scalePos(l.start.x, l.start.y)
+        const e = scalePos(l.end.x, l.end.y)
+        return { ...l, start: { ...l.start, x: s.x, y: s.y }, end: { ...l.end, x: e.x, y: e.y } }
+      }),
+      window_lines: (prev.window_lines ?? []).map(l => {
+        if (!rd.winKey || !l.handle.startsWith(`win-${rd.winKey}-`)) return l
         const s = scalePos(l.start.x, l.start.y)
         const e = scalePos(l.end.x, l.end.y)
         return { ...l, start: { ...l.start, x: s.x, y: s.y }, end: { ...l.end, x: e.x, y: e.y } }
@@ -1691,7 +2041,7 @@ export function DxfJsonViewPage() {
       ...prev,
       texts: prev.texts.map(tx => new Set(drag.toMoveTextIds).has(tx.handle) ? { ...tx, position: { x: tx.position.x + delta.dx, y: tx.position.y + delta.dy, z: 0 } } : tx),
       arcs: prev.arcs.map(a => aSet.has(a.handle) ? { ...a, center: { ...a.center, x: a.center.x + delta.dx, y: a.center.y + delta.dy } } : a),
-      lines: prev.lines.map(l => {
+      door_lines: (prev.door_lines ?? []).map(l => {
         const belongsToMovedArc = drag.toMoveArcHandles.some(h => l.handle.startsWith(`dfl-${arcKey(h)}`))
         if (!belongsToMovedArc) return l
         return { ...l, start: { ...l.start, x: l.start.x + delta.dx, y: l.start.y + delta.dy }, end: { ...l.end, x: l.end.x + delta.dx, y: l.end.y + delta.dy } }
@@ -1703,7 +2053,7 @@ export function DxfJsonViewPage() {
 
   const moveWindowLines = useCallback((winKey: string, dx: number, dy: number) => {
     if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return
-    setPlanDoc(prev => ({ ...prev, lines: prev.lines.map(l => !l.handle.startsWith(`win-${winKey}`) ? l : { ...l, start: { ...l.start, x: l.start.x + dx, y: l.start.y + dy }, end: { ...l.end, x: l.end.x + dx, y: l.end.y + dy } }) }))
+    setPlanDoc(prev => ({ ...prev, window_lines: (prev.window_lines ?? []).map(l => !l.handle.startsWith(`win-${winKey}`) ? l : { ...l, start: { ...l.start, x: l.start.x + dx, y: l.start.y + dy }, end: { ...l.end, x: l.end.x + dx, y: l.end.y + dy } }) }))
   }, [])
 
   const windowGroups = useMemo(() => {
@@ -1716,6 +2066,81 @@ export function DxfJsonViewPage() {
     }
     return Array.from(groups.entries()).map(([key, lines]) => ({ key, lines }))
   }, [effectiveLines])
+
+  /** Furniture lines grouped so each piece drags together (see `furnitureGroupKeyFromHandle`). */
+  const furnitureGroups = useMemo(() => {
+    const groups = new Map<string, DxfLine[]>()
+    for (const ln of planDoc.furniture_lines ?? []) {
+      const key = furnitureGroupKeyFromHandle(ln.handle)
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key)!.push(ln)
+    }
+    return Array.from(groups.entries()).map(([key, lines]) => ({ key, lines }))
+  }, [planDoc.furniture_lines])
+
+  /** Maps each furniture group key → the block_name from the nearest furniture insert. */
+  const furnitureLabels = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const { key, lines } of furnitureGroups) {
+      if (lines.length === 0) continue
+      let sx = 0, sy = 0, count = 0
+      for (const ln of lines) {
+        sx += ln.start.x + ln.end.x
+        sy += ln.start.y + ln.end.y
+        count += 2
+      }
+      const cx = sx / count
+      const cy = sy / count
+      let bestLabel = ''
+      let bestDist = Infinity
+      for (const ins of planDoc.furniture_inserts) {
+        const d = Math.hypot(ins.position.x - cx, ins.position.y - cy)
+        if (d < bestDist) { bestDist = d; bestLabel = ins.block_name }
+      }
+      if (bestLabel) map.set(key, bestLabel)
+    }
+    return map
+  }, [furnitureGroups, planDoc.furniture_inserts])
+
+  const moveFurnitureGroupByKey = useCallback((furnKey: string, dx: number, dy: number) => {
+    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return
+    setPlanDoc(prev => {
+      // Identify which insert is linked to this group so we can move it too.
+      // We find it by proximity to the group centroid BEFORE the move.
+      const groupLines = (prev.furniture_lines ?? []).filter(
+        ln => furnitureGroupKeyFromHandle(ln.handle) === furnKey,
+      )
+      let linkedHandle = ''
+      if (groupLines.length > 0) {
+        let sx = 0, sy = 0, n = 0
+        for (const ln of groupLines) {
+          sx += ln.start.x + ln.end.x; sy += ln.start.y + ln.end.y; n += 2
+        }
+        const cx = sx / n, cy = sy / n
+        let best = Infinity
+        for (const ins of prev.furniture_inserts) {
+          const d = Math.hypot(ins.position.x - cx, ins.position.y - cy)
+          if (d < best) { best = d; linkedHandle = ins.handle }
+        }
+      }
+      return {
+        ...prev,
+        furniture_lines: (prev.furniture_lines ?? []).map(ln => {
+          if (furnitureGroupKeyFromHandle(ln.handle) !== furnKey) return ln
+          return {
+            ...ln,
+            start: { ...ln.start, x: ln.start.x + dx, y: ln.start.y + dy },
+            end: { ...ln.end, x: ln.end.x + dx, y: ln.end.y + dy },
+          }
+        }),
+        furniture_inserts: prev.furniture_inserts.map(ins =>
+          ins.handle === linkedHandle
+            ? { ...ins, position: { ...ins.position, x: ins.position.x + dx, y: ins.position.y + dy } }
+            : ins,
+        ),
+      }
+    })
+  }, [])
 
   const onRoomMoveDragStart = useCallback((e: Konva.KonvaEventObject<DragEvent>) => {
     if (selectedRoomIndex === null || activeDragRef.current) return
@@ -1876,13 +2301,13 @@ export function DxfJsonViewPage() {
     for (const tx of planDoc.texts.filter(tx => selectedIds.has(tx.handle))) { minX = Math.min(minX, tx.position.x); maxX = Math.max(maxX, tx.position.x); minY = Math.min(minY, tx.position.y); maxY = Math.max(maxY, tx.position.y); hasAny = true }
     for (const a of planDoc.arcs.filter(a => selectedIds.has(a.handle))) { minX = Math.min(minX, a.center.x - a.radius); maxX = Math.max(maxX, a.center.x + a.radius); minY = Math.min(minY, a.center.y - a.radius); maxY = Math.max(maxY, a.center.y + a.radius); hasAny = true }
     if (selectedWinKey) {
-      for (const ln of planDoc.lines.filter(l => l.handle.startsWith(`win-${selectedWinKey}-`))) {
+      for (const ln of (planDoc.window_lines ?? []).filter(l => l.handle.startsWith(`win-${selectedWinKey}-`))) {
         for (const p of [ln.start, ln.end]) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); hasAny = true }
       }
     }
     if (!hasAny) return null
     return { minX, minY, maxX, maxY }
-  }, [walls, planDoc.texts, planDoc.arcs, planDoc.lines, selectedIds, selectedWinKey])
+  }, [walls, planDoc.texts, planDoc.arcs, planDoc.window_lines, selectedIds, selectedWinKey])
 
   const baseSelCenter = useMemo(() => {
     if (!worldSelBounds) return null
@@ -1909,6 +2334,56 @@ export function DxfJsonViewPage() {
     triggerDownload(dataURL, `${base}.png`)
   }, [planDoc.source_file])
 
+  const handleFurnitureDragOver = useCallback((e: ReactDragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+  }, [])
+
+  const handleFurnitureDrop = useCallback(
+    (e: ReactDragEvent<HTMLDivElement>) => {
+      e.preventDefault()
+      const id = e.dataTransfer.getData(FURNITURE_DXF_DRAG_MIME)
+      if (!id || !getFurnitureDxfTemplate(id)) return
+      const stage = stageRef.current
+      if (!stage) return
+      const [wx, wy] = clientXYToWorldXY(stage, e.clientX, e.clientY, t)
+      const snapped = getSnap(wx, wy, [])
+      snapshot()
+      const tmpl = getFurnitureDxfTemplate(id)!
+      const newLines = buildFurnitureLinesFromLibraryId(id, snapped.x, snapped.y)
+      if (!newLines.length) return
+      // Derive a stable insert handle from the group key so the label lookup works.
+      const groupSuffix = newLines[0]!.handle.slice('furn-'.length).split('-')[0]
+      const syntheticInsert: DxfInsert = {
+        entity_type: 'INSERT',
+        handle: `furn-ins-${groupSuffix}`,
+        layer: '0',
+        block_name: tmpl.label,
+        category: 'furniture',
+        is_anonymous_block: false,
+        position: { x: snapped.x, y: snapped.y, z: 0 },
+        rotation: 0,
+        scale: { x: 1, y: 1, z: 1 },
+        block_entity_types: ['LINE'],
+        block_entity_count: newLines.length,
+        attributes: [],
+      }
+      setPlanDoc(prev => ({
+        ...prev,
+        furniture_lines: [...(prev.furniture_lines ?? []), ...newLines],
+        furniture_inserts: [...prev.furniture_inserts, syntheticInsert],
+      }))
+      setSelectedFurnKey(furnitureGroupKeyFromHandle(newLines[0]!.handle))
+      setSelectedWinKey(null)
+      setSelectedId(null)
+      setSelectedRoomIndex(null)
+      setSelectedTextHandle(null)
+      setSelectedArcHandle(null)
+      setSelectedIds(new Set())
+    },
+    [t, getSnap, snapshot],
+  )
+
   /**
    * Export DXF — uses the full live state:
    *   walls       → all LINE / LWPOLYLINE wall segments (including user-drawn)
@@ -1919,10 +2394,11 @@ export function DxfJsonViewPage() {
    * All edits (drags, rotations, resizes, additions, deletions) are reflected
    * because `walls` and `planDoc` are always kept in sync by the commit handlers.
    */
-const exportDxf = useCallback(() => {
-  const base = (planDoc.source_file ?? 'floor-plan').replace(/\.dxf$/i, '')
-  downloadDxf(walls, planDoc.texts, planDoc.arcs, planDoc.lines, `${base}-exported.dxf`)
-}, [walls, planDoc])
+  const exportDxf = useCallback(() => {
+    const base = (planDoc.source_file ?? 'floor-plan').replace(/\.dxf$/i, '')
+    const allLines = [...(planDoc.door_lines ?? []), ...(planDoc.window_lines ?? [])]
+    downloadDxf(walls, planDoc.texts, planDoc.arcs, allLines, `${base}-exported.dxf`)
+  }, [walls, planDoc])
 
   const stageDraggable = (activeTool === 'hand' || spaceHeld) && !isDraggingEp && !isDraggingRoom
   const isDrawingTool = ['drawPolyline', 'drawLine', 'drawArc', 'drawCircle', 'text'].includes(activeTool)
@@ -1936,7 +2412,7 @@ const exportDxf = useCallback(() => {
     const [wx, wy] = toW(p.x, p.y, t)
 
     if (activeTool === 'drawLine') {
-      const snapped = getSnap(wx, wy, '')
+      const snapped = getSnap(wx, wy, [])
       if (!drawLineAnchorRef.current) {
         drawLineAnchorRef.current = snapped; setDrawLineAnchor(snapped); setDrawLinePointer(snapped); return
       }
@@ -1955,7 +2431,7 @@ const exportDxf = useCallback(() => {
     }
 
     if (activeTool === 'drawPolyline') {
-      const snapped = getSnap(wx, wy, '')
+      const snapped = getSnap(wx, wy, [])
       const nextDraft = [...polylineDraftRef.current, snapped]
       polylineDraftRef.current = nextDraft; setPolylineDraft(nextDraft); return
     }
@@ -1997,7 +2473,7 @@ const exportDxf = useCallback(() => {
       setActiveTool('select'); return
     }
 
-    setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedArcHandle(null); setSelectedWinKey(null)
+    setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null)
   }, [activeTool, t, getSnap, planDoc, snapshot, setActiveTool, arcDraftCenter, arcDraftRadius, arcDraftStartAngle, circleDraftCenter])
 
   const finishPolyline = useCallback(() => {
@@ -2024,6 +2500,49 @@ const exportDxf = useCallback(() => {
           const arc = planDoc.arcs.find(a => a.handle === selectedArcHandle)
           if (arc && !isDoorStyleArc(planDoc, arc)) { snapshot(); const h = selectedArcHandle; setPlanDoc(p => removeArcFromDocByHandle(p, h)); setWalls(w => w.filter(seg => seg.fromArc !== h)); setSelectedArcHandle(null) }
         } else if (selectedId) {
+          if (arc && !isDoorStyleArc(planDoc, arc)) {
+            snapshot()
+            const h = selectedArcHandle
+            setPlanDoc(p => removeArcFromDocByHandle(p, h))
+            setWalls(w => w.filter(seg => seg.fromArc !== h))
+            setSelectedArcHandle(null)
+          }
+        }
+        else if (selectedFurnKey) {
+          snapshot()
+          const fk = selectedFurnKey
+          setPlanDoc(p => {
+            // Find the linked insert (by proximity) and remove it only if synthetic.
+            const groupLines = (p.furniture_lines ?? []).filter(
+              ln => furnitureGroupKeyFromHandle(ln.handle) === fk,
+            )
+            let syntheticHandle = ''
+            if (groupLines.length > 0) {
+              let sx = 0, sy = 0, n = 0
+              for (const ln of groupLines) {
+                sx += ln.start.x + ln.end.x; sy += ln.start.y + ln.end.y; n += 2
+              }
+              const cx = sx / n, cy = sy / n
+              let best = Infinity, bestH = ''
+              for (const ins of p.furniture_inserts) {
+                const d = Math.hypot(ins.position.x - cx, ins.position.y - cy)
+                if (d < best) { best = d; bestH = ins.handle }
+              }
+              if (bestH.startsWith('furn-ins-')) syntheticHandle = bestH
+            }
+            return {
+              ...p,
+              furniture_lines: (p.furniture_lines ?? []).filter(
+                ln => furnitureGroupKeyFromHandle(ln.handle) !== fk,
+              ),
+              furniture_inserts: syntheticHandle
+                ? p.furniture_inserts.filter(ins => ins.handle !== syntheticHandle)
+                : p.furniture_inserts,
+            }
+          })
+          setSelectedFurnKey(null)
+        }
+        else if (selectedId) {
           snapshot()
           const ph = polylineHandleFromWallId(selectedId)
           if (ph) { setPlanDoc(p => removePolylineFromDocByHandle(p, ph)); setWalls(p => p.filter(w => !w.id.startsWith(`pl-${ph}-`))) }
@@ -2046,14 +2565,42 @@ const exportDxf = useCallback(() => {
         setArcDraftCenter(null); setArcDraftRadius(null); setArcDraftStartAngle(null); setCircleDraftCenter(null); setShapePointer(null)
         activeDragRef.current = null; setActiveDrag(null); dragDeltaRef.current = { dx: 0, dy: 0 }; setDragDelta({ dx: 0, dy: 0 })
         activePolyDragRef.current = null; setActivePolyDrag(null); polyDragDeltaRef.current = { dx: 0, dy: 0 }; setPolyDragDelta({ dx: 0, dy: 0 })
+        setSelectedId(null)
+        setSelectedRoomIndex(null)
+        setSelectedTextHandle(null)
+        setSelectedArcHandle(null)
+        setSelectedWinKey(null)
+        setSelectedFurnKey(null)
+        drawLineAnchorRef.current = null
+        setDrawLineAnchor(null)
+        setDrawLinePointer(null)
+        polylineDraftRef.current = []
+        setPolylineDraft([])
+        setPolylineHover(null)
+        setArcDraftCenter(null)
+        setArcDraftRadius(null)
+        setArcDraftStartAngle(null)
+        setCircleDraftCenter(null)
+        setShapePointer(null)
+        activeDragRef.current = null
+        setActiveDrag(null)
+        dragDeltaRef.current = { dx: 0, dy: 0 }
+        setDragDelta({ dx: 0, dy: 0 })
+        activePolyDragRef.current = null
+        setActivePolyDrag(null)
+        polyDragDeltaRef.current = { dx: 0, dy: 0 }
+        setPolyDragDelta({ dx: 0, dy: 0 })
       }
       if (e.code === 'Space' && !e.repeat) { e.preventDefault(); setSpaceHeld(true) }
     }
     const onKeyUp = (e: KeyboardEvent) => { if (e.code === 'Space') setSpaceHeld(false) }
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
-    return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp) }
-  }, [selectedId, selectedArcHandle, selectedTextHandle, planDoc, snapshot, undo, activeTool])
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [selectedId, selectedArcHandle, selectedTextHandle, selectedFurnKey, planDoc, snapshot, undo, activeTool])
 
   const doc = planDoc
   const selectedTextEntity = selectedTextHandle ? doc.texts.find(tx => tx.handle === selectedTextHandle) : undefined
@@ -2125,6 +2672,9 @@ const exportDxf = useCallback(() => {
                 </button>
               ))}
           </div>
+          <div className="dxf-rail-section compact" style={{ minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <FurnitureLibraryPanel />
+          </div>
         </aside>
 
         {/* ── Center: toolbar + canvas ── */}
@@ -2168,7 +2718,7 @@ const exportDxf = useCallback(() => {
             </div>
           </div>
 
-          {(['drawLine','drawPolyline','drawArc','drawCircle','text'] as string[]).includes(activeTool) && (
+          {(['drawLine', 'drawPolyline', 'drawArc', 'drawCircle', 'text'] as string[]).includes(activeTool) && (
             <p className="dxf-note" style={{ margin: '0 0 8px 0' }}>
               {activeTool === 'drawLine' && (drawLineAnchor ? 'Line: click to add next point. Double-click or Esc to finish.' : 'Line: click start point. Each subsequent click adds a connected segment.')}
               {activeTool === 'drawPolyline' && (polylineDraft.length === 0 ? 'Polyline: each click adds a vertex. Turn on Close path if you want a loop, then Enter or Finish.' : `Polyline: ${polylineDraft.length} vertex(ices). Enter or Finish to add to the plan; Esc cancels.`)}
@@ -2178,8 +2728,14 @@ const exportDxf = useCallback(() => {
             </p>
           )}
 
+          <p className="dxf-note" style={{ margin: '0 0 6px 0' }}>
+            Furniture: drag an item from the library onto the plan (snaps if Snap is on). Symbols are LINE entities for DXF export.
+          </p>
           <div className="dxf-canvas-frame">
-            <div ref={canvasHostRef} className="dxf-canvas-host">
+            <div ref={canvasHostRef} className="dxf-canvas-host"
+              onDragOver={handleFurnitureDragOver}
+              onDrop={handleFurnitureDrop}
+            >
               <Stage
                 ref={stageRef}
                 width={stageSize.w}
@@ -2281,6 +2837,38 @@ const exportDxf = useCallback(() => {
                           const [x2, y2] = toC(ln.end.x, ln.end.y, t)
                           return <Line key={ln.handle} points={[x1, y1, x2, y2]} stroke={winColor} strokeWidth={sw} lineCap="round" hitStrokeWidth={10 / zoom} />
                         })}
+                      </Group>
+                    )
+                  })}
+
+                  {/* Furniture groups */}
+                  {furnitureGroups.map(({ key, lines }) => {
+                    const isSel = selectedFurnKey === key
+                    const furnColor = isSel ? '#f59e0b' : strokeHex
+                    const sw = (1.5 * strokeScale) / zoom
+                    const label = furnitureLabels.get(key)
+                    let cx = 0, cy = 0
+                    if (label && lines.length > 0) {
+                      let sx = 0, sy = 0, n = 0
+                      for (const ln of lines) { sx += ln.start.x + ln.end.x; sy += ln.start.y + ln.end.y; n += 2 }
+                      ;[cx, cy] = toC(sx / n, sy / n, t)
+                    }
+                    return (
+                      <Group key={`furngrp-${key}`} draggable
+                        onDragStart={e => { e.cancelBubble = true; snapshot(); setSelectedFurnKey(key); setSelectedWinKey(null); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null) }}
+                        onDragEnd={e => { const dcx = e.target.x(), dcy = e.target.y(); e.target.position({ x: 0, y: 0 }); moveFurnitureGroupByKey(key, dcx / t.sc, -dcy / t.sc) }}
+                        onClick={e => { e.cancelBubble = true; setSelectedFurnKey(isSel ? null : key); setSelectedWinKey(null); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null) }}
+                        onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
+                        onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                      >
+                        {lines.map(ln => {
+                          const [x1, y1] = toC(ln.start.x, ln.start.y, t)
+                          const [x2, y2] = toC(ln.end.x, ln.end.y, t)
+                          return <Line key={ln.handle} points={[x1, y1, x2, y2]} stroke={furnColor} strokeWidth={sw} lineCap="round" hitStrokeWidth={10 / zoom} />
+                        })}
+                        {label && (
+                          <Text x={cx} y={cy} text={label} fontSize={11 / zoom} fill={isSel ? '#f59e0b' : '#64748b'} listening={false} />
+                        )}
                       </Group>
                     )
                   })}
@@ -2892,16 +3480,44 @@ const exportDxf = useCallback(() => {
             <label className="dxf-toggle"><input type="checkbox" checked={showDetail} onChange={e => setShowDetail(e.target.checked)} /> Detail lines (stairs)</label>
             <label className="dxf-toggle"><input type="checkbox" checked={orthoEnabled} onChange={e => setOrthoEnabled(e.target.checked)} /> Ortho Mode (O)</label>
             <button className="dxf-action-btn" onClick={undo} disabled={!history.length}>Undo</button>
-            <button type="button" className="dxf-action-btn" onClick={() => {
-              snapshot()
-              setPlanDoc({ ...DXF_JSON_DATA }); setWalls(wallsFromDxfJson(DXF_JSON_DATA)); setHistory([])
-              setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedArcHandle(null); setSelectedWinKey(null)
-              drawLineAnchorRef.current = null; setDrawLineAnchor(null); setDrawLinePointer(null)
-              polylineDraftRef.current = []; setPolylineDraft([]); setPolylineHover(null)
-              setArcDraftCenter(null); setArcDraftRadius(null); setArcDraftStartAngle(null); setCircleDraftCenter(null); setShapePointer(null)
-              activeDragRef.current = null; setActiveDrag(null); dragDeltaRef.current = { dx: 0, dy: 0 }; setDragDelta({ dx: 0, dy: 0 })
-              activePolyDragRef.current = null; setActivePolyDrag(null); polyDragDeltaRef.current = { dx: 0, dy: 0 }; setPolyDragDelta({ dx: 0, dy: 0 })
-            }}>Reset plan</button>
+            <button
+              type="button"
+              className="dxf-action-btn"
+              onClick={() => {
+                snapshot()
+                setPlanDoc({ ...DXF_JSON_DATA })
+                setWalls(wallsFromDxfJson(DXF_JSON_DATA))
+                setHistory([])
+                setSelectedId(null)
+                setSelectedRoomIndex(null)
+                setSelectedTextHandle(null)
+                setSelectedArcHandle(null)
+                setSelectedWinKey(null)
+                setSelectedFurnKey(null)
+                drawLineAnchorRef.current = null
+                setDrawLineAnchor(null)
+                setDrawLinePointer(null)
+                polylineDraftRef.current = []
+                setPolylineDraft([])
+                setPolylineHover(null)
+                setArcDraftCenter(null)
+                setArcDraftRadius(null)
+                setArcDraftStartAngle(null)
+                setCircleDraftCenter(null)
+                setShapePointer(null)
+                activeDragRef.current = null
+                setActiveDrag(null)
+                dragDeltaRef.current = { dx: 0, dy: 0 }
+                setDragDelta({ dx: 0, dy: 0 })
+                activePolyDragRef.current = null
+                setActivePolyDrag(null)
+                polyDragDeltaRef.current = { dx: 0, dy: 0 }
+                setPolyDragDelta({ dx: 0, dy: 0 })
+                setActiveTool('select')
+              }}
+            >
+              Reset plan
+            </button>
             {selectedIds.size > 0 && (
               <button className="dxf-action-btn danger" onClick={() => {
                 snapshot()
