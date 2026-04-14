@@ -1,222 +1,593 @@
 /**
- * Hardcoded parsed-DXF JSON — AUTOCAD-FLOOR-PLAN.dxf
+ * DXF JSON Type Definitions — Full AutoCAD Entity Coverage
  *
- * Edit this file while UI is in development. At runtime, the viewer loads it via
- * `getFloorPlanDocument()` in `src/services/floorPlanSource.ts` until you set
- * `VITE_FLOOR_PLAN_API_URL` to point at your backend (same JSON shape).
+ * This file defines TypeScript interfaces for every entity type that ezdxf can
+ * extract from a DXF file.  Your backend Python code should output one JSON
+ * document matching DxfJsonDocument.  The frontend canvas reads this document
+ * and renders every entity the same way AutoCAD does.
+ *
+ * ─── Entity coverage ───────────────────────────────────────────────────────
+ * Geometry    : LINE, CIRCLE, ARC, ELLIPSE, SPLINE, POINT
+ * Polylines   : LWPOLYLINE (with bulge), POLYLINE/VERTEX (2D & 3D)
+ * Text        : TEXT (single-line), MTEXT (multi-line)
+ * Dimensions  : DIMENSION (all sub-types)
+ * Hatching    : HATCH (solid, predefined, custom patterns + gradient)
+ * Blocks      : INSERT (with nested entity geometry expanded by backend)
+ * Leaders     : LEADER, MLEADER
+ * Raster      : IMAGE (reference — rendered as placeholder rect on canvas)
+ * Wipeout     : WIPEOUT (mask polygon)
+ * Tolerance   : TOLERANCE (GD&T frame)
+ * Solid fill  : SOLID, TRACE (filled quad)
+ * 3D (view)   : 3DFACE (projected as lines), MESH (wireframe), HELIX (polyline approx)
+ * ─── NOT rendered (complex ACIS / kernel objects) ──────────────────────────
+ *   3DSOLID, SURFACE, REGION, BODY — ezdxf can extract basic bounding info only.
+ *   These are included as `raw_entities` so the stats panel shows them.
  */
-
+ 
+/* ─── Shared primitives ────────────────────────────────────────────────── */
+ 
 export interface DxfPoint {
-  x: number;
-  y: number;
-  z: number;
+  x: number
+  y: number
+  z: number
 }
-
-export interface DxfLine {
-  entity_type: "LINE";
-  handle: string;
-  layer: string;
-  start: DxfPoint;
-  end: DxfPoint;
+ 
+/** RGBA colour from ezdxf — either ACI index (0-256) or true-color hex string "#RRGGBB". */
+export type DxfColor = number | string | null
+ 
+/** Common header every entity must have. */
+export interface DxfEntityBase {
+  entity_type: string
+  handle: string
+  layer: string
+  /** ACI colour index (256 = BYLAYER, 0 = BYBLOCK). Optional — fall back to layer colour. */
+  color?: DxfColor
+  /** True-colour override as "#RRGGBB" if set. */
+  true_color?: string | null
+  /** Line-type name ("ByLayer", "Continuous", "DASHED", …). */
+  linetype?: string | null
+  /** Line-type scale multiplier. */
+  ltscale?: number
+  /** Line-weight in hundredths of a mm (-3 = ByLayer, -2 = ByBlock). */
+  lineweight?: number
+  /** Transparency 0–100 (0 = opaque). */
+  transparency?: number
+  /** True when entity is on a frozen or off layer. Canvas can skip or dim it. */
+  is_visible?: boolean
 }
-
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   1.  GEOMETRY — simple primitives
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
+export interface DxfLine extends DxfEntityBase {
+  entity_type: 'LINE'
+  start: DxfPoint
+  end: DxfPoint
+  /** Extrusion direction (default [0,0,1]). For non-default the backend should
+   *  project start/end into WCS before emitting. */
+  extrusion?: DxfPoint
+}
+ 
+export interface DxfCircle extends DxfEntityBase {
+  entity_type: 'CIRCLE'
+  center: DxfPoint
+  radius: number
+  extrusion?: DxfPoint
+}
+ 
+export interface DxfArc extends DxfEntityBase {
+  entity_type: 'ARC'
+  center: DxfPoint
+  radius: number
+  /** Degrees, counter-clockwise from +X, DXF convention. */
+  start_angle: number
+  end_angle: number
+  extrusion?: DxfPoint
+}
+ 
+export interface DxfEllipse extends DxfEntityBase {
+  entity_type: 'ELLIPSE'
+  center: DxfPoint
+  /** WCS vector from center to end of major axis. */
+  major_axis: DxfPoint
+  /** ratio = minor / major  (0 < ratio ≤ 1). */
+  ratio: number
+  /** Parameter range 0–2π (not degrees!). */
+  start_param: number
+  end_param: number
+  extrusion?: DxfPoint
+}
+ 
+export interface DxfPoint_Entity extends DxfEntityBase {
+  entity_type: 'POINT'
+  location: DxfPoint
+  extrusion?: DxfPoint
+}
+ 
+/** ezdxf exposes fit points and/or control points — emit whichever exist. */
+export interface DxfSpline extends DxfEntityBase {
+  entity_type: 'SPLINE'
+  degree: number
+  closed: boolean
+  /** Knot values. */
+  knots: number[]
+  /** Control points [x,y,z]. */
+  control_points: DxfPoint[]
+  /** Fit points [x,y,z] (may be empty). */
+  fit_points: DxfPoint[]
+  /** Rational weights, one per control point (may be empty → all 1). */
+  weights: number[]
+  /**
+   * Backend SHOULD tessellate the spline and store the result here so the
+   * canvas can draw it as a polyline without re-implementing NURBS maths.
+   * Points are in WCS order.
+   */
+  tessellation?: DxfPoint[]
+}
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   2.  POLYLINES
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
 export interface DxfPolylineVertex {
-  x: number;
-  y: number;
-  z: number;
-  bulge: number;
+  x: number
+  y: number
+  z: number
+  /** Bulge value: tan(θ/4) where θ is the arc subtended.  0 = straight segment. */
+  bulge: number
+  /** Starting width override (-1 = use polyline default). */
+  start_width?: number
+  /** Ending width override (-1 = use polyline default). */
+  end_width?: number
 }
-
-export interface DxfPolyline {
-  entity_type: "LWPOLYLINE";
-  handle: string;
-  layer: string;
-  closed: boolean;
-  vertex_count: number;
-  vertices: DxfPolylineVertex[];
+ 
+export interface DxfPolyline extends DxfEntityBase {
+  entity_type: 'LWPOLYLINE' | 'POLYLINE'
+  closed: boolean
+  vertex_count: number
+  vertices: DxfPolylineVertex[]
+  /** Constant width for all segments (0 = hairline). */
+  const_width?: number
+  elevation?: number
+  extrusion?: DxfPoint
 }
-
-export interface DxfText {
-  entity_type: "MTEXT";
-  handle: string;
-  layer: string;
-  text: string;
-  position: DxfPoint;
-  height: number;
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   3.  TEXT
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
+export interface DxfText extends DxfEntityBase {
+  entity_type: 'TEXT' | 'MTEXT'
+  text: string
+  position: DxfPoint
+  height: number
+  /** Rotation angle in degrees (0 = horizontal). */
+  rotation?: number
+  /** Text style name. */
+  style?: string
+  /**
+   * Horizontal justification for TEXT:
+   * 0=Left  1=Center  2=Right  3=Aligned  4=Middle  5=Fit
+   */
+  halign?: number
+  /**
+   * Vertical justification for TEXT:
+   * 0=Baseline  1=Bottom  2=Middle  3=Top
+   */
+  valign?: number
+  /** MTEXT attachment point 1-9. */
+  attachment?: number
+  /** MTEXT reference width (column wrap). */
+  ref_width?: number
+  /** MTEXT flow direction. */
+  flow_direction?: number
+  /** X-axis direction vector for MTEXT. */
+  text_direction?: DxfPoint
+  /** Line spacing factor for MTEXT. */
+  line_spacing?: number
 }
-
-export interface DxfArc {
-  entity_type: "ARC";
-  handle: string;
-  layer: string;
-  center: DxfPoint;
-  radius: number;
-  start_angle: number;
-  end_angle: number;
+ 
+export interface DxfAttrib extends DxfEntityBase {
+  entity_type: 'ATTRIB'
+  tag: string
+  text: string
+  position: DxfPoint
+  height: number
+  rotation?: number
+  style?: string
 }
-
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   4.  DIMENSIONS
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
+export type DxfDimSubtype =
+  | 'LINEAR' | 'ALIGNED' | 'ANGULAR' | 'ANGULAR_3P'
+  | 'DIAMETER' | 'RADIUS' | 'ORDINATE' | 'ARC_LENGTH'
+ 
+export interface DxfDimension extends DxfEntityBase {
+  entity_type: 'DIMENSION'
+  subtype: DxfDimSubtype
+  /** Override text (empty string = auto). */
+  text: string
+  /** Text mid-point. */
+  text_midpoint: DxfPoint
+  dimension_style: string
+  /** Measurement value computed by AutoCAD / ezdxf. */
+  actual_measurement: number | null
+  /** Definition points used to reconstruct geometry (varies by subtype). */
+  defpoints: DxfPoint[]
+  /** The auto-generated BLOCK reference that holds rendered geometry.
+   *  The backend should inline this block's lines/arcs into `dim_geometry`. */
+  geometry_block?: string
+  /**
+   * Tessellated dimension geometry (lines + arcs) so the canvas can draw it
+   * without resolving the block reference.  Backend should populate this.
+   */
+  dim_lines?: Array<{ start: DxfPoint; end: DxfPoint }>
+  dim_arcs?: Array<{ center: DxfPoint; radius: number; start_angle: number; end_angle: number }>
+  dim_texts?: Array<{ text: string; position: DxfPoint; height: number; rotation: number }>
+}
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   5.  HATCH
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
+export interface DxfHatchEdge {
+  type: 'LINE' | 'ARC' | 'ELLIPSE' | 'SPLINE'
+  /** LINE */ start?: DxfPoint; end?: DxfPoint
+  /** ARC */  center?: DxfPoint; radius?: number; start_angle?: number; end_angle?: number; is_ccw?: boolean
+  /** ELLIPSE */ major_axis_end?: DxfPoint; minor_to_major?: number; ellipse_start_angle?: number; ellipse_end_angle?: number
+  /** SPLINE */ degree?: number; spline_knots?: number[]; spline_control_pts?: DxfPoint[]; spline_fit_pts?: DxfPoint[]
+}
+ 
+export interface DxfHatchBoundary {
+  type: 'POLYLINE' | 'EDGE'
+  is_outer: boolean
+  vertices?: DxfPolylineVertex[]
+  edges?: DxfHatchEdge[]
+}
+ 
+export interface DxfHatch extends DxfEntityBase {
+  entity_type: 'HATCH'
+  /** "SOLID" | predefined pattern name (e.g. "ANSI31") | "USER_DEFINED" */
+  pattern_name: string
+  solid_fill: boolean
+  associative: boolean
+  boundaries: DxfHatchBoundary[]
+  pattern_angle?: number
+  pattern_scale?: number
+  pattern_double?: boolean
+  /** For gradient fills (GRADIENT entity or ezdxf gradient hatch). */
+  gradient?: {
+    name: string           // "LINEAR", "CYLINDER", etc.
+    color1: DxfColor
+    color2: DxfColor
+    angle: number
+    centered: boolean
+    tint: number
+  } | null
+  elevation?: number
+  extrusion?: DxfPoint
+}
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   6.  INSERTS (block references)
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
+export interface DxfInsertScale {
+  x: number
+  y: number
+  z: number
+}
+ 
+export interface DxfInsert extends DxfEntityBase {
+  entity_type: 'INSERT'
+  block_name: string
+  /** Frontend category tag assigned by backend (furniture / door / window / stair / …). */
+  category: string
+  is_anonymous_block: boolean
+  position: DxfPoint
+  rotation: number
+  scale: DxfInsertScale
+  block_entity_types: string[]
+  block_entity_count: number
+  attributes: DxfAttrib[]
+  /**
+   * Inline expanded geometry of the referenced block, already transformed
+   * (translated + rotated + scaled) into WCS by the backend.
+   * This lets the canvas render the block without resolving block definitions.
+   */
+  geometry?: {
+    lines?: Array<{ start: DxfPoint; end: DxfPoint; color?: DxfColor; layer?: string }>
+    arcs?: Array<{ center: DxfPoint; radius: number; start_angle: number; end_angle: number; color?: DxfColor; layer?: string }>
+    circles?: Array<{ center: DxfPoint; radius: number; color?: DxfColor; layer?: string }>
+    polylines?: Array<{ vertices: DxfPolylineVertex[]; closed: boolean; color?: DxfColor; layer?: string }>
+    texts?: Array<{ text: string; position: DxfPoint; height: number; rotation: number; color?: DxfColor; layer?: string }>
+    splines?: Array<{ tessellation: DxfPoint[]; color?: DxfColor; layer?: string }>
+  }
+}
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   7.  LEADERS / MLEADER / TOLERANCE
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
+export interface DxfLeader extends DxfEntityBase {
+  entity_type: 'LEADER'
+  vertices: DxfPoint[]
+  has_arrowhead: boolean
+  leader_style: number  // 0=lines, 1=spline
+  /** If the leader has an annotation, it's stored here. */
+  annotation?: { type: 'MTEXT' | 'TOLERANCE' | 'INSERT'; text?: string; position?: DxfPoint }
+}
+ 
+export interface DxfMLeaderLine {
+  vertices: DxfPoint[]
+  break_points?: DxfPoint[]
+}
+ 
+export interface DxfMLeader extends DxfEntityBase {
+  entity_type: 'MLEADER'
+  leader_lines: DxfMLeaderLine[]
+  dogleg_length: number
+  dogleg_vector: DxfPoint
+  landing_point: DxfPoint
+  /** Content type: 0=none, 1=block, 2=mtext */
+  content_type: 0 | 1 | 2
+  mtext?: {
+    text: string
+    position: DxfPoint
+    height: number
+    rotation: number
+    style: string
+    attachment: number
+  }
+  block_content?: {
+    block_name: string
+    position: DxfPoint
+    scale: DxfInsertScale
+    rotation: number
+    color: DxfColor
+  }
+  style: string
+  arrowhead_size: number
+  has_dogleg: boolean
+}
+ 
+export interface DxfTolerance extends DxfEntityBase {
+  entity_type: 'TOLERANCE'
+  /** Raw GD&T string with AutoCAD formatting codes. */
+  string: string
+  insertion_point: DxfPoint
+  x_direction: DxfPoint
+  dimension_style: string
+}
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   8.  SOLID, TRACE (filled 2D quads)
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
+/** A filled quadrilateral (4 corners, or 3 if p3 === p4). */
+export interface DxfSolid extends DxfEntityBase {
+  entity_type: 'SOLID' | 'TRACE'
+  /** 4 corners in DXF winding order (p1, p2, p4, p3 in DXF spec — backend should normalise). */
+  points: [DxfPoint, DxfPoint, DxfPoint, DxfPoint]
+  elevation?: number
+  extrusion?: DxfPoint
+}
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   9.  IMAGE reference
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
+export interface DxfImage extends DxfEntityBase {
+  entity_type: 'IMAGE'
+  /** Absolute or relative path stored in the DXF file. */
+  image_path: string
+  /** WCS position of the lower-left corner. */
+  insert: DxfPoint
+  /** U vector (width direction × pixel size). */
+  u_vector: DxfPoint
+  /** V vector (height direction × pixel size). */
+  v_vector: DxfPoint
+  /** Image size in pixels. */
+  pixel_size: { x: number; y: number }
+  clipping: boolean
+  /** Clipping boundary vertices (if clipping === true). */
+  clip_boundary?: DxfPoint[]
+}
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   10. WIPEOUT (mask polygon)
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
+export interface DxfWipeout extends DxfEntityBase {
+  entity_type: 'WIPEOUT'
+  insert: DxfPoint
+  u_vector: DxfPoint
+  v_vector: DxfPoint
+  pixel_size: { x: number; y: number }
+  boundary: DxfPoint[]
+  show_frame: boolean
+}
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   11. 3D entities (rendered as wireframe / projected)
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
+/** 3DFACE — three or four coplanar corners.  Render as projected polygon outline. */
+export interface DxfFace3d extends DxfEntityBase {
+  entity_type: '3DFACE'
+  points: [DxfPoint, DxfPoint, DxfPoint, DxfPoint]
+  /** Edge visibility flags (bit mask: bit0=first, bit1=second, bit2=third, bit3=fourth). */
+  invisible_edges: number
+}
+ 
+/** MESH — subdivision mesh. Backend should tessellate to triangles. */
+export interface DxfMesh extends DxfEntityBase {
+  entity_type: 'MESH'
+  subdivision_level: number
+  vertices: DxfPoint[]
+  faces: number[][] // each face is an index list into vertices
+}
+ 
+/** HELIX — rendered as a tessellated polyline by the backend. */
+export interface DxfHelix extends DxfEntityBase {
+  entity_type: 'HELIX'
+  /** Backend tessellation of the helix as WCS points. */
+  tessellation: DxfPoint[]
+  axis_base_point: DxfPoint
+  axis_vector: DxfPoint
+  radius: number
+  turns: number
+  turn_height: number
+  handedness: 0 | 1  // 0=left, 1=right
+}
+ 
+/** Catch-all for entity types the backend found but the frontend has no dedicated renderer for. */
+export interface DxfRawEntity {
+  entity_type: string
+  handle: string
+  layer: string
+  /** Serialised JSON string of the raw ezdxf entity dict for debugging. */
+  raw_data?: string
+}
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   LAYER TABLE  (from $TABLES section)
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
+export interface DxfLayerDef {
+  name: string
+  color: number          // ACI 1-255 (negative = layer is off)
+  true_color?: string    // "#RRGGBB" if set
+  linetype: string
+  lineweight: number     // hundredths of mm; -3 = default
+  plot: boolean
+  is_frozen: boolean
+  is_locked: boolean
+  description?: string
+}
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   BLOCK TABLE  (definitions, not references)
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
+export interface DxfBlockDef {
+  name: string
+  base_point: DxfPoint
+  /** Summarised list of entity types inside the block. */
+  entity_types: string[]
+  entity_count: number
+}
+ 
+/* ══════════════════════════════════════════════════════════════════════════
+   ROOT DOCUMENT
+   ══════════════════════════════════════════════════════════════════════════ */
+ 
 export interface DxfJsonDocument {
-  source_file: string;
+  source_file: string
   meta: {
-    acad_version: string;
-    extmin: [number, number, number];
-    extmax: [number, number, number];
-  };
+    acad_version: string
+    /** [minX, minY, minZ] in WCS (from $EXTMIN). */
+    extmin: [number, number, number]
+    /** [maxX, maxY, maxZ] in WCS (from $EXTMAX). */
+    extmax: [number, number, number]
+    /** DXF insertion units (see $INSUNITS; 4=mm, 5=cm, 6=m, etc.). */
+    insunits?: number
+    /** Linear units description string, e.g. "Meters". */
+    measurement?: string
+  }
   stats: {
-    entity_counts: Record<string, number>;
-    polyline_count: number;
-    line_count: number;
-    arc_count: number;
-    text_count: number;
-    total_vertex_count: number;
-  };
-  lines: DxfLine[];
-  arcs: DxfArc[];
-  polylines: DxfPolyline[];
-  texts: DxfText[];
+    entity_counts: Record<string, number>
+    polyline_count: number
+    line_count: number
+    arc_count: number
+    text_count: number
+    total_vertex_count: number
+    insert_count?: number
+    door_insert_count?: number
+    window_insert_count?: number
+    furniture_insert_count?: number
+    stair_insert_count?: number
+    hatch_count?: number
+    dimension_count?: number
+    spline_count?: number
+    image_count?: number
+    leader_count?: number
+  }
+ 
+  /** Layer table entries. */
+  layers?: DxfLayerDef[]
+  /** Block definitions (not instances). */
+  block_defs?: DxfBlockDef[]
+ 
+  /* ── Geometry primitives ── */
+  lines:      DxfLine[]
+  arcs:       DxfArc[]
+  circles?:   DxfCircle[]
+  ellipses?:  DxfEllipse[]
+  splines?:   DxfSpline[]
+  points?:    DxfPoint_Entity[]
+  polylines:  DxfPolyline[]
+ 
+  /* ── Text ── */
+  texts:      DxfText[]
+ 
+  /* ── Structured annotations ── */
+  dimensions?:  DxfDimension[]
+  leaders?:     DxfLeader[]
+  mleaders?:    DxfMLeader[]
+  tolerances?:  DxfTolerance[]
+ 
+  /* ── Fill / hatch ── */
+  hatches?:   DxfHatch[]
+  solids?:    DxfSolid[]
+ 
+  /* ── Raster / mask ── */
+  images?:    DxfImage[]
+  wipeouts?:  DxfWipeout[]
+ 
+  /* ── 3D entities ── */
+  faces3d?:   DxfFace3d[]
+  meshes?:    DxfMesh[]
+  helices?:   DxfHelix[]
+ 
+  /* ── Block references categorised by backend ── */
+  inserts:            DxfInsert[]
+  door_inserts:       DxfInsert[]
+  window_inserts:     DxfInsert[]
+  furniture_inserts:  DxfInsert[]
+  stair_inserts:      DxfInsert[]
+ 
+  /* ── Door / window decorators (synthetic — generated by backend) ── */
+  window_lines?:  DxfLine[]
+  door_lines?:    DxfLine[]
+  furniture_lines?: DxfLine[]
+ 
+  /** Any entity types the backend could not classify go here for debug. */
+  raw_entities?: DxfRawEntity[]
 }
 
-// export const DXF_JSON_DATA: DxfJsonDocument = {
-//   source_file: 'AUTOCAD-FLOOR-PLAN.dxf',
-//   meta: {
-//     acad_version: 'AC1032',
-//     extmin: [20.70000015784895, 21.81555533002226, 0.0],
-//     extmax: [33.70000015784894, 35.11555533002226, 0.0],
-//   },
-//   stats: {
-//     entity_counts: { LINE: 64, LWPOLYLINE: 2, MTEXT: 10 },
-//     polyline_count: 2,
-//     line_count: 64,
-//     arc_count: 0,
-//     text_count: 10,
-//     total_vertex_count: 16,
-//   },
-//   lines: [
-//     { entity_type: 'LINE', handle: '26D', layer: '0', start: { x: 25.00000015784895, y: 22.81555533002226, z: 0 }, end: { x: 21.00000015784894, y: 22.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '26E', layer: '0', start: { x: 21.00000015784894, y: 22.81555533002226, z: 0 }, end: { x: 21.00000015784894, y: 25.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '26F', layer: '0', start: { x: 21.00000015784894, y: 25.81555533002227, z: 0 }, end: { x: 25.00000015784895, y: 25.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '270', layer: '0', start: { x: 25.00000015784895, y: 25.81555533002227, z: 0 }, end: { x: 25.00000015784895, y: 22.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '275', layer: '0', start: { x: 21.00000015784894, y: 25.81555533002227, z: 0 }, end: { x: 21.00000015784894, y: 30.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '276', layer: '0', start: { x: 21.00000015784894, y: 30.81555533002227, z: 0 }, end: { x: 25.00000015784895, y: 30.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '277', layer: '0', start: { x: 25.00000015784895, y: 30.81555533002227, z: 0 }, end: { x: 25.00000015784895, y: 25.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '27C', layer: '0', start: { x: 21.00000015784894, y: 30.81555533002227, z: 0 }, end: { x: 21.00000015784894, y: 34.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '27D', layer: '0', start: { x: 21.00000015784894, y: 34.81555533002226, z: 0 }, end: { x: 26.00000015784895, y: 34.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '27E', layer: '0', start: { x: 26.00000015784895, y: 34.81555533002226, z: 0 }, end: { x: 26.00000015784895, y: 30.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '27F', layer: '0', start: { x: 26.00000015784895, y: 30.81555533002227, z: 0 }, end: { x: 25.00000015784895, y: 30.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '280', layer: '0', start: { x: 26.00000015784895, y: 34.81555533002226, z: 0 }, end: { x: 27.20000015784894, y: 34.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '281', layer: '0', start: { x: 27.20000015784894, y: 34.81555533002226, z: 0 }, end: { x: 27.20000015784894, y: 32.71555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '282', layer: '0', start: { x: 27.20000015784894, y: 32.71555533002227, z: 0 }, end: { x: 26.00000015784895, y: 32.71555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '283', layer: '0', start: { x: 27.20000015784894, y: 34.81555533002226, z: 0 }, end: { x: 28.40000015784895, y: 34.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '284', layer: '0', start: { x: 28.40000015784895, y: 34.81555533002226, z: 0 }, end: { x: 28.40000015784895, y: 33.61555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '285', layer: '0', start: { x: 28.40000015784895, y: 33.61555533002226, z: 0 }, end: { x: 27.20000015784894, y: 33.61555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '286', layer: '0', start: { x: 28.40000015784895, y: 34.81555533002226, z: 0 }, end: { x: 32.40000015784894, y: 34.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '287', layer: '0', start: { x: 32.40000015784894, y: 34.81555533002226, z: 0 }, end: { x: 32.40000015784894, y: 29.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '288', layer: '0', start: { x: 32.40000015784894, y: 29.81555533002227, z: 0 }, end: { x: 28.40000015784895, y: 29.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '289', layer: '0', start: { x: 28.40000015784895, y: 29.81555533002227, z: 0 }, end: { x: 28.40000015784895, y: 33.61555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '28A', layer: '0', start: { x: 28.40000015784895, y: 29.81555533002227, z: 0 }, end: { x: 28.40000015784895, y: 25.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '28B', layer: '0', start: { x: 28.40000015784895, y: 25.81555533002227, z: 0 }, end: { x: 33.40000015784895, y: 25.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '28C', layer: '0', start: { x: 33.40000015784895, y: 25.81555533002227, z: 0 }, end: { x: 33.40000015784895, y: 29.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '28D', layer: '0', start: { x: 33.40000015784895, y: 29.81555533002227, z: 0 }, end: { x: 32.40000015784894, y: 29.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '28F', layer: '0', start: { x: 28.40000015784895, y: 25.81555533002227, z: 0 }, end: { x: 25.00000015784895, y: 25.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '291', layer: '0', start: { x: 28.40000015784895, y: 25.81555533002227, z: 0 }, end: { x: 28.40000015784895, y: 22.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '292', layer: '0', start: { x: 28.40000015784895, y: 22.81555533002226, z: 0 }, end: { x: 25.00000015784895, y: 22.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '299', layer: '0', start: { x: 28.40000015784895, y: 25.51555533002226, z: 0 }, end: { x: 26.79000015784894, y: 25.51555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '29A', layer: '0', start: { x: 28.40000015784895, y: 25.21555533002227, z: 0 }, end: { x: 26.79000015784894, y: 25.21555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '29B', layer: '0', start: { x: 28.40000015784895, y: 24.91555533002226, z: 0 }, end: { x: 26.79000015784894, y: 24.91555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '29C', layer: '0', start: { x: 28.40000015784895, y: 24.61555533002226, z: 0 }, end: { x: 26.79000015784894, y: 24.61555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '29D', layer: '0', start: { x: 28.40000015784895, y: 24.31555533002226, z: 0 }, end: { x: 26.79000015784894, y: 24.31555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '29E', layer: '0', start: { x: 28.40000015784895, y: 24.01555533002226, z: 0 }, end: { x: 26.79000015784894, y: 24.01555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '29F', layer: '0', start: { x: 28.40000015784895, y: 23.71555533002226, z: 0 }, end: { x: 26.79000015784894, y: 23.71555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2A0', layer: '0', start: { x: 28.40000015784895, y: 23.41555533002226, z: 0 }, end: { x: 25.00000015784895, y: 23.41555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2A1', layer: '0', start: { x: 28.40000015784895, y: 23.11555533002226, z: 0 }, end: { x: 25.00000015784895, y: 23.11555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2A4', layer: '0', start: { x: 26.80000015784895, y: 25.81555533002227, z: 0 }, end: { x: 26.80000015784895, y: 22.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2A7', layer: '0', start: { x: 26.79000015784894, y: 25.81555533002227, z: 0 }, end: { x: 26.79000015784894, y: 22.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2A8', layer: '0', start: { x: 26.59000015784894, y: 25.81555533002227, z: 0 }, end: { x: 26.59000015784894, y: 22.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2A9', layer: '0', start: { x: 26.59000015784894, y: 25.51555533002226, z: 0 }, end: { x: 25.00000015784895, y: 25.51555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2AA', layer: '0', start: { x: 26.59000015784894, y: 25.21555533002226, z: 0 }, end: { x: 25.00000015784895, y: 25.21555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '2AB', layer: '0', start: { x: 26.59000015784894, y: 24.91555533002226, z: 0 }, end: { x: 25.00000015784895, y: 24.91555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2AC', layer: '0', start: { x: 26.59000015784894, y: 24.31555533002226, z: 0 }, end: { x: 25.00000015784895, y: 24.31555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2AD', layer: '0', start: { x: 26.59000015784894, y: 24.61555533002226, z: 0 }, end: { x: 25.00000015784895, y: 24.61555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2AE', layer: '0', start: { x: 26.59000015784894, y: 24.01555533002226, z: 0 }, end: { x: 25.00000015784895, y: 24.01555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2AF', layer: '0', start: { x: 26.59000015784894, y: 23.71555533002226, z: 0 }, end: { x: 25.00000015784895, y: 23.71555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2B0', layer: '0', start: { x: 25.00000015784895, y: 22.81555533002226, z: 0 }, end: { x: 25.00000015784895, y: 21.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2B1', layer: '0', start: { x: 25.00000015784895, y: 21.81555533002226, z: 0 }, end: { x: 28.40000015784895, y: 21.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2B2', layer: '0', start: { x: 28.40000015784895, y: 21.81555533002226, z: 0 }, end: { x: 28.40000015784895, y: 22.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2B3', layer: '0', start: { x: 28.40000015784895, y: 22.81555533002226, z: 0 }, end: { x: 33.40000015784895, y: 22.81555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2B4', layer: '0', start: { x: 33.40000015784895, y: 22.81555533002226, z: 0 }, end: { x: 33.40000015784895, y: 25.81555533002227, z: 0 } },
-//     { entity_type: 'LINE', handle: '2B5', layer: '0', start: { x: 28.40000015784895, y: 24.61555533002226, z: 0 }, end: { x: 30.50000015784894, y: 24.61555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2B6', layer: '0', start: { x: 29.60000015784894, y: 25.81555533002227, z: 0 }, end: { x: 29.60000015784894, y: 24.61555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2B7', layer: '0', start: { x: 29.90000015784895, y: 25.81555533002227, z: 0 }, end: { x: 29.90000015784894, y: 24.61555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2B8', layer: '0', start: { x: 30.20000015784895, y: 25.81555533002227, z: 0 }, end: { x: 30.20000015784894, y: 24.61555533002226, z: 0 } },
-//     { entity_type: 'LINE', handle: '2B9', layer: '0', start: { x: 30.50000015784894, y: 25.81555533002227, z: 0 }, end: { x: 30.50000015784894, y: 24.61555533002226, z: 0 } },
-//   ],
-//   arcs: [],
-//   polylines: [
-//     {
-//       entity_type: 'LWPOLYLINE',
-//       handle: '2BD',
-//       layer: '0',
-//       closed: false,
-//       vertex_count: 8,
-//       vertices: [
-//         { x: 25.00000015784895, y: 22.81555533002226, z: 0, bulge: 0 },
-//         { x: 21.00000015784894, y: 22.81555533002226, z: 0, bulge: 0 },
-//         { x: 21.00000015784894, y: 34.81555533002226, z: 0, bulge: 0 },
-//         { x: 32.40000015784894, y: 34.81555533002226, z: 0, bulge: 0 },
-//         { x: 32.40000015784894, y: 29.81555533002227, z: 0, bulge: 0 },
-//         { x: 33.40000015784895, y: 29.81555533002227, z: 0, bulge: 0 },
-//         { x: 33.40000015784895, y: 22.81555533002226, z: 0, bulge: 0 },
-//         { x: 28.40000015784895, y: 22.81555533002226, z: 0, bulge: 0 },
-//       ],
-//     },
-//     {
-//       entity_type: 'LWPOLYLINE',
-//       handle: '2BE',
-//       layer: '0',
-//       closed: false,
-//       vertex_count: 8,
-//       vertices: [
-//         { x: 25.00000015784895, y: 22.51555533002226, z: 0, bulge: 0 },
-//         { x: 20.70000015784895, y: 22.51555533002226, z: 0, bulge: 0 },
-//         { x: 20.70000015784895, y: 35.11555533002226, z: 0, bulge: 0 },
-//         { x: 32.70000015784894, y: 35.11555533002226, z: 0, bulge: 0 },
-//         { x: 32.70000015784894, y: 30.11555533002227, z: 0, bulge: 0 },
-//         { x: 33.70000015784894, y: 30.11555533002226, z: 0, bulge: 0 },
-//         { x: 33.70000015784894, y: 22.51555533002226, z: 0, bulge: 0 },
-//         { x: 28.40000015784895, y: 22.51555533002226, z: 0, bulge: 0 },
-//       ],
-//     },
-//   ],
-//   texts: [
-//     { entity_type: 'MTEXT', handle: '2C4', layer: '0', text: 'KITCHEN\n5 X 4 M', position: { x: 22.647, y: 33.376, z: 0 }, height: 0.2 },
-//     { entity_type: 'MTEXT', handle: '2CF', layer: '0', text: 'LIVING ROOM\n4 X 5 M', position: { x: 21.953, y: 28.470, z: 0 }, height: 0.2 },
-//     { entity_type: 'MTEXT', handle: '2D7', layer: '0', text: 'OFFICE\n4 X M', position: { x: 21.842, y: 24.632, z: 0 }, height: 0.2 },
-//     { entity_type: 'MTEXT', handle: '2DF', layer: '0', text: 'BEDROOM\n4 X 5 M', position: { x: 29.453, y: 32.603, z: 0 }, height: 0.2 },
-//     { entity_type: 'MTEXT', handle: '2E7', layer: '0', text: 'BEDROOM\n5 X 4 M', position: { x: 30.118, y: 28.175, z: 0 }, height: 0.2 },
-//     { entity_type: 'MTEXT', handle: '2EF', layer: '0', text: 'PARKING\n5 X 3 M', position: { x: 30.488, y: 24.448, z: 0 }, height: 0.2 },
-//     { entity_type: 'MTEXT', handle: '2F7', layer: '0', text: 'LOBBY', position: { x: 25.869, y: 28.839, z: 0 }, height: 0.2 },
-//     { entity_type: 'MTEXT', handle: '300', layer: '0', text: 'LANDING\n1M WIDE', position: { x: 25.699, y: 22.589, z: 0 }, height: 0.2 },
-//     { entity_type: 'MTEXT', handle: '308', layer: '0', text: 'BATH\n1.2 X 2.1 M', position: { x: 25.662, y: 34.387, z: 0 }, height: 0.14 },
-//     { entity_type: 'MTEXT', handle: '310', layer: '0', text: 'WC\n1.2 X 1.2 M', position: { x: 27.139, y: 34.663, z: 0 }, height: 0.14 },
-//   ],
-// }
 
 // export const DXF_JSON_DATA: DxfJsonDocument = {
-//   source_file: "update-autocad-file.dxf",
+//   source_file: "update-autocad-file-1.dxf",
 //   meta: {
 //     acad_version: "AC1032",
-//     extmin: [-0.6949059034284347, -3.716204318229131, 0.0],
-//     extmax: [20.17745305040325, 7.295196564956299, 0.0],
+//     extmin: [-3.226776043334007, -3.716204318229131, 0.0],
+//     extmax: [20.17745305040325, 7.947965026977579, 0.0],
 //   },
 //   stats: {
 //     entity_counts: {
-//       LINE: 37,
+//       LINE: 55,
 //       MTEXT: 8,
-//       INSERT: 2,
+//       ARC: 6,
+//       INSERT: 7,
 //     },
 //     polyline_count: 0,
-//     line_count: 37,
-//     arc_count: 0,
+//     line_count: 55,
+//     arc_count: 6,
 //     text_count: 8,
 //     total_vertex_count: 0,
 //   },
@@ -261,7 +632,7 @@ export interface DxfJsonDocument {
 //         z: 0.0,
 //       },
 //       end: {
-//         x: 0.6108066156627175,
+//         x: 1.680900782392768,
 //         y: 3.945196564956299,
 //         z: 0.0,
 //       },
@@ -501,7 +872,7 @@ export interface DxfJsonDocument {
 //         z: 0.0,
 //       },
 //       end: {
-//         x: 6.610806615662717,
+//         x: 4.668873803766473,
 //         y: 4.795196564956299,
 //         z: 0.0,
 //       },
@@ -511,8 +882,8 @@ export interface DxfJsonDocument {
 //       handle: "292",
 //       layer: "0",
 //       start: {
-//         x: 7.941414477020998,
-//         y: 3.945196564956299,
+//         x: 8.551014477020999,
+//         y: 3.945196564956298,
 //         z: 0.0,
 //       },
 //       end: {
@@ -531,8 +902,8 @@ export interface DxfJsonDocument {
 //         z: 0.0,
 //       },
 //       end: {
-//         x: 13.30632917594676,
-//         y: 3.945196564956299,
+//         x: 13.14993700878509,
+//         y: 3.932085732014996,
 //         z: 0.0,
 //       },
 //     },
@@ -727,7 +1098,7 @@ export interface DxfJsonDocument {
 //       },
 //       end: {
 //         x: 11.42798613906805,
-//         y: -2.745149250328729,
+//         y: -0.7213204897056472,
 //         z: 0.0,
 //       },
 //     },
@@ -776,8 +1147,250 @@ export interface DxfJsonDocument {
 //         z: 0.0,
 //       },
 //     },
+//     {
+//       entity_type: "LINE",
+//       handle: "25C8",
+//       layer: "0",
+//       start: {
+//         x: 5.278473803766473,
+//         y: 4.795196564956299,
+//         z: 0.0,
+//       },
+//       end: {
+//         x: 6.610806615662717,
+//         y: 4.795196564956299,
+//         z: 0.0,
+//       },
+//     },
+//     {
+//       entity_type: "LINE",
+//       handle: "25CA",
+//       layer: "0",
+//       start: {
+//         x: 11.42798613906805,
+//         y: -1.330920489705647,
+//         z: 0.0,
+//       },
+//       end: {
+//         x: 11.42798613906805,
+//         y: -2.745149250328729,
+//         z: 0.0,
+//       },
+//     },
+//     {
+//       entity_type: "LINE",
+//       handle: "25CC",
+//       layer: "0",
+//       start: {
+//         x: 1.162244020022889,
+//         y: 3.945196564956299,
+//         z: 0.0,
+//       },
+//       end: {
+//         x: 0.6108066156627175,
+//         y: 3.945196564956299,
+//         z: 0.0,
+//       },
+//     },
+//     /* ── Door-frame lines resolved from INSERT+block (flattened to world space) ─ */
+//     // Door *U19 (rot=270°) – left jamb
+//     {
+//       entity_type: "LINE",
+//       handle: "dfl-u19-1",
+//       layer: "0",
+//       start: { x: 3.451493532527252, y: -0.750353888159623, z: 0.0 },
+//       end: { x: 3.603893532527252, y: -0.750353888159623, z: 0.0 },
+//     },
+//     // Door *U19 (rot=270°) – right jamb
+//     {
+//       entity_type: "LINE",
+//       handle: "dfl-u19-2",
+//       layer: "0",
+//       start: { x: 3.451493532527252, y: -1.360153888159623, z: 0.0 },
+//       end: { x: 3.603893532527252, y: -1.360153888159623, z: 0.0 },
+//     },
+
+//     // Door *U27-A (rot=0°) – left jamb
+//     {
+//       entity_type: "LINE",
+//       handle: "dfl-u27a-1",
+//       layer: "0",
+//       start: { x: 13.1499370087851, y: 4.033685732015, z: 0.0 },
+//       end: { x: 13.1499370087851, y: 3.932085732015, z: 0.0 },
+//     },
+//     // Door *U27-A (rot=0°) – right jamb
+//     {
+//       entity_type: "LINE",
+//       handle: "dfl-u27a-2",
+//       layer: "0",
+//       start: { x: 12.5403370087851, y: 4.033685732015, z: 0.0 },
+//       end: { x: 12.5403370087851, y: 3.932085732015, z: 0.0 },
+//     },
+
+//     // Door *U27-B (rot=0°) – left jamb
+//     {
+//       entity_type: "LINE",
+//       handle: "dfl-u27b-1",
+//       layer: "0",
+//       start: { x: 1.77184402002289, y: 4.07048327746712, z: 0.0 },
+//       end: { x: 1.77184402002289, y: 3.96888327746712, z: 0.0 },
+//     },
+//     // Door *U27-B (rot=0°) – right jamb
+//     {
+//       entity_type: "LINE",
+//       handle: "dfl-u27b-2",
+//       layer: "0",
+//       start: { x: 1.16224402002289, y: 4.07048327746712, z: 0.0 },
+//       end: { x: 1.16224402002289, y: 3.96888327746712, z: 0.0 },
+//     },
+
+//     // Door *U27-C (rot=0°) – left jamb
+//     {
+//       entity_type: "LINE",
+//       handle: "dfl-u27c-1",
+//       layer: "0",
+//       start: { x: 5.27847380376647, y: 4.8967965649563, z: 0.0 },
+//       end: { x: 5.27847380376647, y: 4.7951965649563, z: 0.0 },
+//     },
+//     // Door *U27-C (rot=0°) – right jamb
+//     {
+//       entity_type: "LINE",
+//       handle: "dfl-u27c-2",
+//       layer: "0",
+//       start: { x: 4.66887380376647, y: 4.8967965649563, z: 0.0 },
+//       end: { x: 4.66887380376647, y: 4.7951965649563, z: 0.0 },
+//     },
+
+//     // Door *U27-D (rot=0°) – left jamb
+//     {
+//       entity_type: "LINE",
+//       handle: "dfl-u27d-1",
+//       layer: "0",
+//       start: { x: 8.551014477021, y: 4.0467965649563, z: 0.0 },
+//       end: { x: 8.551014477021, y: 3.9451965649563, z: 0.0 },
+//     },
+//     // Door *U27-D (rot=0°) – right jamb
+//     {
+//       entity_type: "LINE",
+//       handle: "dfl-u27d-2",
+//       layer: "0",
+//       start: { x: 7.941414477021, y: 4.0467965649563, z: 0.0 },
+//       end: { x: 7.941414477021, y: 3.9451965649563, z: 0.0 },
+//     },
+
+//     // Door *U40 (rot=270°) – left jamb
+//     {
+//       entity_type: "LINE",
+//       handle: "dfl-u40-1",
+//       layer: "0",
+//       start: { x: 11.5693336730504, y: -0.721320489705647, z: 0.0 },
+//       end: { x: 11.4169336730504, y: -0.721320489705647, z: 0.0 },
+//     },
+//     // Door *U40 (rot=270°) – right jamb
+//     {
+//       entity_type: "LINE",
+//       handle: "dfl-u40-2",
+//       layer: "0",
+//       start: { x: 11.5693336730504, y: -1.330920489705647, z: 0.0 },
+//       end: { x: 11.4169336730504, y: -1.330920489705647, z: 0.0 },
+//     },
+
+//     /* ── Window lines resolved from *U45 INSERT ────────────────────────────── */
+//     // Window *U45 – INSERT at (1.562330, 7.237460) scale=0.001 rot=0°
+//     // Left sill line
+//     {
+//       entity_type: "LINE",
+//       handle: "win-u45-1",
+//       layer: "0",
+//       start: { x: 1.56233022318554, y: 7.38745951649011, z: 0.0 },
+//       end: { x: 1.56233022318554, y: 7.23745951649011, z: 0.0 },
+//     },
+//     // Right sill line
+//     {
+//       entity_type: "LINE",
+//       handle: "win-u45-2",
+//       layer: "0",
+//       start: { x: 2.46233022318554, y: 7.38745951649011, z: 0.0 },
+//       end: { x: 2.46233022318554, y: 7.23745951649011, z: 0.0 },
+//     },
+//     // Middle sill line
+//     {
+//       entity_type: "LINE",
+//       handle: "win-u45-3",
+//       layer: "0",
+//       start: { x: 1.56233022318554, y: 7.31245951649011, z: 0.0 },
+//       end: { x: 2.46233022318554, y: 7.31245951649011, z: 0.0 },
+//     },
 //   ],
-//   arcs: [],
+//   arcs: [
+//     /* ── Doors – arcs resolved from INSERT+block geometry ──────────────────
+//      * Each arc is computed by applying the INSERT's (position, scale, rotation)
+//      * to the single visible ARC entity inside the referenced dynamic block.
+//      * Block units are inches; scale = 0.0254 → metres.
+//      * Angles are in degrees, CCW from positive X, matching AutoCAD convention.
+//      * ─────────────────────────────────────────────────────────────────────── */
+
+//     // Door *U19 – INSERT at (3.451, -0.750) rot=270°  → arc sweeps 180°→270°
+//     {
+//       entity_type: "ARC",
+//       handle: "arc-u19",
+//       layer: "0",
+//       center: { x: 3.451493532527252, y: -0.750353888159623, z: 0.0 },
+//       radius: 0.6096,
+//       start_angle: 180.0,
+//       end_angle: 270.0,
+//     },
+//     // Door *U27 – INSERT at (13.150, 4.034) rot=0°  → arc sweeps 90°→180°
+//     {
+//       entity_type: "ARC",
+//       handle: "arc-u27a",
+//       layer: "0",
+//       center: { x: 13.1499370087851, y: 4.033685732015, z: 0.0 },
+//       radius: 0.6096,
+//       start_angle: 90.0,
+//       end_angle: 180.0,
+//     },
+//     // Door *U27 – INSERT at (1.772, 4.070) rot=0°
+//     {
+//       entity_type: "ARC",
+//       handle: "arc-u27b",
+//       layer: "0",
+//       center: { x: 1.77184402002289, y: 4.07048327746712, z: 0.0 },
+//       radius: 0.6096,
+//       start_angle: 90.0,
+//       end_angle: 180.0,
+//     },
+//     // Door *U27 – INSERT at (5.278, 4.897) rot=0°
+//     {
+//       entity_type: "ARC",
+//       handle: "arc-u27c",
+//       layer: "0",
+//       center: { x: 5.27847380376647, y: 4.8967965649563, z: 0.0 },
+//       radius: 0.6096,
+//       start_angle: 90.0,
+//       end_angle: 180.0,
+//     },
+//     // Door *U27 – INSERT at (8.551, 4.047) rot=0°
+//     {
+//       entity_type: "ARC",
+//       handle: "arc-u27d",
+//       layer: "0",
+//       center: { x: 8.551014477021, y: 4.0467965649563, z: 0.0 },
+//       radius: 0.6096,
+//       start_angle: 90.0,
+//       end_angle: 180.0,
+//     },
+//     // Door *U40 – INSERT at (11.569, -0.721) rot=270°  → arc sweeps 270°→0°
+//     {
+//       entity_type: "ARC",
+//       handle: "arc-u40",
+//       layer: "0",
+//       center: { x: 11.5693336730504, y: -0.721320489705647, z: 0.0 },
+//       radius: 0.6096,
+//       start_angle: 270.0,
+//       end_angle: 0.0,
+//     },
+//   ],
 //   polylines: [],
 //   texts: [
 //     {
@@ -877,1928 +1490,137 @@ export interface DxfJsonDocument {
 //       height: 0.2,
 //     },
 //   ],
-// };
-
-// export const DXF_JSON_DATA: DxfJsonDocument = {
-//   source_file: "floor_plan_2bed.dxf",
-//   meta: {
-//     acad_version: "AC1009",
-//     extmin: [0.0, 0.0, 0.0],
-//     extmax: [0.0, 0.0, 0.0],
-//   },
-//   stats: {
-//     entity_counts: {
-//       LINE: 103,
-//       ARC: 4,
-//       TEXT: 23,
-//       CIRCLE: 5,
-//     },
-//     polyline_count: 0,
-//     line_count: 103,
-//     arc_count: 4,
-//     text_count: 23,
-//     total_vertex_count: 0,
-//   },
-//   lines: [
-//     {
-//       entity_type: "LINE",
-//       handle: "A",
-//       layer: "Walls_Thick",
-//       start: {
-//         x: 0.0,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 14.0,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "B",
-//       layer: "Walls_Thick",
-//       start: {
-//         x: 14.0,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 14.0,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "C",
-//       layer: "Walls_Thick",
-//       start: {
-//         x: 14.0,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.0,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "D",
-//       layer: "Walls_Thick",
-//       start: {
-//         x: 0.0,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.0,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "E",
-//       layer: "Walls_Thick",
-//       start: {
-//         x: 0.2,
-//         y: 0.2,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 13.8,
-//         y: 0.2,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "F",
-//       layer: "Walls_Thick",
-//       start: {
-//         x: 13.8,
-//         y: 0.2,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 13.8,
-//         y: 9.8,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "10",
-//       layer: "Walls_Thick",
-//       start: {
-//         x: 13.8,
-//         y: 9.8,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.2,
-//         y: 9.8,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "11",
-//       layer: "Walls_Thick",
-//       start: {
-//         x: 0.2,
-//         y: 9.8,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.2,
-//         y: 0.2,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "12",
-//       layer: "Walls",
-//       start: {
-//         x: 0.0,
-//         y: 6.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 2.3,
-//         y: 6.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "13",
-//       layer: "Walls",
-//       start: {
-//         x: 0.0,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 2.3,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "14",
-//       layer: "Walls",
-//       start: {
-//         x: 3.2,
-//         y: 6.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 9.0,
-//         y: 6.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "15",
-//       layer: "Walls",
-//       start: {
-//         x: 3.2,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 9.0,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "16",
-//       layer: "Walls",
-//       start: {
-//         x: 9.9,
-//         y: 6.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 14.0,
-//         y: 6.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "17",
-//       layer: "Walls",
-//       start: {
-//         x: 9.9,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 14.0,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "18",
-//       layer: "Walls",
-//       start: {
-//         x: 7.0,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 7.0,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "19",
-//       layer: "Walls",
-//       start: {
-//         x: 7.2,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 7.2,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "1A",
-//       layer: "Walls",
-//       start: {
-//         x: 4.0,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 4.0,
-//         y: 2.8,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "1B",
-//       layer: "Walls",
-//       start: {
-//         x: 4.2,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 4.2,
-//         y: 2.8,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "1C",
-//       layer: "Walls",
-//       start: {
-//         x: 4.0,
-//         y: 3.7,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 4.0,
-//         y: 6.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "1D",
-//       layer: "Walls",
-//       start: {
-//         x: 4.2,
-//         y: 3.7,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 4.2,
-//         y: 6.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "1F",
-//       layer: "Doors",
-//       start: {
-//         x: 2.3,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.2,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "21",
-//       layer: "Doors",
-//       start: {
-//         x: 9.0,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 9.9,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "23",
-//       layer: "Doors",
-//       start: {
-//         x: 4.2,
-//         y: 3.7,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 4.2,
-//         y: 2.8,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "25",
-//       layer: "Doors",
-//       start: {
-//         x: 9.0,
-//         y: 0.2,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 10.0,
-//         y: 0.2,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "26",
-//       layer: "Windows",
-//       start: {
-//         x: 2.0,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 5.0,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "27",
-//       layer: "Windows",
-//       start: {
-//         x: 2.0,
-//         y: 10.15,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 5.0,
-//         y: 10.15,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "28",
-//       layer: "Windows",
-//       start: {
-//         x: 2.75,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 2.75,
-//         y: 10.15,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "29",
-//       layer: "Windows",
-//       start: {
-//         x: 3.5,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.5,
-//         y: 10.15,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2A",
-//       layer: "Windows",
-//       start: {
-//         x: 4.25,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 4.25,
-//         y: 10.15,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2B",
-//       layer: "Windows",
-//       start: {
-//         x: 9.0,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 12.0,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2C",
-//       layer: "Windows",
-//       start: {
-//         x: 9.0,
-//         y: 10.15,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 12.0,
-//         y: 10.15,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2D",
-//       layer: "Windows",
-//       start: {
-//         x: 9.75,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 9.75,
-//         y: 10.15,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2E",
-//       layer: "Windows",
-//       start: {
-//         x: 10.5,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 10.5,
-//         y: 10.15,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2F",
-//       layer: "Windows",
-//       start: {
-//         x: 11.25,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 11.25,
-//         y: 10.15,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "30",
-//       layer: "Windows",
-//       start: {
-//         x: 0.0,
-//         y: 2.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.0,
-//         y: 4.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "31",
-//       layer: "Windows",
-//       start: {
-//         x: -0.15,
-//         y: 2.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: -0.15,
-//         y: 4.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "32",
-//       layer: "Windows",
-//       start: {
-//         x: 0.0,
-//         y: 2.625,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: -0.15,
-//         y: 2.625,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "33",
-//       layer: "Windows",
-//       start: {
-//         x: 0.0,
-//         y: 3.25,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: -0.15,
-//         y: 3.25,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "34",
-//       layer: "Windows",
-//       start: {
-//         x: 0.0,
-//         y: 3.875,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: -0.15,
-//         y: 3.875,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "35",
-//       layer: "Windows",
-//       start: {
-//         x: 14.0,
-//         y: 2.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 14.0,
-//         y: 5.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "36",
-//       layer: "Windows",
-//       start: {
-//         x: 13.85,
-//         y: 2.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 13.85,
-//         y: 5.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "37",
-//       layer: "Windows",
-//       start: {
-//         x: 14.0,
-//         y: 2.75,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 13.85,
-//         y: 2.75,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "38",
-//       layer: "Windows",
-//       start: {
-//         x: 14.0,
-//         y: 3.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 13.85,
-//         y: 3.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "39",
-//       layer: "Windows",
-//       start: {
-//         x: 14.0,
-//         y: 4.25,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 13.85,
-//         y: 4.25,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "3A",
-//       layer: "Windows",
-//       start: {
-//         x: 5.5,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 8.0,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "3B",
-//       layer: "Windows",
-//       start: {
-//         x: 5.5,
-//         y: 0.15,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 8.0,
-//         y: 0.15,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "3C",
-//       layer: "Windows",
-//       start: {
-//         x: 6.125,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 6.125,
-//         y: 0.15,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "3D",
-//       layer: "Windows",
-//       start: {
-//         x: 6.75,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 6.75,
-//         y: 0.15,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "3E",
-//       layer: "Windows",
-//       start: {
-//         x: 7.375,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 7.375,
-//         y: 0.15,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "47",
-//       layer: "Furniture",
-//       start: {
-//         x: 1.0,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.0,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "48",
-//       layer: "Furniture",
-//       start: {
-//         x: 3.0,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.0,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "49",
-//       layer: "Furniture",
-//       start: {
-//         x: 3.0,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 1.0,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "4A",
-//       layer: "Furniture",
-//       start: {
-//         x: 1.0,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 1.0,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "4B",
-//       layer: "Furniture",
-//       start: {
-//         x: 1.2,
-//         y: 9.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 2.8,
-//         y: 9.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "4C",
-//       layer: "Furniture",
-//       start: {
-//         x: 2.8,
-//         y: 9.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 2.8,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "4D",
-//       layer: "Furniture",
-//       start: {
-//         x: 2.8,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 1.2,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "4E",
-//       layer: "Furniture",
-//       start: {
-//         x: 1.2,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 1.2,
-//         y: 9.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "50",
-//       layer: "Furniture",
-//       start: {
-//         x: 5.0,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 6.5,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "51",
-//       layer: "Furniture",
-//       start: {
-//         x: 6.5,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 6.5,
-//         y: 7.6,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "52",
-//       layer: "Furniture",
-//       start: {
-//         x: 6.5,
-//         y: 7.6,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 5.0,
-//         y: 7.6,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "53",
-//       layer: "Furniture",
-//       start: {
-//         x: 5.0,
-//         y: 7.6,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 5.0,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "55",
-//       layer: "Furniture",
-//       start: {
-//         x: 8.0,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 10.0,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "56",
-//       layer: "Furniture",
-//       start: {
-//         x: 10.0,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 10.0,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "57",
-//       layer: "Furniture",
-//       start: {
-//         x: 10.0,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 8.0,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "58",
-//       layer: "Furniture",
-//       start: {
-//         x: 8.0,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 8.0,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "59",
-//       layer: "Furniture",
-//       start: {
-//         x: 8.2,
-//         y: 9.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 9.8,
-//         y: 9.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "5A",
-//       layer: "Furniture",
-//       start: {
-//         x: 9.8,
-//         y: 9.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 9.8,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "5B",
-//       layer: "Furniture",
-//       start: {
-//         x: 9.8,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 8.2,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "5C",
-//       layer: "Furniture",
-//       start: {
-//         x: 8.2,
-//         y: 9.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 8.2,
-//         y: 9.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "5E",
-//       layer: "Furniture",
-//       start: {
-//         x: 12.0,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 13.5,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "5F",
-//       layer: "Furniture",
-//       start: {
-//         x: 13.5,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 13.5,
-//         y: 7.6,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "60",
-//       layer: "Furniture",
-//       start: {
-//         x: 13.5,
-//         y: 7.6,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 12.0,
-//         y: 7.6,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "61",
-//       layer: "Furniture",
-//       start: {
-//         x: 12.0,
-//         y: 7.6,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 12.0,
-//         y: 7.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "63",
-//       layer: "Furniture",
-//       start: {
-//         x: 0.3,
-//         y: 0.3,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.7,
-//         y: 0.3,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "64",
-//       layer: "Furniture",
-//       start: {
-//         x: 3.7,
-//         y: 0.3,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.7,
-//         y: 1.3,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "65",
-//       layer: "Furniture",
-//       start: {
-//         x: 3.7,
-//         y: 1.3,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.3,
-//         y: 1.3,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "66",
-//       layer: "Furniture",
-//       start: {
-//         x: 0.3,
-//         y: 1.3,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.3,
-//         y: 0.3,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "68",
-//       layer: "Furniture",
-//       start: {
-//         x: 0.3,
-//         y: 4.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 1.5,
-//         y: 4.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "69",
-//       layer: "Furniture",
-//       start: {
-//         x: 1.5,
-//         y: 4.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 1.5,
-//         y: 5.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "6A",
-//       layer: "Furniture",
-//       start: {
-//         x: 1.5,
-//         y: 5.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.3,
-//         y: 5.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "6B",
-//       layer: "Furniture",
-//       start: {
-//         x: 0.3,
-//         y: 5.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.3,
-//         y: 4.5,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "6E",
-//       layer: "Furniture",
-//       start: {
-//         x: 0.3,
-//         y: 1.8,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 1.5,
-//         y: 1.8,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "6F",
-//       layer: "Furniture",
-//       start: {
-//         x: 1.5,
-//         y: 1.8,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 1.5,
-//         y: 2.8,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "70",
-//       layer: "Furniture",
-//       start: {
-//         x: 1.5,
-//         y: 2.8,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.3,
-//         y: 2.8,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "71",
-//       layer: "Furniture",
-//       start: {
-//         x: 0.3,
-//         y: 2.8,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.3,
-//         y: 1.8,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "77",
-//       layer: "Furniture",
-//       start: {
-//         x: 8.0,
-//         y: 0.8,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 12.5,
-//         y: 0.8,
-//         z: 0.0,
-//       },
-//     },
+//    : [
 //     {
 //       entity_type: "LINE",
-//       handle: "78",
-//       layer: "Furniture",
-//       start: {
-//         x: 12.5,
-//         y: 0.8,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 12.5,
-//         y: 2.0,
-//         z: 0.0,
-//       },
+//       handle: "furn-bed-1",
+//       layer: "0",
+//       start: { x: 2.372132069842834, y: 3.479264313995376, z: 0 },
+//       end: { x: 2.372132069842834, y: 2.079264313995376, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "79",
-//       layer: "Furniture",
-//       start: {
-//         x: 12.5,
-//         y: 2.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 8.0,
-//         y: 2.0,
-//         z: 0.0,
-//       },
+//       handle: "furn-bed-2",
+//       layer: "0",
+//       start: { x: 2.372132069842834, y: 2.079264313995376, z: 0 },
+//       end: { x: 3.972132069842834, y: 2.079264313995376, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "7A",
-//       layer: "Furniture",
-//       start: {
-//         x: 8.0,
-//         y: 2.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 8.0,
-//         y: 0.8,
-//         z: 0.0,
-//       },
+//       handle: "furn-bed-3",
+//       layer: "0",
+//       start: { x: 3.972132069842834, y: 2.079264313995376, z: 0 },
+//       end: { x: 3.972132069842834, y: 3.479264313995376, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "7C",
-//       layer: "Furniture",
-//       start: {
-//         x: 9.0,
-//         y: 2.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 11.0,
-//         y: 2.5,
-//         z: 0.0,
-//       },
+//       handle: "furn-bed-4",
+//       layer: "0",
+//       start: { x: 3.972132069842834, y: 3.479264313995376, z: 0 },
+//       end: { x: 2.372132069842834, y: 3.479264313995376, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "7D",
-//       layer: "Furniture",
-//       start: {
-//         x: 11.0,
-//         y: 2.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 11.0,
-//         y: 3.5,
-//         z: 0.0,
-//       },
+//       handle: "furn-bed-pillow-1",
+//       layer: "0",
+//       start: { x: 2.692132069842834, y: 3.479264313995376, z: 0 },
+//       end: { x: 2.692132069842834, y: 2.899264313995376, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "7E",
-//       layer: "Furniture",
-//       start: {
-//         x: 11.0,
-//         y: 3.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 9.0,
-//         y: 3.5,
-//         z: 0.0,
-//       },
+//       handle: "furn-bed-pillow-2",
+//       layer: "0",
+//       start: { x: 3.652132069842834, y: 3.479264313995376, z: 0 },
+//       end: { x: 3.652132069842834, y: 2.899264313995376, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "7F",
-//       layer: "Furniture",
-//       start: {
-//         x: 9.0,
-//         y: 3.5,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 9.0,
-//         y: 2.5,
-//         z: 0.0,
-//       },
+//       handle: "furn-chair-1",
+//       layer: "0",
+//       start: { x: 1.481668176941881, y: 2.363800714190402, z: 0 },
+//       end: { x: 1.481668176941881, y: 2.013800714190402, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "81",
-//       layer: "Furniture",
-//       start: {
-//         x: 5.0,
-//         y: 0.3,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 7.5,
-//         y: 0.3,
-//         z: 0.0,
-//       },
+//       handle: "furn-chair-2",
+//       layer: "0",
+//       start: { x: 1.481668176941881, y: 2.013800714190402, z: 0 },
+//       end: { x: 1.831668176941881, y: 2.013800714190402, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "82",
-//       layer: "Furniture",
-//       start: {
-//         x: 7.5,
-//         y: 0.3,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 7.5,
-//         y: 0.7,
-//         z: 0.0,
-//       },
+//       handle: "furn-chair-3",
+//       layer: "0",
+//       start: { x: 1.831668176941881, y: 2.013800714190402, z: 0 },
+//       end: { x: 1.831668176941881, y: 2.363800714190402, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "83",
-//       layer: "Furniture",
-//       start: {
-//         x: 7.5,
-//         y: 0.7,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 5.0,
-//         y: 0.7,
-//         z: 0.0,
-//       },
+//       handle: "furn-chair-back",
+//       layer: "0",
+//       start: { x: 1.656668176941881, y: 2.363800714190402, z: 0 },
+//       end: { x: 1.656668176941881, y: 2.413800714190402, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "84",
-//       layer: "Furniture",
-//       start: {
-//         x: 5.0,
-//         y: 0.7,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 5.0,
-//         y: 0.3,
-//         z: 0.0,
-//       },
+//       handle: "furn-copier-1",
+//       layer: "0",
+//       start: { x: 13.81459250254958, y: 2.278631800417986, z: 0 },
+//       end: { x: 13.81459250254958, y: 1.878631800417986, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "89",
-//       layer: "Dimensions",
-//       start: {
-//         x: 0.0,
-//         y: -0.8,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 14.0,
-//         y: -0.8,
-//         z: 0.0,
-//       },
+//       handle: "furn-copier-2",
+//       layer: "0",
+//       start: { x: 13.81459250254958, y: 1.878631800417986, z: 0 },
+//       end: { x: 14.21459250254958, y: 1.878631800417986, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "8A",
-//       layer: "Dimensions",
-//       start: {
-//         x: 0.0,
-//         y: -0.6,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.0,
-//         y: -1.0,
-//         z: 0.0,
-//       },
+//       handle: "furn-copier-3",
+//       layer: "0",
+//       start: { x: 14.21459250254958, y: 1.878631800417986, z: 0 },
+//       end: { x: 14.21459250254958, y: 2.278631800417986, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "8B",
-//       layer: "Dimensions",
-//       start: {
-//         x: 14.0,
-//         y: -0.6,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 14.0,
-//         y: -1.0,
-//         z: 0.0,
-//       },
+//       handle: "furn-copier-4",
+//       layer: "0",
+//       start: { x: 14.21459250254958, y: 2.278631800417986, z: 0 },
+//       end: { x: 13.81459250254958, y: 2.278631800417986, z: 0 },
 //     },
 //     {
 //       entity_type: "LINE",
-//       handle: "8D",
-//       layer: "Dimensions",
-//       start: {
-//         x: -0.8,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: -0.8,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "8E",
-//       layer: "Dimensions",
-//       start: {
-//         x: -0.6,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: -1.0,
-//         y: 0.0,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "8F",
-//       layer: "Dimensions",
-//       start: {
-//         x: -0.6,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: -1.0,
-//         y: 10.0,
-//         z: 0.0,
-//       },
-//     },
-//   ],
-//   arcs: [
-//     {
-//       entity_type: "ARC",
-//       handle: "1E",
-//       layer: "Doors",
-//       center: {
-//         x: 2.3,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//       radius: 0.9,
-//       start_angle: 0.0,
-//       end_angle: 90.0,
-//     },
-//     {
-//       entity_type: "ARC",
-//       handle: "20",
-//       layer: "Doors",
-//       center: {
-//         x: 9.0,
-//         y: 6.2,
-//         z: 0.0,
-//       },
-//       radius: 0.9,
-//       start_angle: 0.0,
-//       end_angle: 90.0,
-//     },
-//     {
-//       entity_type: "ARC",
-//       handle: "22",
-//       layer: "Doors",
-//       center: {
-//         x: 4.2,
-//         y: 3.7,
-//         z: 0.0,
-//       },
-//       radius: 0.9,
-//       start_angle: 180.0,
-//       end_angle: 270.0,
-//     },
-//     {
-//       entity_type: "ARC",
-//       handle: "24",
-//       layer: "Doors",
-//       center: {
-//         x: 9.0,
-//         y: 0.2,
-//         z: 0.0,
-//       },
-//       radius: 1.0,
-//       start_angle: 0.0,
-//       end_angle: 90.0,
-//     },
-//   ],
-//   polylines: [],
-//   texts: [
-//     {
-//       entity_type: "MTEXT",
-//       handle: "3F",
-//       layer: "Text",
-//       text: "BEDROOM 1",
-//       position: {
-//         x: 1.8,
-//         y: 8.2,
-//         z: 0.0,
-//       },
-//       height: 0.35,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "40",
-//       layer: "Dimensions",
-//       text: "7.0m x 4.0m",
-//       position: {
-//         x: 2.0,
-//         y: 7.5,
-//         z: 0.0,
-//       },
-//       height: 0.25,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "41",
-//       layer: "Text",
-//       text: "BEDROOM 2",
-//       position: {
-//         x: 8.8,
-//         y: 8.2,
-//         z: 0.0,
-//       },
-//       height: 0.35,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "42",
-//       layer: "Dimensions",
-//       text: "7.0m x 4.0m",
-//       position: {
-//         x: 9.0,
-//         y: 7.5,
-//         z: 0.0,
-//       },
-//       height: 0.25,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "43",
-//       layer: "Text",
-//       text: "KITCHEN",
-//       position: {
-//         x: 0.8,
-//         y: 3.5,
-//         z: 0.0,
-//       },
-//       height: 0.35,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "44",
-//       layer: "Dimensions",
-//       text: "4.0m x 6.0m",
-//       position: {
-//         x: 0.6,
-//         y: 2.8,
-//         z: 0.0,
-//       },
-//       height: 0.25,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "45",
-//       layer: "Text",
-//       text: "LIVING ROOM",
-//       position: {
-//         x: 7.0,
-//         y: 3.5,
-//         z: 0.0,
-//       },
-//       height: 0.35,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "46",
-//       layer: "Dimensions",
-//       text: "10.0m x 6.0m",
-//       position: {
-//         x: 7.2,
-//         y: 2.8,
-//         z: 0.0,
-//       },
-//       height: 0.25,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "4F",
-//       layer: "Furniture",
-//       text: "BED",
-//       position: {
-//         x: 1.6,
-//         y: 8.0,
-//         z: 0.0,
-//       },
-//       height: 0.2,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "54",
-//       layer: "Furniture",
-//       text: "WARDROBE",
-//       position: {
-//         x: 5.1,
-//         y: 7.1,
-//         z: 0.0,
-//       },
-//       height: 0.15,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "5D",
-//       layer: "Furniture",
-//       text: "BED",
-//       position: {
-//         x: 8.6,
-//         y: 8.0,
-//         z: 0.0,
-//       },
-//       height: 0.2,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "62",
-//       layer: "Furniture",
-//       text: "WARDROBE",
-//       position: {
-//         x: 12.1,
-//         y: 7.1,
-//         z: 0.0,
-//       },
-//       height: 0.15,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "67",
-//       layer: "Furniture",
-//       text: "COUNTER",
-//       position: {
-//         x: 1.0,
-//         y: 0.6,
-//         z: 0.0,
-//       },
-//       height: 0.2,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "6D",
-//       layer: "Furniture",
-//       text: "SINK",
-//       position: {
-//         x: 0.5,
-//         y: 4.1,
-//         z: 0.0,
-//       },
-//       height: 0.18,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "76",
-//       layer: "Furniture",
-//       text: "STOVE",
-//       position: {
-//         x: 0.4,
-//         y: 1.5,
-//         z: 0.0,
-//       },
-//       height: 0.18,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "7B",
-//       layer: "Furniture",
-//       text: "SOFA",
-//       position: {
-//         x: 9.5,
-//         y: 1.2,
-//         z: 0.0,
-//       },
-//       height: 0.22,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "80",
-//       layer: "Furniture",
-//       text: "TABLE",
-//       position: {
-//         x: 9.3,
-//         y: 2.8,
-//         z: 0.0,
-//       },
-//       height: 0.18,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "85",
-//       layer: "Furniture",
-//       text: "TV",
-//       position: {
-//         x: 5.9,
-//         y: 0.35,
-//         z: 0.0,
-//       },
-//       height: 0.18,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "86",
-//       layer: "Text",
-//       text: "2-BEDROOM FLOOR PLAN",
-//       position: {
-//         x: 3.5,
-//         y: -1.5,
-//         z: 0.0,
-//       },
-//       height: 0.5,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "87",
-//       layer: "Dimensions",
-//       text: "Total Area: 14m x 10m = 140 sq.m",
-//       position: {
-//         x: 3.5,
-//         y: -2.3,
-//         z: 0.0,
-//       },
-//       height: 0.3,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "88",
-//       layer: "Dimensions",
-//       text: "Scale: 1 unit = 1 meter",
-//       position: {
-//         x: 3.5,
-//         y: -2.9,
-//         z: 0.0,
-//       },
-//       height: 0.25,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "8C",
-//       layer: "Dimensions",
-//       text: "14.0 m",
-//       position: {
-//         x: 6.2,
-//         y: -0.7,
-//         z: 0.0,
-//       },
-//       height: 0.25,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "90",
-//       layer: "Dimensions",
-//       text: "10.0 m",
-//       position: {
-//         x: -1.5,
-//         y: 4.8,
-//         z: 0.0,
-//       },
-//       height: 0.25,
+//       handle: "furn-copier-detail",
+//       layer: "0",
+//       start: { x: 13.96459250254958, y: 2.128631800417986, z: 0 },
+//       end: { x: 14.06459250254958, y: 2.128631800417986, z: 0 },
 //     },
 //   ],
 // };
 
 export const DXF_JSON_DATA: DxfJsonDocument = {
-  source_file: "update-autocad-file-1.dxf",
+  source_file: "update-autocad-file-with-furniture (1).dxf",
   meta: {
     acad_version: "AC1032",
-    extmin: [-3.226776043334007, -3.716204318229131, 0.0],
-    extmax: [20.17745305040325, 7.947965026977579, 0.0],
+    extmin: [-4.3460686332761, -2.745149250328729, 0.0],
+    extmax: [20.67626993391718, 7.387459516490105, 0.0],
   },
   stats: {
     entity_counts: {
-      LINE: 55,
+      LINE: 40,
       MTEXT: 8,
-      ARC: 6,
-      INSERT: 7,
+      INSERT: 10,
     },
     polyline_count: 0,
-    line_count: 55,
-    arc_count: 6,
+    line_count: 40,
+    arc_count: 0,
     text_count: 8,
+    insert_count: 10,
+    door_insert_count: 6,
+    window_insert_count: 0,
+    furniture_insert_count: 3,
+    stair_insert_count: 0,
     total_vertex_count: 0,
   },
   lines: [
@@ -2812,7 +1634,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
         z: 0.0,
       },
       end: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: 7.295196564956299,
         z: 0.0,
       },
@@ -2822,13 +1644,13 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "273",
       layer: "0",
       start: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: 7.295196564956299,
         z: 0.0,
       },
       end: {
         x: 3.610806615662716,
-        y: 4.795196564956298,
+        y: 4.795196564956297,
         z: 0.0,
       },
     },
@@ -2837,12 +1659,12 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "274",
       layer: "0",
       start: {
-        x: 2.110806615662717,
+        x: 2.110806615662716,
         y: 3.945196564956299,
         z: 0.0,
       },
       end: {
-        x: 1.680900782392768,
+        x: 1.680900782392767,
         y: 3.945196564956299,
         z: 0.0,
       },
@@ -2867,7 +1689,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "276",
       layer: "0",
       start: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: 7.295196564956299,
         z: 0.0,
       },
@@ -2888,7 +1710,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       },
       end: {
         x: 6.610806615662717,
-        y: 4.795196564956298,
+        y: 4.795196564956297,
         z: 0.0,
       },
     },
@@ -2947,7 +1769,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
         z: 0.0,
       },
       end: {
-        x: 15.92798613906804,
+        x: 15.92798613906803,
         y: 7.295196564956299,
         z: 0.0,
       },
@@ -2957,12 +1779,12 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "27C",
       layer: "0",
       start: {
-        x: 15.92798613906804,
+        x: 15.92798613906803,
         y: 7.295196564956299,
         z: 0.0,
       },
       end: {
-        x: 15.92798613906804,
+        x: 15.92798613906803,
         y: 3.945196564956299,
         z: 0.0,
       },
@@ -3017,12 +1839,12 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "28C",
       layer: "0",
       start: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: 7.295196564956299,
         z: 0.0,
       },
       end: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: 4.795196564956299,
         z: 0.0,
       },
@@ -3032,12 +1854,12 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "28D",
       layer: "0",
       start: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: 7.295196564956299,
         z: 0.0,
       },
       end: {
-        x: 4.133346733624051,
+        x: 4.13334673362405,
         y: 7.295196564956299,
         z: 0.0,
       },
@@ -3047,12 +1869,12 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "28E",
       layer: "0",
       start: {
-        x: 4.133346733624051,
+        x: 4.13334673362405,
         y: 7.295196564956299,
         z: 0.0,
       },
       end: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: 7.295196564956299,
         z: 0.0,
       },
@@ -3062,7 +1884,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "28F",
       layer: "0",
       start: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: 7.295196564956299,
         z: 0.0,
       },
@@ -3077,12 +1899,12 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "291",
       layer: "0",
       start: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: 4.795196564956299,
         z: 0.0,
       },
       end: {
-        x: 4.668873803766473,
+        x: 4.668873803766472,
         y: 4.795196564956299,
         z: 0.0,
       },
@@ -3107,7 +1929,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "293",
       layer: "0",
       start: {
-        x: 15.92798613906804,
+        x: 15.92798613906803,
         y: 3.945196564956299,
         z: 0.0,
       },
@@ -3142,7 +1964,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
         z: 0.0,
       },
       end: {
-        x: 7.837662520394189,
+        x: 7.837662520394188,
         y: -2.704803435043701,
         z: 0.0,
       },
@@ -3152,12 +1974,12 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "2AE",
       layer: "0",
       start: {
-        x: 15.92798613906804,
+        x: 15.92798613906803,
         y: 3.945196564956299,
         z: 0.0,
       },
       end: {
-        x: 15.92798613906804,
+        x: 15.92798613906803,
         y: -2.745149250328729,
         z: 0.0,
       },
@@ -3167,12 +1989,12 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "2AF",
       layer: "0",
       start: {
-        x: 15.92798613906804,
+        x: 15.92798613906803,
         y: -2.745149250328729,
         z: 0.0,
       },
       end: {
-        x: 9.116909095798803,
+        x: 9.116909095798805,
         y: -2.745149250328729,
         z: 0.0,
       },
@@ -3212,12 +2034,12 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "2C7",
       layer: "0",
       start: {
-        x: 4.224234568028453,
+        x: 4.224234568028452,
         y: -2.704803435043701,
         z: 0.0,
       },
       end: {
-        x: 4.224234568028453,
+        x: 4.224234568028452,
         y: -2.704803435043701,
         z: 0.0,
       },
@@ -3227,12 +2049,12 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "2CF",
       layer: "0",
       start: {
-        x: 15.92798613906804,
+        x: 15.92798613906803,
         y: -2.745149250328729,
         z: 0.0,
       },
       end: {
-        x: 15.92798613906804,
+        x: 15.92798613906803,
         y: 0.2548507496712702,
         z: 0.0,
       },
@@ -3242,7 +2064,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "2D0",
       layer: "0",
       start: {
-        x: 15.92798613906804,
+        x: 15.92798613906803,
         y: 0.2548507496712702,
         z: 0.0,
       },
@@ -3257,12 +2079,12 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "15A5",
       layer: "0",
       start: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: -1.359953888159623,
         z: 0.0,
       },
       end: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: -2.704803435043701,
         z: 0.0,
       },
@@ -3272,12 +2094,12 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "15E1",
       layer: "0",
       start: {
-        x: 3.610806615662717,
-        y: 4.795196564956298,
+        x: 3.610806615662716,
+        y: 4.795196564956297,
         z: 0.0,
       },
       end: {
-        x: 2.110806615662717,
+        x: 2.110806615662716,
         y: 3.945196564956299,
         z: 0.0,
       },
@@ -3292,7 +2114,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
         z: 0.0,
       },
       end: {
-        x: 7.941414477020998,
+        x: 7.941414477020996,
         y: 3.945196564956299,
         z: 0.0,
       },
@@ -3332,13 +2154,13 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "15E5",
       layer: "0",
       start: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: 0.202466429484332,
         z: 0.0,
       },
       end: {
-        x: 3.610806615662717,
-        y: -0.7503538881596232,
+        x: 3.610806615662716,
+        y: -0.7503538881596233,
         z: 0.0,
       },
     },
@@ -3352,7 +2174,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
         z: 0.0,
       },
       end: {
-        x: 3.610806615662717,
+        x: 3.610806615662716,
         y: 0.202466429484332,
         z: 0.0,
       },
@@ -3362,7 +2184,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       handle: "25C8",
       layer: "0",
       start: {
-        x: 5.278473803766473,
+        x: 5.278473803766472,
         y: 4.795196564956299,
         z: 0.0,
       },
@@ -3402,121 +2224,8 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
         z: 0.0,
       },
     },
-    /* ── Door-frame lines resolved from INSERT+block (flattened to world space) ─ */
-    // Door *U19 (rot=270°) – left jamb
-    { entity_type: "LINE", handle: "dfl-u19-1", layer: "0",
-      start: { x: 3.451493532527252, y: -0.750353888159623, z: 0.0 },
-      end:   { x: 3.603893532527252, y: -0.750353888159623, z: 0.0 } },
-    // Door *U19 (rot=270°) – right jamb
-    { entity_type: "LINE", handle: "dfl-u19-2", layer: "0",
-      start: { x: 3.451493532527252, y: -1.360153888159623, z: 0.0 },
-      end:   { x: 3.603893532527252, y: -1.360153888159623, z: 0.0 } },
-
-    // Door *U27-A (rot=0°) – left jamb
-    { entity_type: "LINE", handle: "dfl-u27a-1", layer: "0",
-      start: { x: 13.1499370087851, y: 4.033685732015, z: 0.0 },
-      end:   { x: 13.1499370087851, y: 3.932085732015, z: 0.0 } },
-    // Door *U27-A (rot=0°) – right jamb
-    { entity_type: "LINE", handle: "dfl-u27a-2", layer: "0",
-      start: { x: 12.5403370087851, y: 4.033685732015, z: 0.0 },
-      end:   { x: 12.5403370087851, y: 3.932085732015, z: 0.0 } },
-
-    // Door *U27-B (rot=0°) – left jamb
-    { entity_type: "LINE", handle: "dfl-u27b-1", layer: "0",
-      start: { x: 1.77184402002289, y: 4.07048327746712, z: 0.0 },
-      end:   { x: 1.77184402002289, y: 3.96888327746712, z: 0.0 } },
-    // Door *U27-B (rot=0°) – right jamb
-    { entity_type: "LINE", handle: "dfl-u27b-2", layer: "0",
-      start: { x: 1.16224402002289, y: 4.07048327746712, z: 0.0 },
-      end:   { x: 1.16224402002289, y: 3.96888327746712, z: 0.0 } },
-
-    // Door *U27-C (rot=0°) – left jamb
-    { entity_type: "LINE", handle: "dfl-u27c-1", layer: "0",
-      start: { x: 5.27847380376647, y: 4.8967965649563, z: 0.0 },
-      end:   { x: 5.27847380376647, y: 4.7951965649563, z: 0.0 } },
-    // Door *U27-C (rot=0°) – right jamb
-    { entity_type: "LINE", handle: "dfl-u27c-2", layer: "0",
-      start: { x: 4.66887380376647, y: 4.8967965649563, z: 0.0 },
-      end:   { x: 4.66887380376647, y: 4.7951965649563, z: 0.0 } },
-
-    // Door *U27-D (rot=0°) – left jamb
-    { entity_type: "LINE", handle: "dfl-u27d-1", layer: "0",
-      start: { x: 8.551014477021, y: 4.0467965649563, z: 0.0 },
-      end:   { x: 8.551014477021, y: 3.9451965649563, z: 0.0 } },
-    // Door *U27-D (rot=0°) – right jamb
-    { entity_type: "LINE", handle: "dfl-u27d-2", layer: "0",
-      start: { x: 7.941414477021, y: 4.0467965649563, z: 0.0 },
-      end:   { x: 7.941414477021, y: 3.9451965649563, z: 0.0 } },
-
-    // Door *U40 (rot=270°) – left jamb
-    { entity_type: "LINE", handle: "dfl-u40-1", layer: "0",
-      start: { x: 11.5693336730504, y: -0.721320489705647, z: 0.0 },
-      end:   { x: 11.4169336730504, y: -0.721320489705647, z: 0.0 } },
-    // Door *U40 (rot=270°) – right jamb
-    { entity_type: "LINE", handle: "dfl-u40-2", layer: "0",
-      start: { x: 11.5693336730504, y: -1.330920489705647, z: 0.0 },
-      end:   { x: 11.4169336730504, y: -1.330920489705647, z: 0.0 } },
-
-    /* ── Window lines resolved from *U45 INSERT ────────────────────────────── */
-    // Window *U45 – INSERT at (1.562330, 7.237460) scale=0.001 rot=0°
-    // Left sill line
-    { entity_type: "LINE", handle: "win-u45-1", layer: "0",
-      start: { x: 1.562330223185540, y: 7.387459516490110, z: 0.0 },
-      end:   { x: 1.562330223185540, y: 7.237459516490110, z: 0.0 } },
-    // Right sill line
-    { entity_type: "LINE", handle: "win-u45-2", layer: "0",
-      start: { x: 2.462330223185540, y: 7.387459516490110, z: 0.0 },
-      end:   { x: 2.462330223185540, y: 7.237459516490110, z: 0.0 } },
-    // Middle sill line
-    { entity_type: "LINE", handle: "win-u45-3", layer: "0",
-      start: { x: 1.562330223185540, y: 7.312459516490110, z: 0.0 },
-      end:   { x: 2.462330223185540, y: 7.312459516490110, z: 0.0 } },
   ],
-  arcs: [
-    /* ── Doors – arcs resolved from INSERT+block geometry ──────────────────
-     * Each arc is computed by applying the INSERT's (position, scale, rotation)
-     * to the single visible ARC entity inside the referenced dynamic block.
-     * Block units are inches; scale = 0.0254 → metres.
-     * Angles are in degrees, CCW from positive X, matching AutoCAD convention.
-     * ─────────────────────────────────────────────────────────────────────── */
-
-    // Door *U19 – INSERT at (3.451, -0.750) rot=270°  → arc sweeps 180°→270°
-    {
-      entity_type: "ARC", handle: "arc-u19", layer: "0",
-      center: { x: 3.451493532527252, y: -0.750353888159623, z: 0.0 },
-      radius: 0.6096, start_angle: 180.0, end_angle: 270.0,
-    },
-    // Door *U27 – INSERT at (13.150, 4.034) rot=0°  → arc sweeps 90°→180°
-    {
-      entity_type: "ARC", handle: "arc-u27a", layer: "0",
-      center: { x: 13.1499370087851, y: 4.033685732015, z: 0.0 },
-      radius: 0.6096, start_angle: 90.0, end_angle: 180.0,
-    },
-    // Door *U27 – INSERT at (1.772, 4.070) rot=0°
-    {
-      entity_type: "ARC", handle: "arc-u27b", layer: "0",
-      center: { x: 1.77184402002289, y: 4.07048327746712, z: 0.0 },
-      radius: 0.6096, start_angle: 90.0, end_angle: 180.0,
-    },
-    // Door *U27 – INSERT at (5.278, 4.897) rot=0°
-    {
-      entity_type: "ARC", handle: "arc-u27c", layer: "0",
-      center: { x: 5.27847380376647, y: 4.8967965649563, z: 0.0 },
-      radius: 0.6096, start_angle: 90.0, end_angle: 180.0,
-    },
-    // Door *U27 – INSERT at (8.551, 4.047) rot=0°
-    {
-      entity_type: "ARC", handle: "arc-u27d", layer: "0",
-      center: { x: 8.551014477021, y: 4.0467965649563, z: 0.0 },
-      radius: 0.6096, start_angle: 90.0, end_angle: 180.0,
-    },
-    // Door *U40 – INSERT at (11.569, -0.721) rot=270°  → arc sweeps 270°→0°
-    {
-      entity_type: "ARC", handle: "arc-u40", layer: "0",
-      center: { x: 11.5693336730504, y: -0.721320489705647, z: 0.0 },
-      radius: 0.6096, start_angle: 270.0, end_angle: 0.0,
-    },
-  ],
+  // arcs: [],
   polylines: [],
   texts: [
     {
@@ -3525,8 +2234,8 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       layer: "0",
       text: "Kitchen\n3.0 X 3.35",
       position: {
-        x: 1.229801813707155,
-        y: 5.960516156780833,
+        x: 1.229801813707154,
+        y: 5.960516156780832,
         z: 0.0,
       },
       height: 0.2,
@@ -3537,7 +2246,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       layer: "0",
       text: "WC + Bath\n3.0m X 3.35",
       position: {
-        x: 5.021054678442993,
+        x: 5.021054678442992,
         y: 6.052879579090877,
         z: 0.0,
       },
@@ -3550,7 +2259,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       text: "Store\n3.7m X 3.35",
       position: {
         x: 7.591709183901571,
-        y: 5.978988852146535,
+        y: 5.978988852146534,
         z: 0.0,
       },
       height: 0.2,
@@ -3574,7 +2283,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       text: "BED Room\n4.5m X 3.35",
       position: {
         x: 12.75151177528369,
-        y: 6.1691173445058,
+        y: 6.169117344505799,
         z: 0.0,
       },
       height: 0.2,
@@ -3586,7 +2295,7 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
       text: "Room\n3.0m X 3.35",
       position: {
         x: 1.230241099470788,
-        y: -0.6129244931801799,
+        y: -0.61292449318018,
         z: 0.0,
       },
       height: 0.2,
@@ -3614,6 +2323,643 @@ export const DXF_JSON_DATA: DxfJsonDocument = {
         z: 0.0,
       },
       height: 0.2,
+    },
+  ],
+  inserts: [
+    {
+      entity_type: "INSERT",
+      handle: "12A0",
+      layer: "0",
+      block_name: "*U8",
+      category: "door",
+      is_anonymous_block: true,
+      position: {
+        x: 3.451493532527251,
+        y: -0.7503538881596234,
+        z: 0.0,
+      },
+      rotation: 270.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
+      block_entity_count: 11,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "1B40",
+      layer: "0",
+      block_name: "*U14",
+      category: "door",
+      is_anonymous_block: true,
+      position: {
+        x: 13.14993700878509,
+        y: 4.033685732014995,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
+      block_entity_count: 11,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "1FDC",
+      layer: "0",
+      block_name: "*U14",
+      category: "door",
+      is_anonymous_block: true,
+      position: {
+        x: 1.771844020022889,
+        y: 4.070483277467122,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
+      block_entity_count: 11,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "21DB",
+      layer: "0",
+      block_name: "*U14",
+      category: "door",
+      is_anonymous_block: true,
+      position: {
+        x: 5.278473803766472,
+        y: 4.896796564956297,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
+      block_entity_count: 11,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "23DA",
+      layer: "0",
+      block_name: "*U14",
+      category: "door",
+      is_anonymous_block: true,
+      position: {
+        x: 8.551014477020999,
+        y: 4.046796564956299,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
+      block_entity_count: 11,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "2575",
+      layer: "0",
+      block_name: "*U23",
+      category: "door",
+      is_anonymous_block: true,
+      position: {
+        x: 11.56933367305038,
+        y: -0.7213204897056473,
+        z: 0.0,
+      },
+      rotation: 270.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
+      block_entity_count: 11,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "2682",
+      layer: "0",
+      block_name: "*U27",
+      category: "insert",
+      is_anonymous_block: true,
+      position: {
+        x: 1.56233022318554,
+        y: 7.237459516490105,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.001,
+        y: 0.001,
+        z: 0.001,
+      },
+      block_entity_types: ["LINE"],
+      block_entity_count: 3,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "2955",
+      layer: "0",
+      block_name: "Bed - Queen",
+      category: "furniture",
+      is_anonymous_block: false,
+      position: {
+        x: 2.372132069842834,
+        y: 3.479264313995376,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["LINE"],
+      block_entity_count: 16,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "2986",
+      layer: "0",
+      block_name: "Chair - Rocking",
+      category: "furniture",
+      is_anonymous_block: false,
+      position: {
+        x: 1.481668176941881,
+        y: 2.363800714190402,
+        z: 0.0,
+      },
+      rotation: 90.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE"],
+      block_entity_count: 40,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "29F9",
+      layer: "0",
+      block_name: "Copy Machine",
+      category: "furniture",
+      is_anonymous_block: false,
+      position: {
+        x: 13.81459250254958,
+        y: 2.278631800417986,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["LINE"],
+      block_entity_count: 40,
+      attributes: [],
+    },
+  ],
+  door_inserts: [
+    {
+      entity_type: "INSERT",
+      handle: "12A0",
+      layer: "0",
+      block_name: "*U8",
+      category: "door",
+      is_anonymous_block: true,
+      position: {
+        x: 3.451493532527251,
+        y: -0.7503538881596234,
+        z: 0.0,
+      },
+      rotation: 270.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
+      block_entity_count: 11,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "1B40",
+      layer: "0",
+      block_name: "*U14",
+      category: "door",
+      is_anonymous_block: true,
+      position: {
+        x: 13.14993700878509,
+        y: 4.033685732014995,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
+      block_entity_count: 11,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "1FDC",
+      layer: "0",
+      block_name: "*U14",
+      category: "door",
+      is_anonymous_block: true,
+      position: {
+        x: 1.771844020022889,
+        y: 4.070483277467122,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
+      block_entity_count: 11,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "21DB",
+      layer: "0",
+      block_name: "*U14",
+      category: "door",
+      is_anonymous_block: true,
+      position: {
+        x: 5.278473803766472,
+        y: 4.896796564956297,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
+      block_entity_count: 11,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "23DA",
+      layer: "0",
+      block_name: "*U14",
+      category: "door",
+      is_anonymous_block: true,
+      position: {
+        x: 8.551014477020999,
+        y: 4.046796564956299,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
+      block_entity_count: 11,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "2575",
+      layer: "0",
+      block_name: "*U23",
+      category: "door",
+      is_anonymous_block: true,
+      position: {
+        x: 11.56933367305038,
+        y: -0.7213204897056473,
+        z: 0.0,
+      },
+      rotation: 270.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
+      block_entity_count: 11,
+      attributes: [],
+    },
+  ],
+  window_inserts: [],
+  furniture_inserts: [
+    {
+      entity_type: "INSERT",
+      handle: "2955",
+      layer: "0",
+      block_name: "Bed - Queen",
+      category: "furniture",
+      is_anonymous_block: false,
+      position: {
+        x: 2.372132069842834,
+        y: 3.479264313995376,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["LINE"],
+      block_entity_count: 16,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "2986",
+      layer: "0",
+      block_name: "Chair - Rocking",
+      category: "furniture",
+      is_anonymous_block: false,
+      position: {
+        x: 1.481668176941881,
+        y: 2.363800714190402,
+        z: 0.0,
+      },
+      rotation: 90.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["ARC", "LINE"],
+      block_entity_count: 40,
+      attributes: [],
+    },
+    {
+      entity_type: "INSERT",
+      handle: "29F9",
+      layer: "0",
+      block_name: "Copy Machine",
+      category: "furniture",
+      is_anonymous_block: false,
+      position: {
+        x: 13.81459250254958,
+        y: 2.278631800417986,
+        z: 0.0,
+      },
+      rotation: 0.0,
+      scale: {
+        x: 0.0254,
+        y: 0.0254,
+        z: 0.0254,
+      },
+      block_entity_types: ["LINE"],
+      block_entity_count: 40,
+      attributes: [],
+    },
+  ],
+  stair_inserts: [],
+  arcs: [
+    {
+      entity_type: "ARC",
+      handle: "arc-door-1",
+      layer: "0",
+      center: { x: 3.451493532527251, y: -0.7503538881596234, z: 0 },
+      radius: 0.6096,
+      start_angle: 180,
+      end_angle: 270,
+    },
+    {
+      entity_type: "ARC",
+      handle: "arc-door-2",
+      layer: "0",
+      center: { x: 13.14993700878509, y: 4.033685732014995, z: 0 },
+      radius: 0.6096,
+      start_angle: 90,
+      end_angle: 180,
+    },
+    {
+      entity_type: "ARC",
+      handle: "arc-door-3",
+      layer: "0",
+      center: { x: 1.771844020022889, y: 4.070483277467122, z: 0 },
+      radius: 0.6096,
+      start_angle: 90,
+      end_angle: 180,
+    },
+    {
+      entity_type: "ARC",
+      handle: "arc-door-4",
+      layer: "0",
+      center: { x: 5.278473803766472, y: 4.896796564956297, z: 0 },
+      radius: 0.6096,
+      start_angle: 90,
+      end_angle: 180,
+    },
+    {
+      entity_type: "ARC",
+      handle: "arc-door-5",
+      layer: "0",
+      center: { x: 8.551014477020999, y: 4.046796564956299, z: 0 },
+      radius: 0.6096,
+      start_angle: 90,
+      end_angle: 180,
+    },
+    {
+      entity_type: "ARC",
+      handle: "arc-door-6",
+      layer: "0",
+      center: { x: 11.56933367305038, y: -0.7213204897056473, z: 0 },
+      radius: 0.6096,
+      start_angle: 270,
+      end_angle: 360,
+    },
+  ],
+  window_lines: [
+    {
+      entity_type: "LINE",
+      handle: "win-u27-1",
+      layer: "0",
+      start: { x: 1.56233022318554, y: 7.387459516490105, z: 0 },
+      end: { x: 1.56233022318554, y: 7.237459516490105, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "win-u27-2",
+      layer: "0",
+      start: { x: 2.46233022318554, y: 7.387459516490105, z: 0 },
+      end: { x: 2.46233022318554, y: 7.237459516490105, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "win-u27-3",
+      layer: "0",
+      start: { x: 1.56233022318554, y: 7.312459516490105, z: 0 },
+      end: { x: 2.46233022318554, y: 7.312459516490105, z: 0 },
+    },
+  ],
+  door_lines: [
+    // Door 1 — arc-door-1, INSERT "12A0" (rot=270°) — horizontal jambs
+    { entity_type: "LINE", handle: "dfl-door-1-1", layer: "0", start: { x: 3.451493532527252, y: -0.750353888159623, z: 0 }, end: { x: 3.603893532527252, y: -0.750353888159623, z: 0 } },
+    { entity_type: "LINE", handle: "dfl-door-1-2", layer: "0", start: { x: 3.451493532527252, y: -1.360153888159623, z: 0 }, end: { x: 3.603893532527252, y: -1.360153888159623, z: 0 } },
+    // Door 2 — arc-door-2, INSERT "1B40" (rot=0°) — vertical jambs
+    { entity_type: "LINE", handle: "dfl-door-2-1", layer: "0", start: { x: 13.1499370087851, y: 4.033685732015, z: 0 }, end: { x: 13.1499370087851, y: 3.932085732015, z: 0 } },
+    { entity_type: "LINE", handle: "dfl-door-2-2", layer: "0", start: { x: 12.5403370087851, y: 4.033685732015, z: 0 }, end: { x: 12.5403370087851, y: 3.932085732015, z: 0 } },
+    // Door 3 — arc-door-3, INSERT "1FDC" (rot=0°) — vertical jambs
+    { entity_type: "LINE", handle: "dfl-door-3-1", layer: "0", start: { x: 1.77184402002289, y: 4.07048327746712, z: 0 }, end: { x: 1.77184402002289, y: 3.96888327746712, z: 0 } },
+    { entity_type: "LINE", handle: "dfl-door-3-2", layer: "0", start: { x: 1.16224402002289, y: 4.07048327746712, z: 0 }, end: { x: 1.16224402002289, y: 3.96888327746712, z: 0 } },
+    // Door 4 — arc-door-4 — vertical jambs
+    { entity_type: "LINE", handle: "dfl-door-4-1", layer: "0", start: { x: 5.27847380376647, y: 4.8967965649563, z: 0 }, end: { x: 5.27847380376647, y: 4.7951965649563, z: 0 } },
+    { entity_type: "LINE", handle: "dfl-door-4-2", layer: "0", start: { x: 4.66887380376647, y: 4.8967965649563, z: 0 }, end: { x: 4.66887380376647, y: 4.7951965649563, z: 0 } },
+    // Door 5 — arc-door-5 — vertical jambs
+    { entity_type: "LINE", handle: "dfl-door-5-1", layer: "0", start: { x: 8.551014477021, y: 4.0467965649563, z: 0 }, end: { x: 8.551014477021, y: 3.9451965649563, z: 0 } },
+    { entity_type: "LINE", handle: "dfl-door-5-2", layer: "0", start: { x: 7.941414477021, y: 4.0467965649563, z: 0 }, end: { x: 7.941414477021, y: 3.9451965649563, z: 0 } },
+    // Door 6 — arc-door-6, INSERT "2700" (rot=270°) — horizontal jambs
+    { entity_type: "LINE", handle: "dfl-door-6-1", layer: "0", start: { x: 11.5693336730504, y: -0.721320489705647, z: 0 }, end: { x: 11.4169336730504, y: -0.721320489705647, z: 0 } },
+    { entity_type: "LINE", handle: "dfl-door-6-2", layer: "0", start: { x: 11.5693336730504, y: -1.330920489705647, z: 0 }, end: { x: 11.4169336730504, y: -1.330920489705647, z: 0 } },
+  ],
+  furniture_lines: [
+    // Bed - Queen (6 lines)
+    {
+      entity_type: "LINE",
+      handle: "furn-bed-1",
+      layer: "0",
+      start: { x: 2.372132069842834, y: 3.479264313995376, z: 0 },
+      end: { x: 2.372132069842834, y: 2.079264313995376, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "furn-bed-2",
+      layer: "0",
+      start: { x: 2.372132069842834, y: 2.079264313995376, z: 0 },
+      end: { x: 3.972132069842834, y: 2.079264313995376, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "furn-bed-3",
+      layer: "0",
+      start: { x: 3.972132069842834, y: 2.079264313995376, z: 0 },
+      end: { x: 3.972132069842834, y: 3.479264313995376, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "furn-bed-4",
+      layer: "0",
+      start: { x: 3.972132069842834, y: 3.479264313995376, z: 0 },
+      end: { x: 2.372132069842834, y: 3.479264313995376, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "furn-bed-pillow-1",
+      layer: "0",
+      start: { x: 2.692132069842834, y: 3.479264313995376, z: 0 },
+      end: { x: 2.692132069842834, y: 2.899264313995376, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "furn-bed-pillow-2",
+      layer: "0",
+      start: { x: 3.652132069842834, y: 3.479264313995376, z: 0 },
+      end: { x: 3.652132069842834, y: 2.899264313995376, z: 0 },
+    },
+
+    // Chair - Rocking (4 lines, with rotation applied)
+    {
+      entity_type: "LINE",
+      handle: "furn-chair-1",
+      layer: "0",
+      start: { x: 1.481668176941881, y: 2.363800714190402, z: 0 },
+      end: { x: 1.481668176941881, y: 2.013800714190402, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "furn-chair-2",
+      layer: "0",
+      start: { x: 1.481668176941881, y: 2.013800714190402, z: 0 },
+      end: { x: 1.831668176941881, y: 2.013800714190402, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "furn-chair-3",
+      layer: "0",
+      start: { x: 1.831668176941881, y: 2.013800714190402, z: 0 },
+      end: { x: 1.831668176941881, y: 2.363800714190402, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "furn-chair-back",
+      layer: "0",
+      start: { x: 1.656668176941881, y: 2.363800714190402, z: 0 },
+      end: { x: 1.656668176941881, y: 2.413800714190402, z: 0 },
+    },
+
+    // Copy Machine (5 lines)
+    {
+      entity_type: "LINE",
+      handle: "furn-copier-1",
+      layer: "0",
+      start: { x: 13.81459250254958, y: 2.278631800417986, z: 0 },
+      end: { x: 13.81459250254958, y: 1.878631800417986, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "furn-copier-2",
+      layer: "0",
+      start: { x: 13.81459250254958, y: 1.878631800417986, z: 0 },
+      end: { x: 14.21459250254958, y: 1.878631800417986, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "furn-copier-3",
+      layer: "0",
+      start: { x: 14.21459250254958, y: 1.878631800417986, z: 0 },
+      end: { x: 14.21459250254958, y: 2.278631800417986, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "furn-copier-4",
+      layer: "0",
+      start: { x: 14.21459250254958, y: 2.278631800417986, z: 0 },
+      end: { x: 13.81459250254958, y: 2.278631800417986, z: 0 },
+    },
+    {
+      entity_type: "LINE",
+      handle: "furn-copier-detail",
+      layer: "0",
+      start: { x: 13.96459250254958, y: 2.128631800417986, z: 0 },
+      end: { x: 14.06459250254958, y: 2.128631800417986, z: 0 },
     },
   ],
 };
