@@ -32,6 +32,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent as ReactDragEvent } from 'react'
 import { Stage, Layer, Line, Text, Group, Rect, Circle } from 'react-konva'
+// NEW: Arc shape needed for DIMENSION arc geometry rendering
+import { Arc as KonvaArc } from 'react-konva'
 import type Konva from 'konva'
 import { Link } from 'react-router-dom'
 import polygonClipping from 'polygon-clipping'
@@ -60,8 +62,45 @@ import {
   sortPolylineVertices,
   wallSegsFromPolyline,
   wallsFromDxfJson,
+  // NEW: import the render-items builder
+  renderItemsFromDxfJson,
 } from '@/utils/wallsFromDxfJson'
 import { downloadDxf } from './utils/exportToDxf'
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   NEW: AutoCAD ACI colour palette (256 entries → hex)
+   Only the most common indices are listed; fill the rest from the full ACI
+   table if you need exact fidelity for every index.
+   Reference: https://gohtx.com/acadcolors.php
+   ───────────────────────────────────────────────────────────────────────── */
+const ACI_PALETTE: Record<number, string> = {
+  1:  '#FF0000', 2:  '#FFFF00', 3:  '#00FF00', 4:  '#00FFFF',
+  5:  '#0000FF', 6:  '#FF00FF', 7:  '#FFFFFF', 8:  '#808080',
+  9:  '#C0C0C0', 10: '#FF0000', 11: '#FF7F7F', 12: '#A50000',
+  13: '#A55252', 14: '#7F0000', 20: '#FF7F00', 21: '#FFBF7F',
+  22: '#A54F00', 30: '#FFBF00', 40: '#FFFF00', 50: '#7FFF00',
+  60: '#00FF00', 70: '#00FF7F', 80: '#00FFFF', 90: '#007FFF',
+  100:'#0000FF', 110:'#7F00FF', 120:'#FF00FF', 130:'#FF007F',
+  140:'#FF0000', 150:'#804040', 160:'#408040', 170:'#404080',
+  // 256 = BYLAYER (handled at runtime), 0 = BYBLOCK (fallback to white)
+  0:  '#FFFFFF', 256:'#FFFFFF',
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   NEW: Resolve display colour for a render entity.
+   Priority: true_color > ACI index > layer colour > fallback strokeHex
+   ───────────────────────────────────────────────────────────────────────── */
+function resolveEntityColor(
+  color:         number | string | null | undefined,
+  layer:         string,
+  layerColorMap: Map<string, string>,
+  fallback:      string,
+): string {
+  if (typeof color === 'string' && color.startsWith('#')) return color
+  if (typeof color === 'number' && color !== 256 && color > 0 && color < 256)
+    return ACI_PALETTE[color] ?? fallback
+  return layerColorMap.get(layer) ?? fallback
+}
 
 /* ─── Types ──────────────────────────────────────────────── */
 interface Pt { x: number; y: number }
@@ -1448,6 +1487,32 @@ export function DxfJsonViewPage() {
   const snapLineWallRef = useRef<{ wallId: string; t: number } | null>(null)
   const [isDraggingEp, setIsDraggingEp] = useState(false)
   const [spaceHeld, setSpaceHeld] = useState(false)
+
+  // NEW: layer visibility toggle
+  const [hiddenLayers, setHiddenLayers] = useState<Set<string>>(new Set())
+
+  /** Returns true if the given layer name should be drawn. */
+  const isLayerVisible = useCallback(
+    (layer: string) => !hiddenLayers.has(layer),
+    [hiddenLayers],
+  )
+
+  // NEW: Layer colour map — built from planDoc.layers
+  const layerColorMap = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const lyr of planDoc.layers ?? []) {
+      if (lyr.true_color) { m.set(lyr.name, lyr.true_color); continue }
+      const c = lyr.color > 0 ? lyr.color : 7
+      m.set(lyr.name, ACI_PALETTE[c] ?? '#888888')
+    }
+    return m
+  }, [planDoc.layers])
+
+  // NEW: Render items — all non-wall entities converted to canvas-ready shapes.
+  const renderItems = useMemo(
+    () => renderItemsFromDxfJson(planDoc),
+    [planDoc],
+  )
 
   interface ActiveDrag {
     wallId:    string
@@ -2940,6 +3005,351 @@ export function DxfJsonViewPage() {
                   {gridLines}
                 </Layer>
 
+                {/* ════════════════════════════════════════════════════════════
+                    NEW LAYER: DXF entities (circles, ellipses, splines, hatches,
+                    dimensions, solids, leaders, mleaders, tolerances, images,
+                    wipeouts, 3dfaces, meshes, helices, insert geometry).
+                    Rendered BELOW room fills and walls so they don't obscure the
+                    interactive editing layer.
+                    ════════════════════════════════════════════════════════════ */}
+                <Layer listening={false}>
+                  {renderItems.map(item => {
+                    // Skip items on hidden or frozen layers
+                    if (!isLayerVisible(item.layer)) return null
+                    if (item.visible === false) return null
+
+                    const col = resolveEntityColor(item.color, item.layer, layerColorMap, strokeHex)
+                    const sw = (1 * strokeScale) / zoom   // hairline, matches wall default
+
+                    // ── CIRCLE ─────────────────────────────────────────────
+                    if (item.kind === 'circle') {
+                      const [cx, cy] = toC(item.cx, item.cy, t)
+                      return (
+                        <Circle key={item.id}
+                          x={cx} y={cy}
+                          radius={item.r * t.sc}
+                          stroke={col} strokeWidth={sw}
+                          fill="transparent"
+                        />
+                      )
+                    }
+
+                    // ── ELLIPSE ────────────────────────────────────────────
+                    if (item.kind === 'ellipse') {
+                      const STEPS = 64
+                      const rotRad = item.rotation * (Math.PI / 180)
+                      const pts: number[] = []
+                      for (let i = 0; i <= STEPS; i++) {
+                        const param = item.startParam + (item.endParam - item.startParam) * i / STEPS
+                        const lx2 = item.rx * Math.cos(param)
+                        const ly2 = item.ry * Math.sin(param)
+                        const wx = item.cx + lx2 * Math.cos(rotRad) - ly2 * Math.sin(rotRad)
+                        const wy = item.cy + lx2 * Math.sin(rotRad) + ly2 * Math.cos(rotRad)
+                        const [cx2, cy2] = toC(wx, wy, t)
+                        pts.push(cx2, cy2)
+                      }
+                      return (
+                        <Line key={item.id} points={pts}
+                          stroke={col} strokeWidth={sw}
+                          closed={Math.abs(item.endParam - item.startParam - Math.PI * 2) < 0.01}
+                        />
+                      )
+                    }
+
+                    // ── SPLINE ─────────────────────────────────────────────
+                    if (item.kind === 'spline') {
+                      const pts = item.points.flatMap(p => toC(p.x, p.y, t))
+                      return (
+                        <Line key={item.id} points={pts}
+                          stroke={col} strokeWidth={sw}
+                          closed={item.closed}
+                          tension={0}
+                        />
+                      )
+                    }
+
+                    // ── HATCH ──────────────────────────────────────────────
+                    if (item.kind === 'hatch') {
+                      if (item.outerBoundary.length < 3) return null
+                      const toCanvas = (pts2: Array<{ x: number; y: number }>) =>
+                        pts2.flatMap(p => toC(p.x, p.y, t))
+                      if (item.solidFill || item.patternName === 'SOLID') {
+                        return (
+                          <Line key={item.id}
+                            points={toCanvas(item.outerBoundary)}
+                            fill={col}
+                            opacity={0.30}
+                            stroke="transparent"
+                            closed
+                          />
+                        )
+                      }
+                      // Non-solid pattern: just draw boundary with dashed stroke
+                      return (
+                        <Line key={item.id}
+                          points={toCanvas(item.outerBoundary)}
+                          stroke={col}
+                          strokeWidth={0.5 / zoom}
+                          dash={[4 / zoom, 4 / zoom]}
+                          closed
+                        />
+                      )
+                    }
+
+                    // ── SOLID / TRACE ──────────────────────────────────────
+                    if (item.kind === 'solid') {
+                      const pts = item.points.flatMap(p => toC(p.x, p.y, t))
+                      return (
+                        <Line key={item.id} points={pts}
+                          fill={col} opacity={0.75}
+                          stroke={col} strokeWidth={0.5 / zoom}
+                          closed
+                        />
+                      )
+                    }
+
+                    // ── 3DFACE ─────────────────────────────────────────────
+                    if (item.kind === 'face3d') {
+                      const pts = item.points.flatMap(p => toC(p.x, p.y, t))
+                      return (
+                        <Line key={item.id} points={pts}
+                          stroke={col} strokeWidth={0.5 / zoom}
+                          fill="transparent"
+                          closed
+                        />
+                      )
+                    }
+
+                    // ── MESH ───────────────────────────────────────────────
+                    if (item.kind === 'mesh') {
+                      return (
+                        <Group key={item.id}>
+                          {item.edges.map((edge, i) => {
+                            const [x1, y1] = toC(edge.start.x, edge.start.y, t)
+                            const [x2, y2] = toC(edge.end.x, edge.end.y, t)
+                            return (
+                              <Line key={i}
+                                points={[x1, y1, x2, y2]}
+                                stroke={col} strokeWidth={0.5 / zoom}
+                              />
+                            )
+                          })}
+                        </Group>
+                      )
+                    }
+
+                    // ── HELIX ──────────────────────────────────────────────
+                    if (item.kind === 'helix') {
+                      const pts = item.points.flatMap(p => toC(p.x, p.y, t))
+                      return (
+                        <Line key={item.id} points={pts}
+                          stroke={col} strokeWidth={sw}
+                        />
+                      )
+                    }
+
+                    // ── WIPEOUT ────────────────────────────────────────────
+                    // Wipeouts mask whatever is behind them — rendered as a
+                    // filled white polygon above all previous layers.
+                    if (item.kind === 'wipeout') {
+                      const pts = item.boundary.flatMap(p => toC(p.x, p.y, t))
+                      return (
+                        <Group key={item.id}>
+                          <Line points={pts} fill="#ffffff" stroke="transparent" closed />
+                          {item.showFrame && (
+                            <Line points={pts}
+                              stroke={col} strokeWidth={0.5 / zoom}
+                              fill="transparent" closed
+                            />
+                          )}
+                        </Group>
+                      )
+                    }
+
+                    // ── IMAGE placeholder ──────────────────────────────────
+                    if (item.kind === 'image') {
+                      const [ix, iy] = toC(item.x, item.y + item.h, t)   // top-left in canvas
+                      const wCanvas = item.w * t.sc
+                      const hCanvas = item.h * t.sc
+                      const fname = item.imagePath.split(/[/\\]/).pop() ?? item.imagePath
+                      return (
+                        <Group key={item.id}>
+                          <Rect x={ix} y={iy} width={wCanvas} height={hCanvas}
+                            fill="#2a2a2a" stroke="#666666"
+                            strokeWidth={0.8 / zoom} opacity={0.5}
+                          />
+                          <Text x={ix + 4 / zoom} y={iy + 4 / zoom}
+                            text={`IMG: ${fname}`}
+                            fontSize={Math.max(8, 10 / zoom)} fill="#aaaaaa"
+                            listening={false}
+                          />
+                        </Group>
+                      )
+                    }
+
+                    // ── LEADER ────────────────────────────────────────────
+                    if (item.kind === 'leader') {
+                      const pts = item.vertices.flatMap(v => toC(v.x, v.y, t))
+                      return (
+                        <Group key={item.id}>
+                          <Line points={pts} stroke={col} strokeWidth={sw} />
+                          {item.hasArrowhead && pts.length >= 4 && (
+                            <Circle x={pts[0]} y={pts[1]}
+                              radius={3 / zoom} fill={col}
+                            />
+                          )}
+                          {item.annotationText && pts.length >= 2 && (
+                            <Text
+                              x={pts[pts.length - 2] + 4 / zoom}
+                              y={pts[pts.length - 1] - 4 / zoom}
+                              text={item.annotationText}
+                              fontSize={Math.max(8, 11 / zoom)} fill={col}
+                            />
+                          )}
+                        </Group>
+                      )
+                    }
+
+                    // ── MLEADER ───────────────────────────────────────────
+                    if (item.kind === 'mleader') {
+                      return (
+                        <Group key={item.id}>
+                          {item.lines.map((line, li) => {
+                            const pts = line.flatMap(v => toC(v.x, v.y, t))
+                            return <Line key={li} points={pts} stroke={col} strokeWidth={sw} />
+                          })}
+                          {item.text && item.textPos && (() => {
+                            const [tx2, ty2] = toC(item.textPos.x, item.textPos.y, t)
+                            return (
+                              <Text x={tx2} y={ty2}
+                                text={item.text}
+                                fontSize={Math.max(8, 11 / zoom)} fill={col}
+                              />
+                            )
+                          })()}
+                        </Group>
+                      )
+                    }
+
+                    // ── TOLERANCE (GD&T frame) ─────────────────────────────
+                    if (item.kind === 'tolerance') {
+                      const [px, py] = toC(item.position.x, item.position.y, t)
+                      const fs = Math.max(8, 10 / zoom)
+                      const boxW = item.text.length * fs * 0.62
+                      const boxH = fs * 1.6
+                      return (
+                        <Group key={item.id}>
+                          <Rect x={px} y={py - boxH * 0.5} width={boxW} height={boxH}
+                            stroke={col} strokeWidth={0.6 / zoom} fill="transparent"
+                          />
+                          <Text x={px + 3 / zoom} y={py - boxH * 0.35}
+                            text={item.text} fontSize={fs} fill={col}
+                          />
+                        </Group>
+                      )
+                    }
+
+                    // ── DIMENSION ─────────────────────────────────────────
+                    // Dimension geometry was inlined by the backend (dim_lines,
+                    // dim_arcs, dim_texts).  We render those directly.
+                    if (item.kind === 'dimension') {
+                      return (
+                        <Group key={item.id}>
+                          {item.lines.map((l, i) => {
+                            const [x1, y1] = toC(l.start.x, l.start.y, t)
+                            const [x2, y2] = toC(l.end.x, l.end.y, t)
+                            return <Line key={`dl${i}`} points={[x1, y1, x2, y2]}
+                              stroke={col} strokeWidth={0.6 / zoom} />
+                          })}
+                          {item.arcs.map((a, i) => {
+                            // KonvaArc: angle measured CW from +X, in degrees.
+                            // DXF arcs are CCW from +X.  Flip by negating.
+                            const spanDeg = a.endAngle > a.startAngle
+                              ? a.endAngle - a.startAngle
+                              : a.endAngle + 360 - a.startAngle
+                            const [acx, acy] = toC(a.cx, a.cy, t)
+                            return (
+                              <KonvaArc key={`da${i}`}
+                                x={acx} y={acy}
+                                innerRadius={a.r * t.sc}
+                                outerRadius={a.r * t.sc}
+                                angle={spanDeg}
+                                rotation={-(a.startAngle + spanDeg)}
+                                stroke={col} strokeWidth={0.6 / zoom}
+                                fill="transparent"
+                              />
+                            )
+                          })}
+                          {item.text && (() => {
+                            const [dtx, dty] = toC(item.textPos.x, item.textPos.y, t)
+                            const fs = Math.max(7, 11 / zoom)
+                            return (
+                              <Text key="dt" x={dtx} y={dty}
+                                text={item.text}
+                                fontSize={fs} fill={col}
+                                offsetX={(item.text.length * fs * 0.55) / 2}
+                              />
+                            )
+                          })()}
+                        </Group>
+                      )
+                    }
+
+                    // ── INSERT GEOMETRY ───────────────────────────────────
+                    // Block reference geometry expanded by backend into
+                    // plain lines / arcs / circles / polylines in WCS.
+                    if (item.kind === 'insert_geometry') {
+                      return (
+                        <Group key={item.id}>
+                          {item.lines.map((l, i) => {
+                            const lc = resolveEntityColor(l.color, item.layer, layerColorMap, col)
+                            const [x1, y1] = toC(l.start.x, l.start.y, t)
+                            const [x2, y2] = toC(l.end.x, l.end.y, t)
+                            return <Line key={`il${i}`} points={[x1, y1, x2, y2]}
+                              stroke={lc} strokeWidth={sw} lineCap="round" />
+                          })}
+                          {item.circles.map((c, i) => {
+                            const cc = resolveEntityColor(c.color, item.layer, layerColorMap, col)
+                            const [cx2, cy2] = toC(c.cx, c.cy, t)
+                            return <Circle key={`ic${i}`} x={cx2} y={cy2}
+                              radius={c.r * t.sc}
+                              stroke={cc} strokeWidth={sw} fill="transparent" />
+                          })}
+                          {item.arcs.map((a, i) => {
+                            const ac = resolveEntityColor(a.color, item.layer, layerColorMap, col)
+                            const spanDeg = a.endAngle > a.startAngle
+                              ? a.endAngle - a.startAngle
+                              : a.endAngle + 360 - a.startAngle
+                            const [acx, acy] = toC(a.cx, a.cy, t)
+                            return (
+                              <KonvaArc key={`ia${i}`}
+                                x={acx} y={acy}
+                                innerRadius={a.r * t.sc}
+                                outerRadius={a.r * t.sc}
+                                angle={spanDeg}
+                                rotation={-(a.startAngle + spanDeg)}
+                                stroke={ac} strokeWidth={sw}
+                                fill="transparent"
+                              />
+                            )
+                          })}
+                          {item.polylines.map((pl, i) => {
+                            const pc = resolveEntityColor(pl.color, item.layer, layerColorMap, col)
+                            const pts = pl.points.flatMap(p => toC(p.x, p.y, t))
+                            return <Line key={`ip${i}`} points={pts}
+                              stroke={pc} strokeWidth={sw} closed={pl.closed} />
+                          })}
+                        </Group>
+                      )
+                    }
+
+                    return null   // unknown kind — future-proof fallback
+                  })}
+                </Layer>
+                {/* ════════════════════════════════════════════════════════════
+                    END OF NEW LAYER
+                    ════════════════════════════════════════════════════════════ */}
+
                 {/* ── room fills ── */}
                 <Layer>
                   {roomsWithWalls.map((r, i) => {
@@ -3754,6 +4164,77 @@ export function DxfJsonViewPage() {
               <button type="button" className="dxf-action-btn danger" onClick={() => { const h = selectedTextHandle; snapshot(); setPlanDoc(p => removeTextFromDoc(p, h!)); setSelectedTextHandle(null) }}>Delete label</button>
             </div>
           )}
+
+          {/* ════════════════════════════════════════════════════════════════
+              NEW PANEL: Layer visibility
+              ════════════════════════════════════════════════════════════════ */}
+          {(planDoc.layers ?? []).length > 0 && (
+            <div className="dxf-prop-panel">
+              <div className="dxf-prop-label">Layers</div>
+              <p className="dxf-prop-hint">Toggle visibility per layer.</p>
+              {(planDoc.layers ?? []).map(lyr => {
+                const isHidden = hiddenLayers.has(lyr.name)
+                const swatchColor = lyr.true_color
+                  ?? ACI_PALETTE[lyr.color > 0 ? lyr.color : 7]
+                  ?? '#888888'
+                return (
+                  <label key={lyr.name} className="dxf-toggle" style={{ alignItems: 'center', gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={!isHidden}
+                      onChange={e => {
+                        setHiddenLayers(prev => {
+                          const next = new Set(prev)
+                          if (e.target.checked) next.delete(lyr.name)
+                          else next.add(lyr.name)
+                          return next
+                        })
+                      }}
+                    />
+                    {/* Colour swatch */}
+                    <span style={{
+                      display: 'inline-block',
+                      width: 10, height: 10,
+                      borderRadius: 2,
+                      background: swatchColor,
+                      flexShrink: 0,
+                      border: '1px solid rgba(255,255,255,0.15)',
+                    }} />
+                    <span style={{
+                      opacity: isHidden ? 0.4 : 1,
+                      fontStyle: lyr.is_frozen ? 'italic' : 'normal',
+                      fontSize: 12,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      maxWidth: 120,
+                    }}>
+                      {lyr.name}
+                    </span>
+                    {lyr.is_frozen && (
+                      <span style={{ fontSize: 10, opacity: 0.5 }}>(frozen)</span>
+                    )}
+                    {lyr.is_locked && (
+                      <span style={{ fontSize: 10, opacity: 0.5 }}>(locked)</span>
+                    )}
+                  </label>
+                )
+              })}
+              {hiddenLayers.size > 0 && (
+                <button
+                  type="button"
+                  className="dxf-action-btn"
+                  style={{ marginTop: 8 }}
+                  onClick={() => setHiddenLayers(new Set())}
+                >
+                  Show all layers
+                </button>
+              )}
+            </div>
+          )}
+          {/* ════════════════════════════════════════════════════════════════
+              END NEW PANEL
+              ════════════════════════════════════════════════════════════════ */}
 
           <div className="dxf-prop-panel">
             <div className="dxf-prop-label">Source</div>
