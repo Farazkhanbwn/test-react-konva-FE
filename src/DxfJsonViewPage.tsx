@@ -1910,28 +1910,29 @@ export function DxfJsonViewPage() {
   }, [planDoc.furniture_lines])
 
   /** Maps each furniture group key → the block_name from the nearest furniture insert. */
-  const furnitureLabels = useMemo(() => {
-    const map = new Map<string, string>()
-    for (const { key, lines } of furnitureGroups) {
-      if (lines.length === 0) continue
-      let sx = 0, sy = 0, count = 0
-      for (const ln of lines) {
-        sx += ln.start.x + ln.end.x
-        sy += ln.start.y + ln.end.y
-        count += 2
-      }
-      const cx = sx / count
-      const cy = sy / count
-      let bestLabel = ''
-      let bestDist = Infinity
-      for (const ins of planDoc.furniture_inserts) {
-        const d = Math.hypot(ins.position.x - cx, ins.position.y - cy)
-        if (d < bestDist) { bestDist = d; bestLabel = ins.block_name }
-      }
-      if (bestLabel) map.set(key, bestLabel)
-    }
-    return map
-  }, [furnitureGroups, planDoc.furniture_inserts])
+  // const furnitureLabels = useMemo(() => {
+  //   const map = new Map<string, string>()
+  //   for (const { key, lines } of furnitureGroups) {
+  //     if (lines.length === 0) continue
+  //     let sx = 0, sy = 0, count = 0
+  //     for (const ln of lines) {
+  //       sx += ln.start?.x + ln.end?.x
+  //       sy += ln.start.y + ln.end.y
+  //       count += 2
+  //     }
+  //     const cx = sx / count
+  //     const cy = sy / count
+  //     let bestLabel = ''
+  //     let bestDist = Infinity
+  //     for (const ins of planDoc.furniture_inserts) {
+  //       const d = Math.hypot(ins.position.x - cx, ins.position.y - cy)
+  //       if (d < bestDist) { bestDist = d; bestLabel = ins.block_name }
+  //     }
+  //     if (bestLabel) map.set(key, bestLabel)
+  //   }
+  //   return map
+  // }, [furnitureGroups, planDoc.furniture_inserts])
+  const furnitureLabels = "test"
 
   const moveFurnitureGroupByKey = useCallback((furnKey: string, dx: number, dy: number) => {
     if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return
@@ -2977,7 +2978,6 @@ export function DxfJsonViewPage() {
                   </Group>
                 )
               })}
-
               {/* ── Door arcs + associated frame lines ── */}
               {effectiveArcs.map((arc) => {
                 const isFullCircle = arc.end_angle - arc.start_angle >= 360
@@ -3473,25 +3473,27 @@ export function DxfJsonViewPage() {
                     onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                   >
                     {lines.map(ln => {
-                      const [x1, y1] = toC(ln.start.x, ln.start.y, t)
-                      const [x2, y2] = toC(ln.end.x, ln.end.y, t)
-                      const len = Math.hypot(ln.end.x - ln.start.x, ln.end.y - ln.start.y)
-                      if (len < 1e-9) return null
-                      return (
-                        <Line
-                          key={ln.handle}
-                          points={[x1, y1, x2, y2]}
-                          stroke={furnColor}
-                          strokeWidth={sw}
-                          lineCap="round"
-                          opacity={isSelFurn ? 1 : 0.88}
-                          hitStrokeWidth={10 / zoom}
-                        />
-                      )
-                    })}
+  if (!ln.start || !ln.end) return null
+  
+  const [x1, y1] = toC(ln.start.x, ln.start.y, t)
+  const [x2, y2] = toC(ln.end.x, ln.end.y, t)
+  
+  return (
+    <Line
+      key={ln.handle}
+      points={[x1, y1, x2, y2]}
+      stroke={furnColor}
+      strokeWidth={sw}
+      lineCap="round"
+      opacity={isSelFurn ? 1 : 0.88}
+      hitStrokeWidth={10 / zoom}
+    />
+  )
+})}
                     {/* furniture label — below the item bounding box, moves with the group during drag */}
                     {(() => {
-                      const rawLabel = furnitureLabels.get(key)
+                      const rawLabel = null
+                      // const rawLabel = furnitureLabels.get(key)
                       if (!rawLabel) return null
                       const label = shortFurnLabel(rawLabel)
                       // compute canvas bounding box
@@ -3545,115 +3547,6 @@ export function DxfJsonViewPage() {
                 </Layer>
               )
             })()}
-
-            {showLabels && (
-              <Layer>
-                {effectiveTexts.map(tx => {
-                  const textLines = tx.text.split('\n')
-                  const [lx, ly] = toC(tx.position.x, tx.position.y, t)
-                  const fs = Math.max(7, tx.height * t.sc * 3.5)
-                  // A label is "selected" if it's in the unified selectedIds set
-                  const isTxtSel = selectedIds.has(tx.handle)
-                  const estW = Math.max(fs * 3, (textLines[0]?.length ?? 1) * fs * 0.52)
-                  const boxH = fs * (textLines[1] ? 2.15 : 1) + 8 / zoom
-                  const handleY = fs * 0.2
-
-                  return (
-                    <Group
-                      key={tx.handle}
-                      x={lx}
-                      y={ly}
-                      onClick={(e) => {
-                        e.cancelBubble = true
-                        if (activeTool === 'hand' || spaceHeld) return
-                        if (activeTool !== 'select') return
-                        setSelectedRoomIndex(null)
-                        setSelectedId(null)
-                        setSelectedWinKey(null)
-                        setSelectedFurnKey(null)
-                        const isCtrl = e.evt.ctrlKey || e.evt.metaKey
-                        setSelectedIds(prev => {
-                          const next = new Set(isCtrl ? prev : [])
-                          if (isTxtSel && isCtrl) next.delete(tx.handle)
-                          else next.add(tx.handle)
-                          return next
-                        })
-                        setSelectedTextHandle(isTxtSel && !e.evt.ctrlKey ? null : tx.handle)
-                      }}
-                      onMouseDown={e => {
-                        e.cancelBubble = true
-                        if (activeTool !== 'select' || spaceHeld) return
-                        const isCtrl = e.evt.ctrlKey || e.evt.metaKey
-                        const currentSel = new Set(isCtrl ? selectedIds : (isTxtSel ? selectedIds : new Set<string>()))
-                        currentSel.add(tx.handle)
-                        if (!isCtrl && !isTxtSel) setSelectedIds(currentSel)
-                        onMidDragStart(e as any, tx.handle, currentSel)
-                      }}
-                      onMouseUp={e => { e.cancelBubble = true; onMidDragEnd() }}
-                      onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
-                      onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
-                    >
-                      {/* selection highlight */}
-                      {isTxtSel && (
-                        <Rect
-                          x={-4 / zoom} y={-fs - 4 / zoom}
-                          width={estW + 8 / zoom} height={boxH}
-                          fill="rgba(245,158,11,0.12)" stroke="#f59e0b"
-                          strokeWidth={1.2 / zoom} cornerRadius={2 / zoom}
-                          listening={false}
-                        />
-                      )}
-                      <Text
-                        x={0} y={-fs}
-                        text={textLines[0]}
-                        fontSize={fs} fontStyle="bold"
-                        fill={isTxtSel ? '#f59e0b' : '#2563eb'}
-                        fontFamily="system-ui, -apple-system, 'Segoe UI', sans-serif"
-                      />
-                      {textLines[1] && (
-                        <Text
-                          x={0} y={-fs + fs * 1.25}
-                          text={textLines[1]}
-                          fontSize={fs * 0.78}
-                          fill={isTxtSel ? '#f59e0b' : '#64748b'}
-                          fontFamily="system-ui, -apple-system, 'Segoe UI', sans-serif"
-                        />
-                      )}
-                      {/* per-label font-size resize handle — only when it's the sole selection */}
-                      {isTxtSel && selectedIds.size === 1 && activeTool === 'select' && (
-                        <Circle
-                          x={estW} y={handleY}
-                          radius={HR} fill="#3b82f6" stroke="#fff" strokeWidth={1.2 / zoom}
-                          draggable
-                          onDragStart={(e) => {
-                            e.cancelBubble = true
-                            snapshot()
-                            const stage = e.target.getStage()!
-                            const p = stage.getRelativePointerPosition()!
-                            const [, wy] = toW(p.x, p.y, t)
-                            textHeightDragRef.current = { handle: tx.handle, startH: tx.height, startPointerWy: wy }
-                          }}
-                          onDragMove={(e) => {
-                            e.cancelBubble = true
-                            const r = textHeightDragRef.current
-                            if (!r || r.handle !== tx.handle) return
-                            const stage = e.target.getStage()!
-                            const p = stage.getRelativePointerPosition()!
-                            const [, wy] = toW(p.x, p.y, t)
-                            const newH = Math.max(0.05, Math.min(3, r.startH + (wy - r.startPointerWy) * 0.45))
-                            setPlanDoc(prev => ({ ...prev, texts: prev.texts.map(t => t.handle === tx.handle ? { ...t, height: newH } : t) }))
-                            e.target.position({ x: estW, y: handleY })
-                          }}
-                          onDragEnd={(e) => { e.cancelBubble = true; textHeightDragRef.current = null; e.target.position({ x: estW, y: handleY }) }}
-                          onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'ns-resize' }}
-                          onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
-                        />
-                      )}
-                    </Group>
-                  )
-                })}
-              </Layer>
-            )}
 
             {/* ── Dim overlay moved to SVG outside Stage — see below ── */}
 
