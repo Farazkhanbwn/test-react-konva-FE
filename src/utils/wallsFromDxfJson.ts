@@ -548,6 +548,8 @@ function renderInsert(ins: DxfInsert): RenderInsertGeometry | null {
  * Build editable wall segments from a DxfJsonDocument.
  * Segments from LINE / LWPOLYLINE / POLYLINE / ARC (non-door).
  */
+
+
 export function wallsFromDxfJson(doc: DxfJsonDocument): WallSeg[] {
   const ws: WallSeg[] = []
 

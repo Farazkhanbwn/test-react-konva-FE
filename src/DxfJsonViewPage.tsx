@@ -1286,6 +1286,44 @@ function detectRooms(walls: WallSeg[]): Pt[][] {
   return validFaces
 }
 
+// Add this function to normalize coordinates
+function normalizeDocument(doc: DxfJsonDocument): DxfJsonDocument {
+  // Find actual bounds from geometry
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  
+  const updateBounds = (x: number, y: number) => {
+    if (isFinite(x) && isFinite(y)) {
+      minX = Math.min(minX, x)
+      maxX = Math.max(maxX, x)
+      minY = Math.min(minY, y)
+      maxY = Math.max(maxY, y)
+    }
+  }
+  
+  // Scan all geometry
+  for (const line of doc.lines) {
+    updateBounds(line.start.x, line.start.y)
+    updateBounds(line.end.x, line.end.y)
+  }
+  for (const arc of doc.arcs ?? []) {
+    updateBounds(arc.center.x - arc.radius, arc.center.y - arc.radius)
+    updateBounds(arc.center.x + arc.radius, arc.center.y + arc.radius)
+  }
+  for (const pl of doc.polylines) {
+    for (const v of pl.vertices) updateBounds(v.x, v.y)
+  }
+  
+  // If bounds are tiny (like 0-12), keep as-is but ensure bbox is correct
+  if (isFinite(minX) && maxX > minX) {
+    const padX = (maxX - minX) * 0.05
+    const padY = (maxY - minY) * 0.05
+    doc.meta.extmin = [minX - padX, minY - padY, 0]
+    doc.meta.extmax = [maxX + padX, maxY + padY, 0]
+  }
+  
+  return doc
+}
+
 function applyResizeToWalls(
   ws: WallSeg[], ids: Set<string>,
   origBox: { minWX: number; minWY: number; maxWX: number; maxWY: number },
@@ -3027,7 +3065,7 @@ export function DxfJsonViewPage() {
                       return (
                         <Circle key={item.id}
                           x={cx} y={cy}
-                          radius={item.r * t.sc}
+                          radius={Math.max(0, item.r * t.sc)}
                           stroke={col} strokeWidth={sw}
                           fill="transparent"
                         />
@@ -3271,8 +3309,8 @@ export function DxfJsonViewPage() {
                             return (
                               <KonvaArc key={`da${i}`}
                                 x={acx} y={acy}
-                                innerRadius={a.r * t.sc}
-                                outerRadius={a.r * t.sc}
+                                innerRadius={Math.max(0, a.r * t.sc)}
+                                outerRadius={Math.max(0, a.r * t.sc)}
                                 angle={spanDeg}
                                 rotation={-(a.startAngle + spanDeg)}
                                 stroke={col} strokeWidth={0.6 / zoom}
@@ -3312,7 +3350,7 @@ export function DxfJsonViewPage() {
                             const cc = resolveEntityColor(c.color, item.layer, layerColorMap, col)
                             const [cx2, cy2] = toC(c.cx, c.cy, t)
                             return <Circle key={`ic${i}`} x={cx2} y={cy2}
-                              radius={c.r * t.sc}
+                              radius={Math.max(0, c.r * t.sc)}
                               stroke={cc} strokeWidth={sw} fill="transparent" />
                           })}
                           {item.arcs.map((a, i) => {
@@ -3324,8 +3362,8 @@ export function DxfJsonViewPage() {
                             return (
                               <KonvaArc key={`ia${i}`}
                                 x={acx} y={acy}
-                                innerRadius={a.r * t.sc}
-                                outerRadius={a.r * t.sc}
+                                innerRadius={Math.max(0, a.r * t.sc)}
+                                outerRadius={Math.max(0, a.r * t.sc)}
                                 angle={spanDeg}
                                 rotation={-(a.startAngle + spanDeg)}
                                 stroke={ac} strokeWidth={sw}
@@ -3479,7 +3517,7 @@ export function DxfJsonViewPage() {
                         onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                       >
                         {isFullCircle ? (
-                          <Circle x={arcCx} y={arcCy} radius={rCanvas} stroke={arcColor} strokeWidth={sw} fill="transparent" hitStrokeWidth={10 / zoom} />
+                          <Circle x={arcCx} y={arcCy} radius={Math.max(0, rCanvas)} stroke={arcColor} strokeWidth={sw} fill="transparent" hitStrokeWidth={10 / zoom} />
                         ) : (
                           <>
                             {/* Arc sweep */}
