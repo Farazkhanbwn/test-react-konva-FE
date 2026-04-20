@@ -24,23 +24,13 @@
 
 import type {
   DxfArc,
-  DxfCircle,
   DxfDimension,
   DxfEllipse,
-  DxfFace3d,
   DxfHatch,
-  DxfHelix,
-  DxfImage,
   DxfInsert,
   DxfJsonDocument,
-  DxfLeader,
-  DxfMesh,
-  DxfMLeader,
-  DxfPoint,
   DxfPolyline,
-  DxfSolid,
   DxfSpline,
-  DxfWipeout,
 } from '@/constants/dxfJsonData'
 
 /* ──────────────────────────────────────────────────────────────────────────

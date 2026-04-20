@@ -23,2943 +23,1983 @@
  *   3DSOLID, SURFACE, REGION, BODY — ezdxf can extract basic bounding info only.
  *   These are included as `raw_entities` so the stats panel shows them.
  */
- 
+
 /* ─── Shared primitives ────────────────────────────────────────────────── */
- 
+
 export interface DxfPoint {
-  x: number
-  y: number
-  z: number
+  x: number;
+  y: number;
+  z: number;
 }
- 
+
 /** RGBA colour from ezdxf — either ACI index (0-256) or true-color hex string "#RRGGBB". */
-export type DxfColor = number | string | null
- 
+export type DxfColor = number | string | null;
+
 /** Common header every entity must have. */
 export interface DxfEntityBase {
-  entity_type: string
-  handle: string
-  layer: string
+  entity_type: string;
+  handle: string;
+  layer: string;
   /** ACI colour index (256 = BYLAYER, 0 = BYBLOCK). Optional — fall back to layer colour. */
-  color?: DxfColor
+  color?: DxfColor;
   /** True-colour override as "#RRGGBB" if set. */
-  true_color?: string | null
+  true_color?: string | null;
   /** Line-type name ("ByLayer", "Continuous", "DASHED", …). */
-  linetype?: string | null
+  linetype?: string | null;
   /** Line-type scale multiplier. */
-  ltscale?: number
+  ltscale?: number;
   /** Line-weight in hundredths of a mm (-3 = ByLayer, -2 = ByBlock). */
-  lineweight?: number
+  lineweight?: number;
   /** Transparency 0–100 (0 = opaque). */
-  transparency?: number
+  transparency?: number;
   /** True when entity is on a frozen or off layer. Canvas can skip or dim it. */
-  is_visible?: boolean
+  is_visible?: boolean;
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
    1.  GEOMETRY — simple primitives
    ══════════════════════════════════════════════════════════════════════════ */
- 
+
 export interface DxfLine extends DxfEntityBase {
-  entity_type: 'LINE'
-  start: DxfPoint
-  end: DxfPoint
-  /** Extrusion direction (default [0,0,1]). For non-default the backend should
-   *  project start/end into WCS before emitting. */
-  extrusion?: DxfPoint
+  entity_type: "LINE";
+  start: DxfPoint;
+  end: DxfPoint;
+  extrusion?: DxfPoint;
 }
- 
+
 export interface DxfCircle extends DxfEntityBase {
-  entity_type: 'CIRCLE'
-  center: DxfPoint
-  radius: number
-  extrusion?: DxfPoint
+  entity_type: "CIRCLE";
+  center: DxfPoint;
+  radius: number;
+  extrusion?: DxfPoint;
 }
- 
+
 export interface DxfArc extends DxfEntityBase {
-  entity_type: 'ARC'
-  center: DxfPoint
-  radius: number
-  /** Degrees, counter-clockwise from +X, DXF convention. */
-  start_angle: number
-  end_angle: number
-  extrusion?: DxfPoint
+  entity_type: "ARC";
+  center: DxfPoint;
+  radius: number;
+  start_angle: number;
+  end_angle: number;
+  extrusion?: DxfPoint;
 }
- 
+
 export interface DxfEllipse extends DxfEntityBase {
-  entity_type: 'ELLIPSE'
-  center: DxfPoint
-  /** WCS vector from center to end of major axis. */
-  major_axis: DxfPoint
-  /** ratio = minor / major  (0 < ratio ≤ 1). */
-  ratio: number
-  /** Parameter range 0–2π (not degrees!). */
-  start_param: number
-  end_param: number
-  extrusion?: DxfPoint
+  entity_type: "ELLIPSE";
+  center: DxfPoint;
+  major_axis: DxfPoint;
+  ratio: number;
+  start_param: number;
+  end_param: number;
+  extrusion?: DxfPoint;
 }
- 
+
 export interface DxfPoint_Entity extends DxfEntityBase {
-  entity_type: 'POINT'
-  location: DxfPoint
-  extrusion?: DxfPoint
+  entity_type: "POINT";
+  location: DxfPoint;
+  extrusion?: DxfPoint;
 }
- 
-/** ezdxf exposes fit points and/or control points — emit whichever exist. */
+
 export interface DxfSpline extends DxfEntityBase {
-  entity_type: 'SPLINE'
-  degree: number
-  closed: boolean
-  /** Knot values. */
-  knots: number[]
-  /** Control points [x,y,z]. */
-  control_points: DxfPoint[]
-  /** Fit points [x,y,z] (may be empty). */
-  fit_points: DxfPoint[]
-  /** Rational weights, one per control point (may be empty → all 1). */
-  weights: number[]
-  /**
-   * Backend SHOULD tessellate the spline and store the result here so the
-   * canvas can draw it as a polyline without re-implementing NURBS maths.
-   * Points are in WCS order.
-   */
-  tessellation?: DxfPoint[]
+  entity_type: "SPLINE";
+  degree: number;
+  closed: boolean;
+  knots: number[];
+  control_points: DxfPoint[];
+  fit_points: DxfPoint[];
+  weights: number[];
+  tessellation?: DxfPoint[];
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
    2.  POLYLINES
    ══════════════════════════════════════════════════════════════════════════ */
- 
+
 export interface DxfPolylineVertex {
-  x: number
-  y: number
-  z: number
-  /** Bulge value: tan(θ/4) where θ is the arc subtended.  0 = straight segment. */
-  bulge: number
-  /** Starting width override (-1 = use polyline default). */
-  start_width?: number
-  /** Ending width override (-1 = use polyline default). */
-  end_width?: number
+  x: number;
+  y: number;
+  z: number;
+  bulge: number;
+  start_width?: number;
+  end_width?: number;
 }
- 
+
 export interface DxfPolyline extends DxfEntityBase {
-  entity_type: 'LWPOLYLINE' | 'POLYLINE'
-  closed: boolean
-  vertex_count: number
-  vertices: DxfPolylineVertex[]
-  /** Constant width for all segments (0 = hairline). */
-  const_width?: number
-  elevation?: number
-  extrusion?: DxfPoint
+  entity_type: "LWPOLYLINE" | "POLYLINE";
+  closed: boolean;
+  vertex_count: number;
+  vertices: DxfPolylineVertex[];
+  const_width?: number;
+  elevation?: number;
+  extrusion?: DxfPoint;
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
    3.  TEXT
    ══════════════════════════════════════════════════════════════════════════ */
- 
+
 export interface DxfText extends DxfEntityBase {
-  entity_type: 'TEXT' | 'MTEXT'
-  text: string
-  position: DxfPoint
-  height: number
-  /** Rotation angle in degrees (0 = horizontal). */
-  rotation?: number
-  /** Text style name. */
-  style?: string
-  /**
-   * Horizontal justification for TEXT:
-   * 0=Left  1=Center  2=Right  3=Aligned  4=Middle  5=Fit
-   */
-  halign?: number
-  /**
-   * Vertical justification for TEXT:
-   * 0=Baseline  1=Bottom  2=Middle  3=Top
-   */
-  valign?: number
-  /** MTEXT attachment point 1-9. */
-  attachment?: number
-  /** MTEXT reference width (column wrap). */
-  ref_width?: number
-  /** MTEXT flow direction. */
-  flow_direction?: number
-  /** X-axis direction vector for MTEXT. */
-  text_direction?: DxfPoint
-  /** Line spacing factor for MTEXT. */
-  line_spacing?: number
+  entity_type: "TEXT" | "MTEXT";
+  text: string;
+  position: DxfPoint;
+  height: number;
+  rotation?: number;
+  style?: string;
+  halign?: number;
+  valign?: number;
+  attachment?: number;
+  ref_width?: number;
+  flow_direction?: number;
+  text_direction?: DxfPoint;
+  line_spacing?: number;
 }
- 
+
 export interface DxfAttrib extends DxfEntityBase {
-  entity_type: 'ATTRIB'
-  tag: string
-  text: string
-  position: DxfPoint
-  height: number
-  rotation?: number
-  style?: string
+  entity_type: "ATTRIB";
+  tag: string;
+  text: string;
+  position: DxfPoint;
+  height: number;
+  rotation?: number;
+  style?: string;
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
    4.  DIMENSIONS
    ══════════════════════════════════════════════════════════════════════════ */
- 
+
 export type DxfDimSubtype =
-  | 'LINEAR' | 'ALIGNED' | 'ANGULAR' | 'ANGULAR_3P'
-  | 'DIAMETER' | 'RADIUS' | 'ORDINATE' | 'ARC_LENGTH'
- 
+  | "LINEAR"
+  | "ALIGNED"
+  | "ANGULAR"
+  | "ANGULAR_3P"
+  | "DIAMETER"
+  | "RADIUS"
+  | "ORDINATE"
+  | "ARC_LENGTH";
+
 export interface DxfDimension extends DxfEntityBase {
-  entity_type: 'DIMENSION'
-  subtype: DxfDimSubtype
-  /** Override text (empty string = auto). */
-  text: string
-  /** Text mid-point. */
-  text_midpoint: DxfPoint
-  dimension_style: string
-  /** Measurement value computed by AutoCAD / ezdxf. */
-  actual_measurement: number | null
-  /** Definition points used to reconstruct geometry (varies by subtype). */
-  defpoints: DxfPoint[]
-  /** The auto-generated BLOCK reference that holds rendered geometry.
-   *  The backend should inline this block's lines/arcs into `dim_geometry`. */
-  geometry_block?: string
-  /**
-   * Tessellated dimension geometry (lines + arcs) so the canvas can draw it
-   * without resolving the block reference.  Backend should populate this.
-   */
-  dim_lines?: Array<{ start: DxfPoint; end: DxfPoint }>
-  dim_arcs?: Array<{ center: DxfPoint; radius: number; start_angle: number; end_angle: number }>
-  dim_texts?: Array<{ text: string; position: DxfPoint; height: number; rotation: number }>
+  entity_type: "DIMENSION";
+  subtype: DxfDimSubtype;
+  text: string;
+  text_midpoint: DxfPoint;
+  dimension_style: string;
+  actual_measurement: number | null;
+  defpoints: DxfPoint[];
+  geometry_block?: string;
+  dim_lines?: Array<{ start: DxfPoint; end: DxfPoint }>;
+  dim_arcs?: Array<{
+    center: DxfPoint;
+    radius: number;
+    start_angle: number;
+    end_angle: number;
+  }>;
+  dim_texts?: Array<{
+    text: string;
+    position: DxfPoint;
+    height: number;
+    rotation: number;
+  }>;
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
    5.  HATCH
    ══════════════════════════════════════════════════════════════════════════ */
- 
+
 export interface DxfHatchEdge {
-  type: 'LINE' | 'ARC' | 'ELLIPSE' | 'SPLINE'
-  /** LINE */ start?: DxfPoint; end?: DxfPoint
-  /** ARC */  center?: DxfPoint; radius?: number; start_angle?: number; end_angle?: number; is_ccw?: boolean
-  /** ELLIPSE */ major_axis_end?: DxfPoint; minor_to_major?: number; ellipse_start_angle?: number; ellipse_end_angle?: number
-  /** SPLINE */ degree?: number; spline_knots?: number[]; spline_control_pts?: DxfPoint[]; spline_fit_pts?: DxfPoint[]
+  type: "LINE" | "ARC" | "ELLIPSE" | "SPLINE";
+  start?: DxfPoint;
+  end?: DxfPoint;
+  center?: DxfPoint;
+  radius?: number;
+  start_angle?: number;
+  end_angle?: number;
+  is_ccw?: boolean;
+  major_axis_end?: DxfPoint;
+  minor_to_major?: number;
+  ellipse_start_angle?: number;
+  ellipse_end_angle?: number;
+  degree?: number;
+  spline_knots?: number[];
+  spline_control_pts?: DxfPoint[];
+  spline_fit_pts?: DxfPoint[];
 }
- 
+
 export interface DxfHatchBoundary {
-  type: 'POLYLINE' | 'EDGE'
-  is_outer: boolean
-  vertices?: DxfPolylineVertex[]
-  edges?: DxfHatchEdge[]
+  type: "POLYLINE" | "EDGE";
+  is_outer: boolean;
+  vertices?: DxfPolylineVertex[];
+  edges?: DxfHatchEdge[];
 }
- 
+
 export interface DxfHatch extends DxfEntityBase {
-  entity_type: 'HATCH'
-  /** "SOLID" | predefined pattern name (e.g. "ANSI31") | "USER_DEFINED" */
-  pattern_name: string
-  solid_fill: boolean
-  associative: boolean
-  boundaries: DxfHatchBoundary[]
-  pattern_angle?: number
-  pattern_scale?: number
-  pattern_double?: boolean
-  /** For gradient fills (GRADIENT entity or ezdxf gradient hatch). */
+  entity_type: "HATCH";
+  pattern_name: string;
+  solid_fill: boolean;
+  associative: boolean;
+  boundaries: DxfHatchBoundary[];
+  pattern_angle?: number;
+  pattern_scale?: number;
+  pattern_double?: boolean;
   gradient?: {
-    name: string           // "LINEAR", "CYLINDER", etc.
-    color1: DxfColor
-    color2: DxfColor
-    angle: number
-    centered: boolean
-    tint: number
-  } | null
-  elevation?: number
-  extrusion?: DxfPoint
+    name: string;
+    color1: DxfColor;
+    color2: DxfColor;
+    angle: number;
+    centered: boolean;
+    tint: number;
+  } | null;
+  elevation?: number;
+  extrusion?: DxfPoint;
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
    6.  INSERTS (block references)
    ══════════════════════════════════════════════════════════════════════════ */
- 
+
 export interface DxfInsertScale {
-  x: number
-  y: number
-  z: number
+  x: number;
+  y: number;
+  z: number;
 }
- 
+
 export interface DxfInsert extends DxfEntityBase {
-  entity_type: 'INSERT'
-  block_name: string
-  /** Frontend category tag assigned by backend (furniture / door / window / stair / …). */
-  category: string
-  is_anonymous_block: boolean
-  position: DxfPoint
-  rotation: number
-  scale: DxfInsertScale
-  block_entity_types: string[]
-  block_entity_count: number
-  attributes: DxfAttrib[]
-  /**
-   * Inline expanded geometry of the referenced block, already transformed
-   * (translated + rotated + scaled) into WCS by the backend.
-   * This lets the canvas render the block without resolving block definitions.
-   */
+  entity_type: "INSERT";
+  block_name: string;
+  category: string;
+  is_anonymous_block: boolean;
+  position: DxfPoint;
+  rotation: number;
+  scale: DxfInsertScale;
+  block_entity_types: string[];
+  block_entity_count: number;
+  attributes: DxfAttrib[];
   geometry?: {
-    lines?: Array<{ start: DxfPoint; end: DxfPoint; color?: DxfColor; layer?: string }>
-    arcs?: Array<{ center: DxfPoint; radius: number; start_angle: number; end_angle: number; color?: DxfColor; layer?: string }>
-    circles?: Array<{ center: DxfPoint; radius: number; color?: DxfColor; layer?: string }>
-    polylines?: Array<{ vertices: DxfPolylineVertex[]; closed: boolean; color?: DxfColor; layer?: string }>
-    texts?: Array<{ text: string; position: DxfPoint; height: number; rotation: number; color?: DxfColor; layer?: string }>
-    splines?: Array<{ tessellation: DxfPoint[]; color?: DxfColor; layer?: string }>
-  }
+    lines?: Array<{
+      start: DxfPoint;
+      end: DxfPoint;
+      color?: DxfColor;
+      layer?: string;
+    }>;
+    arcs?: Array<{
+      center: DxfPoint;
+      radius: number;
+      start_angle: number;
+      end_angle: number;
+      color?: DxfColor;
+      layer?: string;
+    }>;
+    circles?: Array<{
+      center: DxfPoint;
+      radius: number;
+      color?: DxfColor;
+      layer?: string;
+    }>;
+    polylines?: Array<{
+      vertices: DxfPolylineVertex[];
+      closed: boolean;
+      color?: DxfColor;
+      layer?: string;
+    }>;
+    texts?: Array<{
+      text: string;
+      position: DxfPoint;
+      height: number;
+      rotation: number;
+      color?: DxfColor;
+      layer?: string;
+    }>;
+    splines?: Array<{
+      tessellation: DxfPoint[];
+      color?: DxfColor;
+      layer?: string;
+    }>;
+  };
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
    7.  LEADERS / MLEADER / TOLERANCE
    ══════════════════════════════════════════════════════════════════════════ */
- 
+
 export interface DxfLeader extends DxfEntityBase {
-  entity_type: 'LEADER'
-  vertices: DxfPoint[]
-  has_arrowhead: boolean
-  leader_style: number  // 0=lines, 1=spline
-  /** If the leader has an annotation, it's stored here. */
-  annotation?: { type: 'MTEXT' | 'TOLERANCE' | 'INSERT'; text?: string; position?: DxfPoint }
+  entity_type: "LEADER";
+  vertices: DxfPoint[];
+  has_arrowhead: boolean;
+  leader_style: number;
+  annotation?: {
+    type: "MTEXT" | "TOLERANCE" | "INSERT";
+    text?: string;
+    position?: DxfPoint;
+  };
 }
- 
+
 export interface DxfMLeaderLine {
-  vertices: DxfPoint[]
-  break_points?: DxfPoint[]
+  vertices: DxfPoint[];
+  break_points?: DxfPoint[];
 }
- 
+
 export interface DxfMLeader extends DxfEntityBase {
-  entity_type: 'MLEADER'
-  leader_lines: DxfMLeaderLine[]
-  dogleg_length: number
-  dogleg_vector: DxfPoint
-  landing_point: DxfPoint
-  /** Content type: 0=none, 1=block, 2=mtext */
-  content_type: 0 | 1 | 2
+  entity_type: "MLEADER";
+  leader_lines: DxfMLeaderLine[];
+  dogleg_length: number;
+  dogleg_vector: DxfPoint;
+  landing_point: DxfPoint;
+  content_type: 0 | 1 | 2;
   mtext?: {
-    text: string
-    position: DxfPoint
-    height: number
-    rotation: number
-    style: string
-    attachment: number
-  }
+    text: string;
+    position: DxfPoint;
+    height: number;
+    rotation: number;
+    style: string;
+    attachment: number;
+  };
   block_content?: {
-    block_name: string
-    position: DxfPoint
-    scale: DxfInsertScale
-    rotation: number
-    color: DxfColor
-  }
-  style: string
-  arrowhead_size: number
-  has_dogleg: boolean
+    block_name: string;
+    position: DxfPoint;
+    scale: DxfInsertScale;
+    rotation: number;
+    color: DxfColor;
+  };
+  style: string;
+  arrowhead_size: number;
+  has_dogleg: boolean;
 }
- 
+
 export interface DxfTolerance extends DxfEntityBase {
-  entity_type: 'TOLERANCE'
-  /** Raw GD&T string with AutoCAD formatting codes. */
-  string: string
-  insertion_point: DxfPoint
-  x_direction: DxfPoint
-  dimension_style: string
+  entity_type: "TOLERANCE";
+  string: string;
+  insertion_point: DxfPoint;
+  x_direction: DxfPoint;
+  dimension_style: string;
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
    8.  SOLID, TRACE (filled 2D quads)
    ══════════════════════════════════════════════════════════════════════════ */
- 
-/** A filled quadrilateral (4 corners, or 3 if p3 === p4). */
+
 export interface DxfSolid extends DxfEntityBase {
-  entity_type: 'SOLID' | 'TRACE'
-  /** 4 corners in DXF winding order (p1, p2, p4, p3 in DXF spec — backend should normalise). */
-  points: [DxfPoint, DxfPoint, DxfPoint, DxfPoint]
-  elevation?: number
-  extrusion?: DxfPoint
+  entity_type: "SOLID" | "TRACE";
+  points: [DxfPoint, DxfPoint, DxfPoint, DxfPoint];
+  elevation?: number;
+  extrusion?: DxfPoint;
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
    9.  IMAGE reference
    ══════════════════════════════════════════════════════════════════════════ */
- 
+
 export interface DxfImage extends DxfEntityBase {
-  entity_type: 'IMAGE'
-  /** Absolute or relative path stored in the DXF file. */
-  image_path: string
-  /** WCS position of the lower-left corner. */
-  insert: DxfPoint
-  /** U vector (width direction × pixel size). */
-  u_vector: DxfPoint
-  /** V vector (height direction × pixel size). */
-  v_vector: DxfPoint
-  /** Image size in pixels. */
-  pixel_size: { x: number; y: number }
-  clipping: boolean
-  /** Clipping boundary vertices (if clipping === true). */
-  clip_boundary?: DxfPoint[]
+  entity_type: "IMAGE";
+  image_path: string;
+  insert: DxfPoint;
+  u_vector: DxfPoint;
+  v_vector: DxfPoint;
+  pixel_size: { x: number; y: number };
+  clipping: boolean;
+  clip_boundary?: DxfPoint[];
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
    10. WIPEOUT (mask polygon)
    ══════════════════════════════════════════════════════════════════════════ */
- 
+
 export interface DxfWipeout extends DxfEntityBase {
-  entity_type: 'WIPEOUT'
-  insert: DxfPoint
-  u_vector: DxfPoint
-  v_vector: DxfPoint
-  pixel_size: { x: number; y: number }
-  boundary: DxfPoint[]
-  show_frame: boolean
+  entity_type: "WIPEOUT";
+  insert: DxfPoint;
+  u_vector: DxfPoint;
+  v_vector: DxfPoint;
+  pixel_size: { x: number; y: number };
+  boundary: DxfPoint[];
+  show_frame: boolean;
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
    11. 3D entities (rendered as wireframe / projected)
    ══════════════════════════════════════════════════════════════════════════ */
- 
-/** 3DFACE — three or four coplanar corners.  Render as projected polygon outline. */
+
 export interface DxfFace3d extends DxfEntityBase {
-  entity_type: '3DFACE'
-  points: [DxfPoint, DxfPoint, DxfPoint, DxfPoint]
-  /** Edge visibility flags (bit mask: bit0=first, bit1=second, bit2=third, bit3=fourth). */
-  invisible_edges: number
+  entity_type: "3DFACE";
+  points: [DxfPoint, DxfPoint, DxfPoint, DxfPoint];
+  invisible_edges: number;
 }
- 
-/** MESH — subdivision mesh. Backend should tessellate to triangles. */
+
 export interface DxfMesh extends DxfEntityBase {
-  entity_type: 'MESH'
-  subdivision_level: number
-  vertices: DxfPoint[]
-  faces: number[][] // each face is an index list into vertices
+  entity_type: "MESH";
+  subdivision_level: number;
+  vertices: DxfPoint[];
+  faces: number[][];
 }
- 
-/** HELIX — rendered as a tessellated polyline by the backend. */
+
 export interface DxfHelix extends DxfEntityBase {
-  entity_type: 'HELIX'
-  /** Backend tessellation of the helix as WCS points. */
-  tessellation: DxfPoint[]
-  axis_base_point: DxfPoint
-  axis_vector: DxfPoint
-  radius: number
-  turns: number
-  turn_height: number
-  handedness: 0 | 1  // 0=left, 1=right
+  entity_type: "HELIX";
+  tessellation: DxfPoint[];
+  axis_base_point: DxfPoint;
+  axis_vector: DxfPoint;
+  radius: number;
+  turns: number;
+  turn_height: number;
+  handedness: 0 | 1;
 }
- 
-/** Catch-all for entity types the backend found but the frontend has no dedicated renderer for. */
+
 export interface DxfRawEntity {
-  entity_type: string
-  handle: string
-  layer: string
-  /** Serialised JSON string of the raw ezdxf entity dict for debugging. */
-  raw_data?: string
+  entity_type: string;
+  handle: string;
+  layer: string;
+  raw_data?: string;
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
-   LAYER TABLE  (from $TABLES section)
+   LAYER TABLE
    ══════════════════════════════════════════════════════════════════════════ */
- 
+
 export interface DxfLayerDef {
-  name: string
-  color: number          // ACI 1-255 (negative = layer is off)
-  true_color?: string    // "#RRGGBB" if set
-  linetype: string
-  lineweight: number     // hundredths of mm; -3 = default
-  plot: boolean
-  is_frozen: boolean
-  is_locked: boolean
-  description?: string
+  name: string;
+  color: number;
+  true_color?: string;
+  linetype: string;
+  lineweight: number;
+  plot: boolean;
+  is_frozen: boolean;
+  is_locked: boolean;
+  description?: string;
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
-   BLOCK TABLE  (definitions, not references)
+   BLOCK TABLE
    ══════════════════════════════════════════════════════════════════════════ */
- 
+
 export interface DxfBlockDef {
-  name: string
-  base_point: DxfPoint
-  /** Summarised list of entity types inside the block. */
-  entity_types: string[]
-  entity_count: number
+  name: string;
+  base_point: DxfPoint;
+  entity_types: string[];
+  entity_count: number;
 }
- 
+
 /* ══════════════════════════════════════════════════════════════════════════
    ROOT DOCUMENT
    ══════════════════════════════════════════════════════════════════════════ */
- 
+
 export interface DxfJsonDocument {
-  source_file: string
+  source_file: string;
   meta: {
-    acad_version: string
-    /** [minX, minY, minZ] in WCS (from $EXTMIN). */
-    extmin: [number, number, number]
-    /** [maxX, maxY, maxZ] in WCS (from $EXTMAX). */
-    extmax: [number, number, number]
-    /** DXF insertion units (see $INSUNITS; 4=mm, 5=cm, 6=m, etc.). */
-    insunits?: number
-    /** Linear units description string, e.g. "Meters". */
-    measurement?: string
-  }
+    acad_version: string;
+    extmin: [number, number, number];
+    extmax: [number, number, number];
+    insunits?: number;
+    measurement?: string;
+  };
   stats: {
-    entity_counts: Record<string, number>
-    polyline_count: number
-    line_count: number
-    arc_count: number
-    text_count: number
-    total_vertex_count: number
-    insert_count?: number
-    door_insert_count?: number
-    window_insert_count?: number
-    furniture_insert_count?: number
-    stair_insert_count?: number
-    hatch_count?: number
-    dimension_count?: number
-    spline_count?: number
-    image_count?: number
-    leader_count?: number
-  }
- 
-  /** Layer table entries. */
-  layers?: DxfLayerDef[]
-  /** Block definitions (not instances). */
-  block_defs?: DxfBlockDef[]
- 
-  /* ── Geometry primitives ── */
-  lines:      DxfLine[]
-  arcs:       DxfArc[]
-  circles?:   DxfCircle[]
-  ellipses?:  DxfEllipse[]
-  splines?:   DxfSpline[]
-  points?:    DxfPoint_Entity[]
-  polylines:  DxfPolyline[]
- 
-  /* ── Text ── */
-  texts:      DxfText[]
- 
-  /* ── Structured annotations ── */
-  dimensions?:  DxfDimension[]
-  leaders?:     DxfLeader[]
-  mleaders?:    DxfMLeader[]
-  tolerances?:  DxfTolerance[]
- 
-  /* ── Fill / hatch ── */
-  hatches?:   DxfHatch[]
-  solids?:    DxfSolid[]
- 
-  /* ── Raster / mask ── */
-  images?:    DxfImage[]
-  wipeouts?:  DxfWipeout[]
- 
-  /* ── 3D entities ── */
-  faces3d?:   DxfFace3d[]
-  meshes?:    DxfMesh[]
-  helices?:   DxfHelix[]
- 
-  /* ── Block references categorised by backend ── */
-  inserts:            DxfInsert[]
-  door_inserts:       DxfInsert[]
-  window_inserts:     DxfInsert[]
-  furniture_inserts:  DxfInsert[]
-  stair_inserts:      DxfInsert[]
- 
-  /* ── Door / window decorators (synthetic — generated by backend) ── */
-  window_lines?:  DxfLine[]
-  door_lines?:    DxfLine[]
-  furniture_lines?: DxfLine[]
- 
-  /** Any entity types the backend could not classify go here for debug. */
-  raw_entities?: DxfRawEntity[]
+    entity_counts: Record<string, number>;
+    polyline_count: number;
+    line_count: number;
+    arc_count: number;
+    text_count: number;
+    total_vertex_count: number;
+    insert_count?: number;
+    door_insert_count?: number;
+    window_insert_count?: number;
+    furniture_insert_count?: number;
+    stair_insert_count?: number;
+    hatch_count?: number;
+    dimension_count?: number;
+    spline_count?: number;
+    image_count?: number;
+    leader_count?: number;
+  };
+
+  layers?: DxfLayerDef[];
+  block_defs?: DxfBlockDef[];
+
+  lines: DxfLine[];
+  arcs: DxfArc[];
+  circles?: DxfCircle[];
+  ellipses?: DxfEllipse[];
+  splines?: DxfSpline[];
+  points?: DxfPoint_Entity[];
+  polylines: DxfPolyline[];
+
+  texts: DxfText[];
+
+  dimensions?: DxfDimension[];
+  leaders?: DxfLeader[];
+  mleaders?: DxfMLeader[];
+  tolerances?: DxfTolerance[];
+
+  hatches?: DxfHatch[];
+  solids?: DxfSolid[];
+
+  images?: DxfImage[];
+  wipeouts?: DxfWipeout[];
+
+  faces3d?: DxfFace3d[];
+  meshes?: DxfMesh[];
+  helices?: DxfHelix[];
+
+  inserts: DxfInsert[];
+  door_inserts: DxfInsert[];
+  window_inserts: DxfInsert[];
+  furniture_inserts: DxfInsert[];
+  stair_inserts: DxfInsert[];
+
+  window_lines?: DxfLine[];
+  door_lines?: DxfLine[];
+  furniture_lines?: DxfLine[];
+
+  raw_entities?: DxfRawEntity[];
 }
 
-
-// export const DXF_JSON_DATA: DxfJsonDocument = {
-//   source_file: "update-autocad-file-1.dxf",
-//   meta: {
-//     acad_version: "AC1032",
-//     extmin: [-3.226776043334007, -3.716204318229131, 0.0],
-//     extmax: [20.17745305040325, 7.947965026977579, 0.0],
-//   },
-//   stats: {
-//     entity_counts: {
-//       LINE: 55,
-//       MTEXT: 8,
-//       ARC: 6,
-//       INSERT: 7,
-//     },
-//     polyline_count: 0,
-//     line_count: 55,
-//     arc_count: 6,
-//     text_count: 8,
-//     total_vertex_count: 0,
-//   },
-//   lines: [
-//     {
-//       entity_type: "LINE",
-//       handle: "272",
-//       layer: "0",
-//       start: {
-//         x: 0.6108066156627175,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.610806615662717,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "273",
-//       layer: "0",
-//       start: {
-//         x: 3.610806615662717,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.610806615662716,
-//         y: 4.795196564956298,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "274",
-//       layer: "0",
-//       start: {
-//         x: 2.110806615662717,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 1.680900782392768,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "275",
-//       layer: "0",
-//       start: {
-//         x: 0.6108066156627175,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.6108066156627175,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "276",
-//       layer: "0",
-//       start: {
-//         x: 3.610806615662717,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 6.610806615662717,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "277",
-//       layer: "0",
-//       start: {
-//         x: 6.610806615662717,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 6.610806615662717,
-//         y: 4.795196564956298,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "278",
-//       layer: "0",
-//       start: {
-//         x: 6.610806615662717,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 10.31080661566271,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "279",
-//       layer: "0",
-//       start: {
-//         x: 10.31080661566271,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 10.31080661566271,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "27A",
-//       layer: "0",
-//       start: {
-//         x: 10.31080661566271,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 11.42530188863939,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "27B",
-//       layer: "0",
-//       start: {
-//         x: 11.42530188863939,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 15.92798613906804,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "27C",
-//       layer: "0",
-//       start: {
-//         x: 15.92798613906804,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 15.92798613906804,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "280",
-//       layer: "0",
-//       start: {
-//         x: 10.31080661566271,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 11.81080661566271,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "281",
-//       layer: "0",
-//       start: {
-//         x: 11.81080661566271,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 11.81080661566271,
-//         y: 4.795196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "282",
-//       layer: "0",
-//       start: {
-//         x: 11.81080661566271,
-//         y: 4.795196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 10.31080661566271,
-//         y: 4.795196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "28C",
-//       layer: "0",
-//       start: {
-//         x: 3.610806615662717,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.610806615662717,
-//         y: 4.795196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "28D",
-//       layer: "0",
-//       start: {
-//         x: 3.610806615662717,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 4.133346733624051,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "28E",
-//       layer: "0",
-//       start: {
-//         x: 4.133346733624051,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.610806615662717,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "28F",
-//       layer: "0",
-//       start: {
-//         x: 3.610806615662717,
-//         y: 7.295196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.610806615662716,
-//         y: 4.963522484637849,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "291",
-//       layer: "0",
-//       start: {
-//         x: 3.610806615662717,
-//         y: 4.795196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 4.668873803766473,
-//         y: 4.795196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "292",
-//       layer: "0",
-//       start: {
-//         x: 8.551014477020999,
-//         y: 3.945196564956298,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 12.56657259849683,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "293",
-//       layer: "0",
-//       start: {
-//         x: 15.92798613906804,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 13.14993700878509,
-//         y: 3.932085732014996,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2AC",
-//       layer: "0",
-//       start: {
-//         x: 0.6108066156627175,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.6108066156627175,
-//         y: -2.704803435043701,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2AD",
-//       layer: "0",
-//       start: {
-//         x: 0.6108066156627175,
-//         y: -2.704803435043701,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 7.837662520394189,
-//         y: -2.704803435043701,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2AE",
-//       layer: "0",
-//       start: {
-//         x: 15.92798613906804,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 15.92798613906804,
-//         y: -2.745149250328729,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2AF",
-//       layer: "0",
-//       start: {
-//         x: 15.92798613906804,
-//         y: -2.745149250328729,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 9.116909095798803,
-//         y: -2.745149250328729,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2B9",
-//       layer: "0",
-//       start: {
-//         x: 0.6108066156627165,
-//         y: -2.704803435043701,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.6108066156627165,
-//         y: 0.645196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2BA",
-//       layer: "0",
-//       start: {
-//         x: 0.6108066156627165,
-//         y: 0.645196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 2.961460380407515,
-//         y: 0.645196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2C7",
-//       layer: "0",
-//       start: {
-//         x: 4.224234568028453,
-//         y: -2.704803435043701,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 4.224234568028453,
-//         y: -2.704803435043701,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2CF",
-//       layer: "0",
-//       start: {
-//         x: 15.92798613906804,
-//         y: -2.745149250328729,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 15.92798613906804,
-//         y: 0.2548507496712702,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "2D0",
-//       layer: "0",
-//       start: {
-//         x: 15.92798613906804,
-//         y: 0.2548507496712702,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 12.16251774591546,
-//         y: 0.2548507496712702,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "15A5",
-//       layer: "0",
-//       start: {
-//         x: 3.610806615662717,
-//         y: -1.359953888159623,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.610806615662717,
-//         y: -2.704803435043701,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "15E1",
-//       layer: "0",
-//       start: {
-//         x: 3.610806615662717,
-//         y: 4.795196564956298,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 2.110806615662717,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "15E2",
-//       layer: "0",
-//       start: {
-//         x: 6.610806615662717,
-//         y: 4.795196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 7.941414477020998,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "15E3",
-//       layer: "0",
-//       start: {
-//         x: 11.42798613906804,
-//         y: -0.3897045409896123,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 11.42798613906805,
-//         y: -0.7213204897056472,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "15E4",
-//       layer: "0",
-//       start: {
-//         x: 12.16251774591546,
-//         y: 0.2548507496712702,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 11.42798613906804,
-//         y: -0.3897045409896123,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "15E5",
-//       layer: "0",
-//       start: {
-//         x: 3.610806615662717,
-//         y: 0.202466429484332,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.610806615662717,
-//         y: -0.7503538881596232,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "15E6",
-//       layer: "0",
-//       start: {
-//         x: 2.961460380407515,
-//         y: 0.645196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 3.610806615662717,
-//         y: 0.202466429484332,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "25C8",
-//       layer: "0",
-//       start: {
-//         x: 5.278473803766473,
-//         y: 4.795196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 6.610806615662717,
-//         y: 4.795196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "25CA",
-//       layer: "0",
-//       start: {
-//         x: 11.42798613906805,
-//         y: -1.330920489705647,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 11.42798613906805,
-//         y: -2.745149250328729,
-//         z: 0.0,
-//       },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "25CC",
-//       layer: "0",
-//       start: {
-//         x: 1.162244020022889,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//       end: {
-//         x: 0.6108066156627175,
-//         y: 3.945196564956299,
-//         z: 0.0,
-//       },
-//     },
-//     /* ── Door-frame lines resolved from INSERT+block (flattened to world space) ─ */
-//     // Door *U19 (rot=270°) – left jamb
-//     {
-//       entity_type: "LINE",
-//       handle: "dfl-u19-1",
-//       layer: "0",
-//       start: { x: 3.451493532527252, y: -0.750353888159623, z: 0.0 },
-//       end: { x: 3.603893532527252, y: -0.750353888159623, z: 0.0 },
-//     },
-//     // Door *U19 (rot=270°) – right jamb
-//     {
-//       entity_type: "LINE",
-//       handle: "dfl-u19-2",
-//       layer: "0",
-//       start: { x: 3.451493532527252, y: -1.360153888159623, z: 0.0 },
-//       end: { x: 3.603893532527252, y: -1.360153888159623, z: 0.0 },
-//     },
-
-//     // Door *U27-A (rot=0°) – left jamb
-//     {
-//       entity_type: "LINE",
-//       handle: "dfl-u27a-1",
-//       layer: "0",
-//       start: { x: 13.1499370087851, y: 4.033685732015, z: 0.0 },
-//       end: { x: 13.1499370087851, y: 3.932085732015, z: 0.0 },
-//     },
-//     // Door *U27-A (rot=0°) – right jamb
-//     {
-//       entity_type: "LINE",
-//       handle: "dfl-u27a-2",
-//       layer: "0",
-//       start: { x: 12.5403370087851, y: 4.033685732015, z: 0.0 },
-//       end: { x: 12.5403370087851, y: 3.932085732015, z: 0.0 },
-//     },
-
-//     // Door *U27-B (rot=0°) – left jamb
-//     {
-//       entity_type: "LINE",
-//       handle: "dfl-u27b-1",
-//       layer: "0",
-//       start: { x: 1.77184402002289, y: 4.07048327746712, z: 0.0 },
-//       end: { x: 1.77184402002289, y: 3.96888327746712, z: 0.0 },
-//     },
-//     // Door *U27-B (rot=0°) – right jamb
-//     {
-//       entity_type: "LINE",
-//       handle: "dfl-u27b-2",
-//       layer: "0",
-//       start: { x: 1.16224402002289, y: 4.07048327746712, z: 0.0 },
-//       end: { x: 1.16224402002289, y: 3.96888327746712, z: 0.0 },
-//     },
-
-//     // Door *U27-C (rot=0°) – left jamb
-//     {
-//       entity_type: "LINE",
-//       handle: "dfl-u27c-1",
-//       layer: "0",
-//       start: { x: 5.27847380376647, y: 4.8967965649563, z: 0.0 },
-//       end: { x: 5.27847380376647, y: 4.7951965649563, z: 0.0 },
-//     },
-//     // Door *U27-C (rot=0°) – right jamb
-//     {
-//       entity_type: "LINE",
-//       handle: "dfl-u27c-2",
-//       layer: "0",
-//       start: { x: 4.66887380376647, y: 4.8967965649563, z: 0.0 },
-//       end: { x: 4.66887380376647, y: 4.7951965649563, z: 0.0 },
-//     },
-
-//     // Door *U27-D (rot=0°) – left jamb
-//     {
-//       entity_type: "LINE",
-//       handle: "dfl-u27d-1",
-//       layer: "0",
-//       start: { x: 8.551014477021, y: 4.0467965649563, z: 0.0 },
-//       end: { x: 8.551014477021, y: 3.9451965649563, z: 0.0 },
-//     },
-//     // Door *U27-D (rot=0°) – right jamb
-//     {
-//       entity_type: "LINE",
-//       handle: "dfl-u27d-2",
-//       layer: "0",
-//       start: { x: 7.941414477021, y: 4.0467965649563, z: 0.0 },
-//       end: { x: 7.941414477021, y: 3.9451965649563, z: 0.0 },
-//     },
-
-//     // Door *U40 (rot=270°) – left jamb
-//     {
-//       entity_type: "LINE",
-//       handle: "dfl-u40-1",
-//       layer: "0",
-//       start: { x: 11.5693336730504, y: -0.721320489705647, z: 0.0 },
-//       end: { x: 11.4169336730504, y: -0.721320489705647, z: 0.0 },
-//     },
-//     // Door *U40 (rot=270°) – right jamb
-//     {
-//       entity_type: "LINE",
-//       handle: "dfl-u40-2",
-//       layer: "0",
-//       start: { x: 11.5693336730504, y: -1.330920489705647, z: 0.0 },
-//       end: { x: 11.4169336730504, y: -1.330920489705647, z: 0.0 },
-//     },
-
-//     /* ── Window lines resolved from *U45 INSERT ────────────────────────────── */
-//     // Window *U45 – INSERT at (1.562330, 7.237460) scale=0.001 rot=0°
-//     // Left sill line
-//     {
-//       entity_type: "LINE",
-//       handle: "win-u45-1",
-//       layer: "0",
-//       start: { x: 1.56233022318554, y: 7.38745951649011, z: 0.0 },
-//       end: { x: 1.56233022318554, y: 7.23745951649011, z: 0.0 },
-//     },
-//     // Right sill line
-//     {
-//       entity_type: "LINE",
-//       handle: "win-u45-2",
-//       layer: "0",
-//       start: { x: 2.46233022318554, y: 7.38745951649011, z: 0.0 },
-//       end: { x: 2.46233022318554, y: 7.23745951649011, z: 0.0 },
-//     },
-//     // Middle sill line
-//     {
-//       entity_type: "LINE",
-//       handle: "win-u45-3",
-//       layer: "0",
-//       start: { x: 1.56233022318554, y: 7.31245951649011, z: 0.0 },
-//       end: { x: 2.46233022318554, y: 7.31245951649011, z: 0.0 },
-//     },
-//   ],
-//   arcs: [
-//     /* ── Doors – arcs resolved from INSERT+block geometry ──────────────────
-//      * Each arc is computed by applying the INSERT's (position, scale, rotation)
-//      * to the single visible ARC entity inside the referenced dynamic block.
-//      * Block units are inches; scale = 0.0254 → metres.
-//      * Angles are in degrees, CCW from positive X, matching AutoCAD convention.
-//      * ─────────────────────────────────────────────────────────────────────── */
-
-//     // Door *U19 – INSERT at (3.451, -0.750) rot=270°  → arc sweeps 180°→270°
-//     {
-//       entity_type: "ARC",
-//       handle: "arc-u19",
-//       layer: "0",
-//       center: { x: 3.451493532527252, y: -0.750353888159623, z: 0.0 },
-//       radius: 0.6096,
-//       start_angle: 180.0,
-//       end_angle: 270.0,
-//     },
-//     // Door *U27 – INSERT at (13.150, 4.034) rot=0°  → arc sweeps 90°→180°
-//     {
-//       entity_type: "ARC",
-//       handle: "arc-u27a",
-//       layer: "0",
-//       center: { x: 13.1499370087851, y: 4.033685732015, z: 0.0 },
-//       radius: 0.6096,
-//       start_angle: 90.0,
-//       end_angle: 180.0,
-//     },
-//     // Door *U27 – INSERT at (1.772, 4.070) rot=0°
-//     {
-//       entity_type: "ARC",
-//       handle: "arc-u27b",
-//       layer: "0",
-//       center: { x: 1.77184402002289, y: 4.07048327746712, z: 0.0 },
-//       radius: 0.6096,
-//       start_angle: 90.0,
-//       end_angle: 180.0,
-//     },
-//     // Door *U27 – INSERT at (5.278, 4.897) rot=0°
-//     {
-//       entity_type: "ARC",
-//       handle: "arc-u27c",
-//       layer: "0",
-//       center: { x: 5.27847380376647, y: 4.8967965649563, z: 0.0 },
-//       radius: 0.6096,
-//       start_angle: 90.0,
-//       end_angle: 180.0,
-//     },
-//     // Door *U27 – INSERT at (8.551, 4.047) rot=0°
-//     {
-//       entity_type: "ARC",
-//       handle: "arc-u27d",
-//       layer: "0",
-//       center: { x: 8.551014477021, y: 4.0467965649563, z: 0.0 },
-//       radius: 0.6096,
-//       start_angle: 90.0,
-//       end_angle: 180.0,
-//     },
-//     // Door *U40 – INSERT at (11.569, -0.721) rot=270°  → arc sweeps 270°→0°
-//     {
-//       entity_type: "ARC",
-//       handle: "arc-u40",
-//       layer: "0",
-//       center: { x: 11.5693336730504, y: -0.721320489705647, z: 0.0 },
-//       radius: 0.6096,
-//       start_angle: 270.0,
-//       end_angle: 0.0,
-//     },
-//   ],
-//   polylines: [],
-//   texts: [
-//     {
-//       entity_type: "MTEXT",
-//       handle: "286",
-//       layer: "0",
-//       text: "Kitchen\n3.0 X 3.35",
-//       position: {
-//         x: 1.229801813707155,
-//         y: 5.960516156780833,
-//         z: 0.0,
-//       },
-//       height: 0.2,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "287",
-//       layer: "0",
-//       text: "WC + Bath\n3.0m X 3.35",
-//       position: {
-//         x: 5.021054678442993,
-//         y: 6.052879579090877,
-//         z: 0.0,
-//       },
-//       height: 0.2,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "294",
-//       layer: "0",
-//       text: "Store\n3.7m X 3.35",
-//       position: {
-//         x: 7.591709183901571,
-//         y: 5.978988852146535,
-//         z: 0.0,
-//       },
-//       height: 0.2,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "2A4",
-//       layer: "0",
-//       text: "Store\n1.5m X 2.5",
-//       position: {
-//         x: 10.03290603215367,
-//         y: 6.520098392898682,
-//         z: 0.0,
-//       },
-//       height: 0.16,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "2AB",
-//       layer: "0",
-//       text: "BED Room\n4.5m X 3.35",
-//       position: {
-//         x: 12.75151177528369,
-//         y: 6.1691173445058,
-//         z: 0.0,
-//       },
-//       height: 0.2,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "2CE",
-//       layer: "0",
-//       text: "Room\n3.0m X 3.35",
-//       position: {
-//         x: 1.230241099470788,
-//         y: -0.6129244931801799,
-//         z: 0.0,
-//       },
-//       height: 0.2,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "2DB",
-//       layer: "0",
-//       text: "Drawing Dinning",
-//       position: {
-//         x: 6.115583552940847,
-//         y: 2.262510909754944,
-//         z: 0.0,
-//       },
-//       height: 0.2,
-//     },
-//     {
-//       entity_type: "MTEXT",
-//       handle: "2E2",
-//       layer: "0",
-//       text: "Room\n4.5m X 3.35",
-//       position: {
-//         x: 12.97510712638473,
-//         y: -0.8274489592508933,
-//         z: 0.0,
-//       },
-//       height: 0.2,
-//     },
-//   ],
-//    : [
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-bed-1",
-//       layer: "0",
-//       start: { x: 2.372132069842834, y: 3.479264313995376, z: 0 },
-//       end: { x: 2.372132069842834, y: 2.079264313995376, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-bed-2",
-//       layer: "0",
-//       start: { x: 2.372132069842834, y: 2.079264313995376, z: 0 },
-//       end: { x: 3.972132069842834, y: 2.079264313995376, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-bed-3",
-//       layer: "0",
-//       start: { x: 3.972132069842834, y: 2.079264313995376, z: 0 },
-//       end: { x: 3.972132069842834, y: 3.479264313995376, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-bed-4",
-//       layer: "0",
-//       start: { x: 3.972132069842834, y: 3.479264313995376, z: 0 },
-//       end: { x: 2.372132069842834, y: 3.479264313995376, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-bed-pillow-1",
-//       layer: "0",
-//       start: { x: 2.692132069842834, y: 3.479264313995376, z: 0 },
-//       end: { x: 2.692132069842834, y: 2.899264313995376, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-bed-pillow-2",
-//       layer: "0",
-//       start: { x: 3.652132069842834, y: 3.479264313995376, z: 0 },
-//       end: { x: 3.652132069842834, y: 2.899264313995376, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-chair-1",
-//       layer: "0",
-//       start: { x: 1.481668176941881, y: 2.363800714190402, z: 0 },
-//       end: { x: 1.481668176941881, y: 2.013800714190402, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-chair-2",
-//       layer: "0",
-//       start: { x: 1.481668176941881, y: 2.013800714190402, z: 0 },
-//       end: { x: 1.831668176941881, y: 2.013800714190402, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-chair-3",
-//       layer: "0",
-//       start: { x: 1.831668176941881, y: 2.013800714190402, z: 0 },
-//       end: { x: 1.831668176941881, y: 2.363800714190402, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-chair-back",
-//       layer: "0",
-//       start: { x: 1.656668176941881, y: 2.363800714190402, z: 0 },
-//       end: { x: 1.656668176941881, y: 2.413800714190402, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-copier-1",
-//       layer: "0",
-//       start: { x: 13.81459250254958, y: 2.278631800417986, z: 0 },
-//       end: { x: 13.81459250254958, y: 1.878631800417986, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-copier-2",
-//       layer: "0",
-//       start: { x: 13.81459250254958, y: 1.878631800417986, z: 0 },
-//       end: { x: 14.21459250254958, y: 1.878631800417986, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-copier-3",
-//       layer: "0",
-//       start: { x: 14.21459250254958, y: 1.878631800417986, z: 0 },
-//       end: { x: 14.21459250254958, y: 2.278631800417986, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-copier-4",
-//       layer: "0",
-//       start: { x: 14.21459250254958, y: 2.278631800417986, z: 0 },
-//       end: { x: 13.81459250254958, y: 2.278631800417986, z: 0 },
-//     },
-//     {
-//       entity_type: "LINE",
-//       handle: "furn-copier-detail",
-//       layer: "0",
-//       start: { x: 13.96459250254958, y: 2.128631800417986, z: 0 },
-//       end: { x: 14.06459250254958, y: 2.128631800417986, z: 0 },
-//     },
-//   ],
-// };
-
-export const DXF_JSON_DATA: DxfJsonDocument = {
-  source_file: "update-autocad-file-with-furniture (1).dxf",
+// ─── Raw compact data from dxf_converter_v5.py ──────────────────────────────
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const _VILLA_COMPACT: any = {
+  v: "7.1",
+  src: "Client-Floor-Plan-Villa-new-updated.dxf",
   meta: {
-    acad_version: "AC1032",
-    extmin: [-4.3460686332761, -2.745149250328729, 0.0],
-    extmax: [20.67626993391718, 7.387459516490105, 0.0],
+    acad: "R2018",
+    units: 6,
+    bbox: { min: [-5.42, 6.5], max: [60.31, 21.54] },
+    bbox_source: "header",
   },
-  stats: {
-    entity_counts: {
-      LINE: 40,
-      MTEXT: 8,
-      INSERT: 10,
-    },
-    polyline_count: 0,
-    line_count: 40,
-    arc_count: 0,
-    text_count: 8,
-    insert_count: 10,
-    door_insert_count: 6,
-    window_insert_count: 0,
-    furniture_insert_count: 3,
-    stair_insert_count: 0,
-    total_vertex_count: 0,
+  layers: [
+    "0:#FFFFFF:Continuous:1",
+    "Walls:#FFFFFF:Continuous:1",
+    "Furniture:#FFFFFF:Continuous:1",
+    "Doors:#FFFFFF:Continuous:1",
+    "Windows:#FFFFFF:Continuous:1",
+    "Text:#FFFFFF:Continuous:1",
+    "Stairs:#FFFFFF:Continuous:1",
+    "Line:#FFFFFF:Continuous:1",
+    "Trees:#2DE55B:Continuous:1",
+    "Defpoints:#FFFFFF:Continuous:1",
+  ],
+  data: {
+    LN: [
+      1, 16.89, 21.54, 16.89, 21.09, 1, 16.89, 6.54, 39.08, 6.54, 1, 16.89,
+      21.54, 42.89, 21.54, 1, 42.89, 21.54, 42.89, 10.84, 6, 16.89, 21.54,
+      16.89, 21.09, 6, 16.89, 19.74, 19.39, 19.74, 1, 19.39, 19.74, 23.99,
+      19.74, 1, 23.99, 19.74, 23.99, 14.74, 1, 23.99, 14.74, 22.28, 14.74, 1,
+      19.26, 14.7, 19.26, 16.1, 1, 19.26, 14.7, 20.02, 14.7, 1, 19.39, 19.74,
+      19.39, 19.02, 1, 23.99, 19.74, 27.89, 19.74, 1, 27.89, 19.74, 27.89,
+      19.74, 1, 27.89, 19.74, 27.89, 19.74, 1, 27.89, 19.74, 27.89, 19.74, 1,
+      29.3, 21.17, 29.3, 21.54, 1, 23.99, 19.74, 23.99, 18.14, 1, 23.99, 18.14,
+      24.85, 18.14, 1, 23.99, 19.74, 25.59, 19.74, 1, 25.59, 19.74, 25.59,
+      18.14, 1, 25.59, 18.14, 25.59, 18.14, 1, 25.59, 18.14, 27.89, 18.14, 1,
+      27.89, 18.14, 27.89, 18.14, 1, 29.37, 18.14, 29.37, 18.84, 1, 27.89,
+      21.54, 29.49, 21.54, 1, 31.09, 19.74, 31.09, 19.74, 1, 31.09, 19.74,
+      31.09, 19.74, 7, 31.1, 19.74, 42.89, 19.74, 6, 42.89, 21.54, 41.09, 21.54,
+      6, 41.09, 21.54, 41.09, 19.74, 6, 41.09, 21.54, 38.09, 21.54, 1, 41.09,
+      21.54, 38.09, 21.54, 1, 38.09, 21.54, 38.09, 21.08, 1, 38.1, 19.74, 38.1,
+      20.13, 1, 38.09, 21.54, 36.09, 21.54, 1, 36.09, 21.54, 36.09, 21.37, 1,
+      36.1, 19.74, 36.1, 20.42, 1, 29.37, 18.14, 29.37, 12.64, 1, 29.35, 12.64,
+      28.22, 12.64, 1, 29.37, 18.14, 27.07, 18.14, 1, 25.59, 18.14, 25.59,
+      14.02, 1, 25.59, 12.63, 25.59, 12.81, 1, 25.59, 12.63, 25.72, 12.63, 1,
+      25.59, 12.63, 19.25, 12.63, 1, 19.26, 14.7, 19.26, 14.7, 1, 19.26, 14.7,
+      19.26, 14.03, 1, 25.59, 19.74, 27.42, 19.74, 1, 26.94, 19.74, 26.94,
+      18.98, 1, 26.93, 18.31, 26.93, 18.14, 1, 27.89, 19.74, 29.35, 19.74, 1,
+      29.35, 19.74, 29.35, 20.13, 1, 31.1, 19.74, 31.1, 21.54, 7, 31.1, 21.54,
+      32.7, 21.54, 7, 32.7, 21.54, 32.7, 19.74, 1, 35.57, 19.74, 35.57, 15.24,
+      1, 35.57, 15.24, 35.21, 15.24, 1, 35.57, 15.24, 35.57, 14.98, 1, 31.09,
+      18.3, 33.86, 18.3, 1, 33.86, 18.3, 33.86, 15.22, 1, 33.86, 15.22, 31.04,
+      15.22, 1, 31.04, 15.22, 31.04, 17.22, 1, 42.89, 19.74, 42.89, 10.84, 1,
+      35.59, 13.73, 42.89, 13.73, 1, 42.89, 13.73, 39.09, 13.73, 1, 39.09,
+      13.73, 39.09, 12.23, 6, 39.09, 10.73, 42.89, 10.73, 1, 39.09, 11.24,
+      39.09, 10.24, 1, 39.08, 6.54, 39.08, 7.32, 7, 42.89, 10.84, 42.89, 6.5, 7,
+      42.89, 6.5, 39.08, 6.5, 1, 16.89, 6.54, 16.89, 6.54, 1, 20.25, 8.06,
+      20.25, 6.54, 1, 20.25, 8.06, 16.89, 8.06, 1, 29.37, 12.64, 29.37, 10.92,
+      6, 29.35, 9.53, 29.35, 6.54, 7, 20.25, 8.06, 29.35, 8.06, 0, 17.06, 7.63,
+      16.88, 7.63, 0, 17.06, 6.57, 16.88, 6.57, 0, 18.37, 10.05, 18.93, 10.05,
+      0, 18.54, 10.24, 18.91, 10.24, 0, 18.43, 10.05, 18.43, 10.09, 0, 18.44,
+      10.1, 18.54, 10.24, 0, 18.37, 9.56, 18.93, 9.56, 0, 18.54, 9.37, 18.91,
+      9.37, 0, 18.43, 9.56, 18.43, 9.52, 0, 18.44, 9.51, 18.54, 9.37, 0, 22.35,
+      9.54, 22.35, 10.07, 0, 21.03, 8.9, 20.65, 9.0, 0, 19.4, 10.61, 19.81,
+      10.55, 0, 21.03, 10.71, 20.65, 10.61, 0, 21.86, 9.06, 22.35, 9.06, 0,
+      18.15, 10.76, 18.15, 10.74, 0, 21.74, 10.76, 21.74, 10.74, 0, 18.15, 8.86,
+      18.15, 8.87, 0, 21.74, 8.86, 21.74, 8.87, 0, 17.62, 9.81, 18.93, 9.81, 0,
+      21.61, 9.06, 21.13, 9.06, 0, 21.13, 10.55, 21.61, 10.55, 0, 21.09, 8.82,
+      21.7, 8.82, 0, 21.06, 8.86, 21.06, 8.86, 0, 18.8, 8.82, 18.19, 8.82, 0,
+      18.83, 8.86, 18.83, 8.86, 0, 21.09, 10.79, 21.7, 10.79, 0, 21.06, 10.75,
+      21.06, 10.76, 0, 18.8, 10.79, 18.19, 10.79, 0, 18.83, 10.76, 18.83, 10.76,
+      0, 21.8, 10.48, 21.8, 9.14, 0, 22.35, 10.55, 21.86, 10.55, 0, 19.85,
+      10.62, 19.52, 10.72, 0, 19.31, 9.54, 19.31, 10.07, 0, 19.81, 9.06, 19.4,
+      9.01, 0, 19.72, 10.02, 19.72, 9.59, 0, 22.4, 8.97, 22.4, 10.64, 0, 19.85,
+      9.0, 19.52, 8.89, 0, 22.35, 8.96, 22.35, 10.66, 0, 19.11, 9.53, 19.11,
+      10.08, 0, 17.62, 9.8, 17.7, 9.65, 0, 17.7, 9.96, 17.62, 9.82, 1, 16.89,
+      8.81, 16.89, 8.06, 1, 16.89, 12.45, 16.89, 11.87, 0, 19.42, 14.41, 19.19,
+      14.41, 0, 19.42, 13.48, 19.19, 13.48, 0, 19.42, 12.62, 19.19, 12.62, 0,
+      19.42, 13.55, 19.19, 13.55, 0, 17.12, 14.23, 16.89, 14.23, 0, 17.12,
+      13.31, 16.89, 13.31, 0, 17.12, 12.45, 16.89, 12.45, 0, 17.12, 13.37,
+      16.89, 13.37, 1, 16.89, 19.74, 16.89, 14.09, 0, 17.12, 21.13, 16.89,
+      21.13, 0, 17.12, 19.74, 16.89, 19.74, 0, 29.54, 21.14, 29.31, 21.14, 0,
+      29.54, 20.22, 29.31, 20.22, 0, 26.83, 18.96, 26.98, 18.96, 0, 26.83,
+      18.34, 26.98, 18.34, 0, 25.54, 18.28, 25.54, 18.12, 0, 24.88, 18.28,
+      24.88, 18.12, 0, 29.58, 10.92, 29.35, 10.92, 0, 29.58, 9.53, 29.35, 9.53,
+      0, 35.77, 13.79, 35.59, 13.79, 0, 35.77, 14.89, 35.59, 14.89, 0, 34.34,
+      15.4, 34.34, 15.2, 0, 35.14, 15.4, 35.14, 15.2, 1, 33.86, 15.22, 34.31,
+      15.22, 0, 35.95, 21.23, 36.1, 21.23, 0, 35.95, 20.61, 36.1, 20.61, 0,
+      37.91, 20.89, 38.07, 20.89, 0, 37.91, 20.27, 38.07, 20.27, 7, 19.39,
+      19.02, 19.39, 15.87, 7, 39.09, 10.24, 39.08, 6.93, 1, 24.59, 16.06, 23.99,
+      16.06, 0, 27.8, 15.06, 27.8, 16.89, 0, 28.05, 15.82, 28.05, 15.42, 0,
+      28.05, 15.82, 28.02, 15.83, 0, 28.02, 15.41, 28.02, 15.83, 0, 28.01,
+      15.83, 28.01, 15.41, 0, 28.02, 15.41, 28.05, 15.42, 0, 28.01, 15.83, 27.8,
+      15.86, 0, 27.8, 15.38, 28.01, 15.41, 0, 28.05, 16.54, 28.05, 16.13, 0,
+      28.02, 16.12, 28.02, 16.54, 0, 28.01, 16.54, 28.01, 16.12, 0, 28.01,
+      16.54, 27.8, 16.57, 0, 28.05, 16.54, 28.02, 16.54, 0, 27.8, 16.09, 28.01,
+      16.12, 0, 28.02, 16.12, 28.05, 16.13, 0, 26.89, 16.89, 26.89, 15.06, 0,
+      26.89, 15.06, 27.8, 15.06, 0, 26.65, 16.54, 26.65, 16.13, 0, 26.65, 16.54,
+      26.67, 16.54, 0, 26.67, 16.12, 26.67, 16.54, 0, 26.69, 16.54, 26.69,
+      16.12, 0, 26.67, 16.12, 26.65, 16.13, 0, 26.89, 16.09, 26.69, 16.12, 0,
+      26.69, 16.54, 26.89, 16.57, 0, 26.65, 15.82, 26.65, 15.42, 0, 26.65,
+      15.82, 26.67, 15.83, 0, 26.67, 15.41, 26.67, 15.83, 0, 26.69, 15.83,
+      26.69, 15.41, 0, 26.67, 15.41, 26.65, 15.42, 0, 26.89, 15.38, 26.69,
+      15.41, 0, 26.69, 15.83, 26.89, 15.86, 0, 27.8, 16.89, 26.89, 16.89, 0,
+      27.55, 17.13, 27.14, 17.13, 0, 27.14, 17.11, 27.55, 17.11, 0, 27.14,
+      17.11, 27.14, 17.13, 0, 27.55, 17.13, 27.55, 17.11, 0, 27.56, 17.09,
+      27.14, 17.09, 0, 27.11, 16.89, 27.14, 17.09, 0, 27.56, 17.09, 27.59,
+      16.89, 0, 27.55, 14.82, 27.14, 14.82, 0, 27.55, 14.82, 27.55, 14.85, 0,
+      27.14, 14.85, 27.55, 14.85, 0, 27.56, 14.86, 27.14, 14.86, 0, 27.14,
+      14.85, 27.14, 14.82, 0, 27.56, 14.86, 27.59, 15.06, 0, 27.11, 15.06,
+      27.14, 14.86, 0, 20.62, 17.61, 19.96, 17.61, 0, 20.66, 18.22, 20.08,
+      18.22, 0, 20.62, 17.0, 19.96, 17.0, 0, 20.66, 16.39, 20.08, 16.39, 0,
+      20.62, 16.39, 20.62, 18.22, 0, 20.13, 16.39, 20.13, 18.22, 0, 20.0, 15.53,
+      19.93, 15.54, 0, 20.0, 15.31, 19.93, 15.3, 0, 20.0, 15.3, 19.93, 15.29, 0,
+      19.93, 15.45, 20.0, 15.45, 0, 20.0, 15.39, 19.93, 15.39, 0, 19.93, 15.37,
+      20.0, 15.37, 0, 20.01, 15.62, 20.0, 15.62, 0, 20.36, 15.69, 20.34, 15.68,
+      0, 20.35, 15.16, 20.38, 15.15, 0, 20.01, 15.2, 20.02, 15.2, 0, 20.0,
+      15.25, 19.94, 15.23, 0, 20.0, 15.51, 19.93, 15.52, 0, 20.0, 15.44, 19.93,
+      15.44, 0, 20.0, 15.58, 19.93, 15.59, 0, 19.93, 15.61, 19.86, 15.66, 0,
+      19.94, 15.21, 19.87, 15.16, 0, 19.93, 15.6, 20.0, 15.59, 0, 19.94, 15.22,
+      20.0, 15.24, 0, 20.49, 15.63, 20.39, 15.61, 0, 20.49, 15.66, 20.49, 15.63,
+      0, 20.39, 15.65, 20.49, 15.66, 0, 20.5, 15.22, 20.4, 15.23, 0, 20.5,
+      15.18, 20.5, 15.22, 0, 20.4, 15.19, 20.5, 15.18, 0, 20.01, 15.59, 20.01,
+      15.64, 0, 20.29, 15.65, 20.01, 15.59, 0, 20.01, 15.64, 20.29, 15.72, 0,
+      20.02, 15.24, 20.02, 15.18, 0, 20.3, 15.19, 20.02, 15.24, 0, 20.02, 15.18,
+      20.3, 15.11, 0, 20.39, 15.42, 20.4, 15.18, 0, 20.39, 15.42, 20.39, 15.66,
+      0, 20.01, 15.2, 20.0, 15.62, 0, 22.67, 17.07, 23.33, 17.08, 0, 22.64,
+      16.46, 23.21, 16.47, 0, 22.66, 17.68, 23.32, 17.69, 0, 22.61, 18.29,
+      23.19, 18.3, 0, 22.65, 18.29, 22.68, 16.46, 0, 23.14, 18.3, 23.16, 16.47,
+      0, -4.93, 19.37, -4.86, 19.35, 0, -4.93, 19.58, -4.85, 19.59, 0, -4.93,
+      19.59, -4.86, 19.61, 0, -4.85, 19.44, -4.93, 19.44, 0, -4.93, 19.51,
+      -4.85, 19.51, 0, -4.85, 19.52, -4.93, 19.52, 0, -4.94, 19.27, -4.93,
+      19.27, 0, -5.3, 19.21, -5.27, 19.22, 0, -5.27, 19.74, -5.3, 19.75, 0,
+      -4.93, 19.69, -4.94, 19.69, 0, -4.93, 19.64, -4.86, 19.66, 0, -4.93,
+      19.38, -4.86, 19.37, 0, -4.93, 19.45, -4.85, 19.45, 0, -4.93, 19.31,
+      -4.86, 19.3, 0, -4.86, 19.28, -4.79, 19.23, 0, -4.86, 19.68, -4.79, 19.73,
+      0, -4.86, 19.29, -4.93, 19.3, 0, -4.86, 19.67, -4.93, 19.66, 0, -5.42,
+      19.28, -5.32, 19.29, 0, -5.42, 19.24, -5.42, 19.28, 0, -5.32, 19.25,
+      -5.42, 19.24, 0, -5.42, 19.68, -5.32, 19.67, 0, -5.42, 19.72, -5.42,
+      19.68, 0, -5.32, 19.71, -5.42, 19.72, 0, -4.94, 19.3, -4.94, 19.25, 0,
+      -5.22, 19.25, -4.94, 19.3, 0, -4.94, 19.25, -5.22, 19.17, 0, -4.94, 19.66,
+      -4.94, 19.71, 0, -5.22, 19.71, -4.94, 19.66, 0, -4.94, 19.71, -5.22,
+      19.78, 0, -5.32, 19.48, -5.32, 19.72, 0, -5.32, 19.48, -5.32, 19.24, 0,
+      -4.93, 19.69, -4.93, 19.27, 0, 23.26, 15.41, 23.33, 15.4, 0, 23.25, 15.63,
+      23.32, 15.64, 0, 23.25, 15.64, 23.32, 15.66, 0, 23.33, 15.49, 23.25,
+      15.49, 0, 23.25, 15.55, 23.32, 15.56, 0, 23.32, 15.57, 23.25, 15.57, 0,
+      23.25, 15.32, 23.26, 15.32, 0, 22.9, 15.24, 22.92, 15.25, 0, 22.89, 15.77,
+      22.87, 15.78, 0, 23.24, 15.74, 23.23, 15.74, 0, 23.24, 15.69, 23.31,
+      15.71, 0, 23.26, 15.43, 23.33, 15.42, 0, 23.25, 15.5, 23.33, 15.51, 0,
+      23.26, 15.36, 23.33, 15.35, 0, 23.32, 15.33, 23.4, 15.28, 0, 23.3, 15.73,
+      23.38, 15.79, 0, 23.32, 15.34, 23.26, 15.35, 0, 23.31, 15.72, 23.24, 15.7,
+      0, 22.77, 15.3, 22.87, 15.32, 0, 22.77, 15.26, 22.77, 15.3, 0, 22.87,
+      15.28, 22.77, 15.26, 0, 22.75, 15.71, 22.85, 15.7, 0, 22.74, 15.74, 22.75,
+      15.71, 0, 22.85, 15.74, 22.74, 15.74, 0, 23.25, 15.35, 23.25, 15.3, 0,
+      22.97, 15.28, 23.25, 15.35, 0, 23.25, 15.3, 22.97, 15.21, 0, 23.23, 15.7,
+      23.23, 15.75, 0, 22.95, 15.74, 23.23, 15.7, 0, 23.23, 15.75, 22.94, 15.82,
+      0, 22.86, 15.51, 22.85, 15.75, 0, 22.86, 15.51, 22.87, 15.27, 0, 23.24,
+      15.74, 23.26, 15.32, 0, 21.22, 16.83, 21.19, 16.83, 0, 21.19, 16.94,
+      21.22, 16.94, 0, 21.19, 16.83, 21.19, 16.94, 0, 21.91, 16.59, 21.3, 16.58,
+      0, 21.18, 17.75, 21.21, 17.75, 0, 21.21, 17.85, 21.18, 17.85, 0, 21.18,
+      17.85, 21.18, 17.75, 0, 21.28, 18.11, 21.89, 18.11, 0, 21.97, 18.04,
+      21.98, 16.67, 0, 21.22, 16.66, 21.21, 18.03, 0, 34.98, 8.39, 34.98, 8.36,
+      0, 34.88, 8.36, 34.88, 8.39, 0, 34.98, 8.36, 34.88, 8.36, 0, 35.24, 9.07,
+      35.24, 8.46, 0, 34.07, 8.36, 34.07, 8.38, 0, 33.97, 8.38, 33.97, 8.36, 0,
+      33.97, 8.36, 34.07, 8.36, 0, 33.71, 8.46, 33.71, 9.07, 0, 33.79, 9.15,
+      35.16, 9.15, 0, 35.16, 8.39, 33.79, 8.38, 0, 39.28, 12.12, 39.13, 12.12,
+      0, 39.28, 11.24, 39.13, 11.24, 0, 36.5, 8.18, 37.16, 8.18, 0, 36.46, 7.57,
+      37.03, 7.57, 0, 36.5, 8.79, 37.16, 8.79, 0, 36.46, 9.4, 37.03, 9.4, 0,
+      36.5, 9.4, 36.5, 7.57, 0, 36.98, 9.4, 36.98, 7.57, 0, 34.32, 7.6, 34.32,
+      6.94, 0, 33.71, 7.63, 33.71, 7.06, 0, 34.93, 7.6, 34.93, 6.95, 0, 35.54,
+      7.65, 35.54, 7.08, 0, 35.54, 7.61, 33.71, 7.59, 0, 35.54, 7.12, 33.71,
+      7.11, 0, 32.46, 8.78, 31.81, 8.78, 0, 32.5, 9.39, 31.93, 9.39, 0, 32.46,
+      8.17, 31.81, 8.17, 0, 32.5, 7.56, 31.93, 7.56, 0, 32.46, 7.56, 32.46,
+      9.39, 0, 31.98, 7.56, 31.98, 9.39, 0, 40.82, 11.62, 40.8, 11.62, 0, 40.8,
+      11.7, 40.82, 11.7, 0, 40.8, 11.62, 40.8, 11.7, 0, 41.4, 11.41, 40.88,
+      11.4, 0, 40.79, 12.39, 40.81, 12.39, 0, 40.81, 12.47, 40.79, 12.47, 0,
+      40.79, 12.47, 40.79, 12.39, 0, 40.88, 12.69, 41.39, 12.69, 0, 41.45,
+      12.62, 41.46, 11.47, 0, 40.82, 11.47, 40.81, 12.62, 0, 42.1, 11.86, 42.18,
+      11.85, 0, 42.09, 12.07, 42.16, 12.09, 0, 42.09, 12.08, 42.16, 12.1, 0,
+      42.17, 11.94, 42.1, 11.93, 0, 42.1, 12.0, 42.17, 12.0, 0, 42.17, 12.01,
+      42.1, 12.01, 0, 42.1, 11.76, 42.11, 11.76, 0, 41.74, 11.69, 41.77, 11.69,
+      0, 41.74, 12.22, 41.72, 12.22, 0, 42.09, 12.18, 42.08, 12.18, 0, 42.09,
+      12.14, 42.15, 12.15, 0, 42.1, 11.87, 42.17, 11.86, 0, 42.1, 11.95, 42.17,
+      11.95, 0, 42.11, 11.81, 42.17, 11.8, 0, 42.17, 11.77, 42.25, 11.72, 0,
+      42.15, 12.18, 42.23, 12.23, 0, 42.17, 11.78, 42.11, 11.79, 0, 42.15,
+      12.16, 42.09, 12.15, 0, 41.61, 11.74, 41.71, 11.76, 0, 41.62, 11.71,
+      41.61, 11.74, 0, 41.72, 11.72, 41.62, 11.71, 0, 41.59, 12.15, 41.7, 12.14,
+      0, 41.59, 12.19, 41.59, 12.15, 0, 41.69, 12.18, 41.59, 12.19, 0, 42.09,
+      11.79, 42.1, 11.74, 0, 41.82, 11.73, 42.09, 11.79, 0, 42.1, 11.74, 41.82,
+      11.65, 0, 42.08, 12.15, 42.07, 12.2, 0, 41.8, 12.18, 42.08, 12.15, 0,
+      42.07, 12.2, 41.79, 12.26, 0, 41.7, 11.95, 41.69, 12.19, 0, 41.7, 11.95,
+      41.72, 11.71, 0, 42.09, 12.18, 42.11, 11.76, 0, 59.67, 8.06, 59.64, 8.06,
+      0, 59.64, 8.15, 59.66, 8.15, 0, 59.64, 8.06, 59.64, 8.15, 0, 60.24, 7.85,
+      59.73, 7.85, 0, 59.64, 8.83, 59.66, 8.83, 0, 59.66, 8.91, 59.64, 8.91, 0,
+      59.64, 8.91, 59.64, 8.83, 0, 59.72, 9.13, 60.24, 9.13, 0, 60.3, 9.07,
+      60.31, 7.91, 0, 59.67, 7.91, 59.66, 9.06, 0, 37.45, 18.08, 37.45, 16.88,
+      0, 36.52, 16.88, 36.52, 18.08, 0, 36.32, 18.08, 36.32, 16.88, 7, 25.59,
+      14.02, 25.59, 12.63, 7, 19.39, 19.38, 16.89, 19.38, 7, 19.39, 19.08,
+      16.89, 19.08, 7, 19.39, 18.78, 16.89, 18.78, 7, 19.39, 18.48, 16.89,
+      18.48, 7, 19.4, 18.18, 16.9, 18.18, 7, 19.4, 17.88, 16.9, 17.88, 7, 19.4,
+      17.58, 16.9, 17.58, 7, 19.4, 17.28, 16.9, 17.28, 7, 19.4, 16.98, 16.9,
+      16.98, 0, 41.07, 8.62, 41.32, 9.13, 0, 41.02, 8.87, 41.31, 9.41, 0, 40.96,
+      9.15, 41.36, 9.64, 0, 40.95, 9.36, 41.21, 9.67, 0, 41.16, 8.37, 41.06,
+      7.94, 0, 40.38, 8.54, 39.88, 8.3, 0, 40.55, 8.53, 40.13, 8.24, 0, 40.69,
+      8.5, 40.33, 8.21, 0, 40.93, 8.48, 40.55, 8.24, 0, 40.52, 7.95, 40.14,
+      7.31, 0, 40.65, 8.07, 40.01, 7.97, 0, 40.48, 7.9, 40.02, 7.89, 0, 40.38,
+      7.71, 40.01, 7.65, 0, 40.41, 7.78, 40.07, 7.79, 0, 40.71, 8.13, 40.33,
+      8.13, 0, 40.31, 7.58, 40.02, 7.55, 0, 40.22, 7.44, 40.05, 7.37, 0, 40.27,
+      7.51, 40.28, 7.32, 0, 40.46, 7.84, 40.51, 7.3, 0, 40.57, 7.98, 40.64,
+      7.32, 0, 40.66, 8.07, 40.77, 7.43, 0, 40.75, 8.16, 40.87, 7.62, 0, 40.36,
+      7.67, 40.38, 7.33, 0, 41.09, 8.45, 40.52, 7.95, 0, 40.93, 8.3, 40.59, 8.2,
+      0, 40.85, 8.23, 40.94, 7.85, 0, 40.97, 8.36, 41.0, 8.08, 0, 41.09, 8.45,
+      40.29, 8.56, 0, 40.73, 8.5, 40.31, 9.09, 0, 40.19, 9.16, 40.48, 8.55, 0,
+      40.29, 8.56, 39.76, 9.1, 0, 40.12, 9.12, 40.21, 8.64, 0, 39.99, 9.18,
+      40.02, 8.84, 0, 39.86, 8.99, 39.84, 9.19, 0, 39.89, 8.95, 39.68, 8.92, 0,
+      40.06, 8.8, 39.69, 8.73, 0, 40.25, 8.61, 39.77, 8.59, 0, 41.09, 8.45,
+      40.83, 9.9, 0, 40.96, 9.16, 40.47, 9.48, 0, 41.0, 8.94, 40.39, 9.35, 0,
+      40.48, 9.06, 41.02, 8.8, 0, 40.57, 8.8, 41.07, 8.57, 0, 40.9, 9.55, 41.03,
+      9.71, 0, 40.86, 9.76, 40.93, 9.87, 0, 40.84, 9.81, 40.76, 9.87, 0, 40.87,
+      9.65, 40.66, 9.79, 0, 40.91, 9.46, 40.54, 9.64, 0, 41.26, 8.49, 41.76,
+      8.23, 0, 41.38, 8.54, 41.88, 8.3, 0, 41.55, 8.6, 41.99, 8.36, 0, 41.51,
+      7.95, 42.01, 7.87, 0, 41.58, 7.81, 42.08, 7.61, 0, 41.56, 7.88, 42.12,
+      7.71, 0, 41.64, 7.62, 42.09, 7.42, 0, 41.67, 7.48, 41.97, 7.31, 0, 41.72,
+      7.35, 41.88, 7.24, 0, 41.41, 8.07, 42.03, 7.97, 0, 41.29, 8.22, 41.91,
+      8.08, 0, 41.55, 7.88, 41.78, 7.12, 0, 41.32, 8.16, 41.19, 7.54, 0, 41.45,
+      8.02, 41.26, 7.43, 0, 41.55, 7.88, 41.31, 7.29, 0, 41.72, 7.29, 41.68,
+      7.16, 0, 41.67, 7.49, 41.59, 7.22, 0, 41.61, 7.68, 41.5, 7.31, 0, 41.77,
+      7.18, 41.81, 7.16, 0, 41.09, 8.45, 41.55, 7.88, 0, 41.22, 8.29, 41.15,
+      7.79, 0, 41.14, 8.38, 41.71, 8.21, 0, 41.78, 8.68, 42.31, 9.36, 0, 41.78,
+      8.68, 41.88, 9.36, 0, 41.85, 8.76, 42.32, 8.61, 0, 41.71, 8.64, 42.28,
+      8.49, 0, 41.51, 8.6, 41.68, 9.25, 0, 41.65, 8.63, 41.79, 9.27, 0, 41.09,
+      8.45, 41.78, 8.68, 0, 41.19, 8.49, 41.38, 9.07, 0, 41.35, 8.54, 41.54,
+      9.12, 0, 41.9, 9.23, 41.92, 8.87, 0, 41.99, 9.28, 42.04, 9.02, 0, 42.08,
+      9.32, 42.16, 9.18, 0, 42.21, 9.21, 42.39, 9.23, 0, 42.12, 9.1, 42.34,
+      9.08, 0, 42.01, 8.95, 42.32, 8.9, 0, 41.94, 8.87, 42.34, 8.73, 0, 42.22,
+      9.38, 42.24, 9.28, 0, 22.2, 7.45, 22.32, 7.69, 0, 22.17, 7.57, 22.32,
+      7.83, 0, 22.15, 7.7, 22.34, 7.94, 0, 22.14, 7.81, 22.27, 7.95, 0, 22.24,
+      7.33, 22.19, 7.12, 0, 21.86, 7.41, 21.62, 7.29, 0, 21.95, 7.4, 21.74,
+      7.27, 0, 22.01, 7.39, 21.84, 7.25, 0, 22.13, 7.38, 21.95, 7.27, 0, 21.93,
+      7.13, 21.75, 6.81, 0, 22.0, 7.18, 21.69, 7.13, 0, 21.91, 7.1, 21.69, 7.1,
+      0, 21.86, 7.01, 21.69, 6.98, 0, 21.88, 7.04, 21.72, 7.05, 0, 22.02, 7.21,
+      21.84, 7.21, 0, 21.83, 6.95, 21.69, 6.93, 0, 21.79, 6.88, 21.71, 6.84, 0,
+      21.81, 6.91, 21.82, 6.82, 0, 21.9, 7.07, 21.93, 6.81, 0, 21.96, 7.14,
+      21.99, 6.82, 0, 22.0, 7.18, 22.05, 6.87, 0, 22.05, 7.23, 22.1, 6.96, 0,
+      21.85, 6.99, 21.87, 6.83, 0, 22.21, 7.37, 21.93, 7.13, 0, 22.13, 7.29,
+      21.97, 7.24, 0, 22.09, 7.26, 22.13, 7.08, 0, 22.15, 7.32, 22.17, 7.19, 0,
+      22.21, 7.37, 21.82, 7.42, 0, 22.03, 7.39, 21.83, 7.67, 0, 21.77, 7.71,
+      21.91, 7.41, 0, 21.82, 7.42, 21.57, 7.68, 0, 21.74, 7.69, 21.78, 7.46, 0,
+      21.68, 7.71, 21.69, 7.56, 0, 21.62, 7.62, 21.61, 7.72, 0, 21.63, 7.61,
+      21.53, 7.59, 0, 21.71, 7.53, 21.54, 7.5, 0, 21.8, 7.44, 21.57, 7.43, 0,
+      22.21, 7.37, 22.08, 8.06, 0, 22.15, 7.71, 21.91, 7.86, 0, 22.17, 7.6,
+      21.87, 7.8, 0, 21.91, 7.66, 22.17, 7.53, 0, 21.96, 7.53, 22.2, 7.42, 0,
+      22.12, 7.9, 22.18, 7.97, 0, 22.1, 8.0, 22.13, 8.05, 0, 22.09, 8.02, 22.05,
+      8.05, 0, 22.1, 7.94, 22.0, 8.01, 0, 22.12, 7.85, 21.94, 7.94, 0, 22.29,
+      7.38, 22.53, 7.26, 0, 22.35, 7.41, 22.59, 7.29, 0, 22.43, 7.44, 22.64,
+      7.32, 0, 22.41, 7.12, 22.65, 7.08, 0, 22.44, 7.06, 22.68, 6.96, 0, 22.44,
+      7.09, 22.71, 7.01, 0, 22.47, 6.96, 22.69, 6.87, 0, 22.49, 6.9, 22.63,
+      6.82, 0, 22.51, 6.83, 22.59, 6.78, 0, 22.36, 7.18, 22.66, 7.13, 0, 22.3,
+      7.25, 22.6, 7.19, 0, 22.43, 7.09, 22.54, 6.72, 0, 22.32, 7.23, 22.25,
+      6.92, 0, 22.38, 7.16, 22.29, 6.87, 0, 22.43, 7.09, 22.31, 6.81, 0, 22.51,
+      6.81, 22.49, 6.74, 0, 22.49, 6.9, 22.45, 6.77, 0, 22.46, 6.99, 22.4, 6.82,
+      0, 22.54, 6.75, 22.56, 6.74, 0, 22.21, 7.37, 22.43, 7.09, 0, 22.27, 7.29,
+      22.24, 7.05, 0, 22.23, 7.33, 22.51, 7.25, 0, 22.54, 7.48, 22.8, 7.81, 0,
+      22.54, 7.48, 22.59, 7.81, 0, 22.57, 7.52, 22.8, 7.44, 0, 22.51, 7.46,
+      22.78, 7.38, 0, 22.41, 7.44, 22.49, 7.75, 0, 22.48, 7.45, 22.55, 7.76, 0,
+      22.21, 7.37, 22.54, 7.48, 0, 22.26, 7.38, 22.35, 7.66, 0, 22.33, 7.41,
+      22.43, 7.69, 0, 22.6, 7.74, 22.61, 7.57, 0, 22.64, 7.77, 22.67, 7.64, 0,
+      22.68, 7.78, 22.72, 7.71, 0, 22.75, 7.73, 22.83, 7.74, 0, 22.71, 7.68,
+      22.81, 7.67, 0, 22.65, 7.61, 22.8, 7.58, 0, 22.62, 7.57, 22.81, 7.5, 0,
+      22.75, 7.81, 22.76, 7.77, 0, 26.31, 7.32, 26.43, 7.56, 0, 26.29, 7.44,
+      26.43, 7.7, 0, 26.26, 7.58, 26.45, 7.81, 0, 26.25, 7.68, 26.38, 7.83, 0,
+      26.35, 7.2, 26.31, 6.99, 0, 25.98, 7.28, 25.74, 7.17, 0, 26.06, 7.28,
+      25.86, 7.14, 0, 26.13, 7.26, 25.96, 7.12, 0, 26.24, 7.25, 26.06, 7.14, 0,
+      26.05, 7.0, 25.87, 6.69, 0, 26.11, 7.05, 25.8, 7.01, 0, 26.03, 6.97, 25.8,
+      6.97, 0, 25.98, 6.88, 25.8, 6.85, 0, 26.0, 6.92, 25.83, 6.92, 0, 26.14,
+      7.08, 25.96, 7.08, 0, 25.95, 6.82, 25.8, 6.8, 0, 25.9, 6.75, 25.82, 6.72,
+      0, 25.92, 6.79, 25.93, 6.7, 0, 26.02, 6.95, 26.04, 6.68, 0, 26.07, 7.01,
+      26.11, 6.7, 0, 26.12, 7.05, 26.17, 6.75, 0, 26.16, 7.1, 26.22, 6.84, 0,
+      25.97, 6.86, 25.98, 6.7, 0, 26.32, 7.24, 26.05, 7.0, 0, 26.24, 7.17,
+      26.08, 7.12, 0, 26.21, 7.13, 26.25, 6.95, 0, 26.27, 7.2, 26.28, 7.06, 0,
+      26.32, 7.24, 25.94, 7.29, 0, 26.15, 7.26, 25.95, 7.55, 0, 25.89, 7.58,
+      26.03, 7.29, 0, 25.94, 7.29, 25.68, 7.55, 0, 25.85, 7.56, 25.9, 7.33, 0,
+      25.79, 7.59, 25.8, 7.43, 0, 25.73, 7.5, 25.72, 7.59, 0, 25.74, 7.48,
+      25.64, 7.46, 0, 25.83, 7.41, 25.65, 7.37, 0, 25.92, 7.31, 25.69, 7.3, 0,
+      26.32, 7.24, 26.2, 7.94, 0, 26.26, 7.58, 26.02, 7.74, 0, 26.28, 7.47,
+      25.99, 7.67, 0, 26.03, 7.53, 26.29, 7.41, 0, 26.07, 7.41, 26.31, 7.3, 0,
+      26.23, 7.77, 26.29, 7.84, 0, 26.21, 7.87, 26.24, 7.92, 0, 26.2, 7.89,
+      26.16, 7.92, 0, 26.22, 7.82, 26.12, 7.88, 0, 26.24, 7.72, 26.06, 7.81, 0,
+      26.4, 7.26, 26.64, 7.13, 0, 26.46, 7.28, 26.7, 7.17, 0, 26.55, 7.31,
+      26.75, 7.2, 0, 26.52, 7.0, 26.77, 6.96, 0, 26.56, 6.93, 26.8, 6.83, 0,
+      26.55, 6.96, 26.82, 6.88, 0, 26.59, 6.84, 26.8, 6.74, 0, 26.6, 6.77,
+      26.74, 6.69, 0, 26.63, 6.71, 26.7, 6.66, 0, 26.47, 7.05, 26.78, 7.01, 0,
+      26.42, 7.13, 26.72, 7.06, 0, 26.54, 6.96, 26.65, 6.6, 0, 26.43, 7.1,
+      26.37, 6.8, 0, 26.5, 7.03, 26.4, 6.75, 0, 26.55, 6.96, 26.43, 6.68, 0,
+      26.63, 6.68, 26.61, 6.62, 0, 26.6, 6.77, 26.56, 6.64, 0, 26.57, 6.87,
+      26.52, 6.69, 0, 26.65, 6.63, 26.67, 6.62, 0, 26.32, 7.24, 26.54, 6.96, 0,
+      26.39, 7.16, 26.35, 6.92, 0, 26.35, 7.21, 26.62, 7.12, 0, 26.65, 7.35,
+      26.91, 7.68, 0, 26.66, 7.35, 26.71, 7.68, 0, 26.69, 7.39, 26.91, 7.31, 0,
+      26.62, 7.33, 26.9, 7.26, 0, 26.52, 7.31, 26.61, 7.62, 0, 26.59, 7.33,
+      26.66, 7.63, 0, 26.32, 7.24, 26.65, 7.35, 0, 26.37, 7.26, 26.46, 7.54, 0,
+      26.45, 7.28, 26.54, 7.56, 0, 26.71, 7.62, 26.72, 7.44, 0, 26.75, 7.64,
+      26.78, 7.51, 0, 26.8, 7.66, 26.84, 7.59, 0, 26.86, 7.6, 26.95, 7.62, 0,
+      26.82, 7.55, 26.92, 7.54, 0, 26.77, 7.48, 26.91, 7.46, 0, 26.73, 7.44,
+      26.92, 7.37, 0, 26.86, 7.68, 26.88, 7.64, 7, 20.17, 8.06, 20.17, 6.54, 7,
+      20.03, 8.06, 20.03, 6.54, 7, 19.9, 8.06, 19.9, 6.54, 7, 19.76, 8.06,
+      19.76, 6.54, 7, 19.63, 8.06, 19.63, 6.54, 7, 19.5, 8.06, 19.5, 6.54, 7,
+      19.36, 8.06, 19.36, 6.54, 7, 19.23, 8.06, 19.23, 6.54, 7, 19.09, 8.06,
+      19.09, 6.54, 7, 18.96, 8.06, 18.96, 6.54, 7, 19.09, 8.06, 19.09, 6.54, 7,
+      18.83, 8.06, 18.83, 6.54, 7, 18.69, 8.06, 18.69, 6.54, 7, 18.83, 8.06,
+      18.83, 6.54, 7, 18.83, 8.06, 18.83, 6.54, 7, 18.83, 8.06, 18.83, 6.54, 1,
+      16.89, 8.06, 16.89, 7.66, 7, 31.1, 19.74, 31.09, 18.3, 7, 56.1, 19.59,
+      56.09, 18.15, 7, 31.35, 19.74, 31.34, 18.3, 7, 31.6, 19.74, 31.59, 18.3,
+      7, 31.85, 19.74, 31.84, 18.3, 7, 31.6, 19.74, 31.59, 18.3, 7, 32.1, 19.73,
+      32.09, 18.3, 7, 32.35, 19.73, 32.34, 18.3, 7, 32.1, 19.73, 32.09, 18.3, 7,
+      32.6, 19.73, 32.59, 18.29, 7, 32.85, 19.73, 32.84, 18.29, 0, 32.95, 17.36,
+      32.81, 17.36, 0, 32.95, 17.75, 32.95, 17.36, 0, 32.42, 17.75, 32.95,
+      17.75, 0, 32.42, 17.41, 32.42, 17.75, 0, 32.36, 17.75, 32.36, 17.41, 0,
+      31.83, 17.75, 32.36, 17.75, 0, 31.83, 17.41, 31.83, 17.75, 0, 33.15,
+      15.75, 31.63, 15.75, 0, 31.63, 15.75, 31.63, 17.78, 0, 32.76, 17.35,
+      31.63, 17.35, 0, 31.63, 17.41, 32.76, 17.41, 0, 31.63, 17.78, 33.15,
+      17.78, 0, 33.15, 17.78, 33.15, 15.75, 0, 33.15, 17.03, 32.76, 17.41, 0,
+      32.76, 17.03, 33.15, 17.03, 0, 32.76, 17.41, 32.76, 17.03,
+    ],
+    CI: [
+      0, 37.51, 17.04, 0.04, 0, 37.51, 17.44, 0.04, 0, 37.51, 17.64, 0.04, 0,
+      37.51, 17.24, 0.04,
+    ],
+    AR: [
+      0, 17.06, 7.63, 1.06, 270.0, 360.0, 0, 19.42, 14.41, 0.92, 270.0, 360.0,
+      0, 19.42, 12.62, 0.92, 360.0, 450.0, 0, 17.12, 14.23, 0.92, 270.0, 360.0,
+      0, 17.12, 12.45, 0.92, 360.0, 450.0, 0, 17.12, 21.13, 1.39, 270.0, 360.0,
+      0, 29.54, 21.14, 0.92, 270.0, 360.0, 0, 26.83, 18.96, 0.62, 540.0, 270.0,
+      0, 25.54, 18.28, 0.66, 450.0, 180.0, 0, 29.58, 10.92, 1.39, 270.0, 360.0,
+      0, 35.77, 13.79, 1.1, 360.0, 450.0, 0, 34.34, 15.4, 0.8, 360.0, 450.0, 0,
+      35.95, 21.23, 0.62, 540.0, 270.0, 0, 37.91, 20.89, 0.62, 540.0, 270.0, 0,
+      23.02, 17.3, 3.08, 162.7, 197.3, 0, 22.69, 17.3, 2.9, 158.4, 201.6, 0,
+      21.56, 15.44, 1.63, 185.1, 188.3, 0, 21.56, 15.44, 1.63, 174.0, 185.1, 0,
+      20.69, 15.43, 0.87, 164.1, 198.2, 0, 20.3, 15.69, 0.04, 252.7, 109.6, 0,
+      20.31, 15.15, 0.04, 252.7, 109.6, 0, 20.36, 15.66, 0.03, 361.2, 91.2, 0,
+      20.37, 15.18, 0.03, 271.2, 361.2, 0, 20.26, 17.34, 3.08, 343.5, 378.1, 0,
+      20.59, 17.34, 2.9, 339.2, 382.4, 0, -6.48, 19.48, 1.63, 363.9, 367.2, 0,
+      -6.48, 19.48, 1.63, 352.8, 363.9, 0, -5.61, 19.48, 0.87, 342.9, 377.1, 0,
+      -5.23, 19.21, 0.04, 431.6, 288.4, 0, -5.23, 19.75, 0.04, 431.6, 288.4, 0,
+      -5.3, 19.24, 0.03, 540.0, 270.0, 0, -5.3, 19.72, 0.03, 450.0, 540.0, 0,
+      21.7, 15.45, 1.63, 366.7, 369.9, 0, 21.7, 15.45, 1.63, 355.6, 366.7, 0,
+      22.56, 15.49, 0.87, 345.7, 379.8, 0, 22.96, 15.25, 0.04, 434.4, 291.2, 0,
+      22.93, 15.78, 0.04, 434.4, 291.2, 0, 22.89, 15.27, 0.03, 542.8, 272.8, 0,
+      22.87, 15.75, 0.03, 452.8, 542.8, 0, 21.89, 16.68, 0.09, 278.8, 352.5, 0,
+      21.31, 16.67, 0.09, 548.8, 622.5, 0, 21.88, 18.02, 0.09, 368.8, 442.5, 0,
+      21.3, 18.02, 0.09, 458.8, 532.5, 0, 35.15, 9.06, 0.09, 8.2, 82.0, 0,
+      35.15, 8.48, 0.09, 278.2, 352.0, 0, 33.8, 9.06, 0.09, 98.2, 172.0, 0,
+      33.8, 8.47, 0.09, 188.2, 262.0, 0, 39.28, 12.12, 0.88, 270.0, 360.0, 0,
+      34.09, 8.48, 3.08, 342.7, 377.3, 0, 34.42, 8.48, 2.9, 338.4, 381.6, 0,
+      34.6, 10.01, 3.08, 253.2, 287.8, 0, 34.6, 9.68, 2.9, 249.0, 292.1, 0,
+      34.87, 8.48, 3.08, 162.7, 197.3, 0, 34.54, 8.48, 2.9, 158.4, 201.6, 0,
+      41.39, 11.48, 0.08, 278.4, 352.2, 0, 40.89, 11.48, 0.08, 548.4, 622.2, 0,
+      41.38, 12.61, 0.08, 368.4, 442.2, 0, 40.89, 12.61, 0.08, 458.4, 532.2, 0,
+      40.54, 11.89, 1.63, 366.7, 369.9, 0, 40.54, 11.89, 1.63, 355.6, 366.7, 0,
+      41.41, 11.94, 0.87, 345.7, 379.8, 0, 41.81, 11.69, 0.04, 434.4, 291.2, 0,
+      41.78, 12.22, 0.04, 434.4, 291.2, 0, 41.74, 11.71, 0.03, 542.8, 272.8, 0,
+      41.72, 12.19, 0.03, 452.8, 542.8, 0, 60.23, 7.92, 0.08, 278.4, 352.2, 0,
+      59.74, 7.92, 0.08, 548.4, 622.2, 0, 60.23, 9.06, 0.08, 368.4, 442.2, 0,
+      59.74, 9.05, 0.08, 458.4, 532.2,
+    ],
+    LW: [
+      [
+        0, 1, 17.06, 7.63, 0.0, 18.13, 7.63, 0.0, 18.13, 7.58, 0.0, 17.06, 7.58,
+        0.0,
+      ],
+      [
+        0, 1, 19.42, 14.41, 0.0, 20.35, 14.41, 0.0, 20.35, 14.34, 0.0, 19.42,
+        14.34, 0.0,
+      ],
+      [
+        0, 1, 19.42, 12.62, 0.0, 20.35, 12.62, 0.0, 20.35, 12.69, 0.0, 19.42,
+        12.69, 0.0,
+      ],
+      [
+        0, 1, 17.12, 14.23, 0.0, 18.05, 14.23, 0.0, 18.05, 14.16, 0.0, 17.12,
+        14.16, 0.0,
+      ],
+      [
+        0, 1, 17.12, 12.45, 0.0, 18.05, 12.45, 0.0, 18.05, 12.51, 0.0, 17.12,
+        12.51, 0.0,
+      ],
+      [
+        0, 1, 17.12, 21.13, 0.0, 18.51, 21.13, 0.0, 18.51, 21.06, 0.0, 17.12,
+        21.06, 0.0,
+      ],
+      [
+        0, 1, 29.54, 21.14, 0.0, 30.46, 21.14, 0.0, 30.46, 21.08, 0.0, 29.54,
+        21.08, 0.0,
+      ],
+      [
+        0, 1, 26.83, 18.96, 0.0, 26.21, 18.96, 0.0, 26.21, 18.92, 0.0, 26.83,
+        18.92, 0.0,
+      ],
+      [
+        0, 1, 25.54, 18.28, 0.0, 25.54, 18.94, 0.0, 25.5, 18.94, 0.0, 25.5,
+        18.28, 0.0,
+      ],
+      [
+        0, 1, 29.58, 10.92, 0.0, 30.96, 10.92, 0.0, 30.96, 10.85, 0.0, 29.58,
+        10.85, 0.0,
+      ],
+      [
+        0, 1, 35.77, 13.79, 0.0, 36.88, 13.79, 0.0, 36.88, 13.84, 0.0, 35.77,
+        13.84, 0.0,
+      ],
+      [
+        0, 1, 34.34, 15.4, 0.0, 34.34, 16.2, 0.0, 34.39, 16.2, 0.0, 34.39, 15.4,
+        0.0,
+      ],
+      [
+        0, 1, 35.95, 21.23, 0.0, 35.33, 21.23, 0.0, 35.33, 21.18, 0.0, 35.95,
+        21.18, 0.0,
+      ],
+      [
+        0, 1, 37.91, 20.89, 0.0, 37.29, 20.89, 0.0, 37.29, 20.85, 0.0, 37.91,
+        20.85, 0.0,
+      ],
+      [
+        0, 0, 27.73, 16.89, 0.0, 27.73, 16.77, 0.0, 27.73, 16.66, 0.0, 27.72,
+        16.56, 0.0, 27.72, 16.47, 0.0, 27.72, 16.38, 0.0, 27.71, 16.31, 0.0,
+        27.71, 16.24, 0.0, 27.7, 16.18, 0.0, 27.7, 16.12, 0.0, 27.69, 16.07,
+        0.0, 27.69, 16.02, 0.0, 27.68, 15.98, 0.0, 27.68, 15.94, 0.0, 27.68,
+        15.9, 0.0, 27.67, 15.87, 0.0, 27.67, 15.84, 0.0, 27.67, 15.82, 0.0,
+        27.67, 15.8, 0.0, 27.67, 15.79, 0.0, 27.67, 15.77, 0.0, 27.67, 15.76,
+        0.0, 27.68, 15.76, 0.0, 27.68, 15.75, 0.0, 27.68, 15.75, 0.0, 27.68,
+        15.74, 0.0, 27.69, 15.74, 0.0, 27.69, 15.74, 0.0, 27.7, 15.74, 0.0,
+        27.7, 15.74, 0.0, 27.7, 15.74, 0.0, 27.71, 15.74, 0.0, 27.71, 15.74,
+        0.0, 27.72, 15.74, 0.0, 27.72, 15.74, 0.0, 27.72, 15.75, 0.0, 27.73,
+        15.75, 0.0, 27.73, 15.75, 0.0, 27.73, 15.75, 0.0, 27.74, 15.75, 0.0,
+        27.74, 15.75, 0.0, 27.74, 15.75, 0.0, 27.75, 15.75, 0.0, 27.75, 15.75,
+        0.0, 27.75, 15.75, 0.0, 27.76, 15.75, 0.0, 27.76, 15.75, 0.0, 27.76,
+        15.75, 0.0, 27.76, 15.74, 0.0, 27.76, 15.74, 0.0, 27.76, 15.73, 0.0,
+        27.76, 15.73, 0.0, 27.76, 15.72, 0.0, 27.76, 15.71, 0.0, 27.76, 15.7,
+        0.0, 27.76, 15.69, 0.0, 27.76, 15.68, 0.0, 27.76, 15.66, 0.0, 27.76,
+        15.65, 0.0, 27.76, 15.63, 0.0, 27.75, 15.61, 0.0, 27.75, 15.58, 0.0,
+        27.75, 15.55, 0.0, 27.74, 15.52, 0.0, 27.74, 15.49, 0.0, 27.73, 15.45,
+        0.0, 27.73, 15.4, 0.0, 27.73, 15.35, 0.0, 27.72, 15.3, 0.0, 27.72,
+        15.25, 0.0, 27.71, 15.19, 0.0, 27.71, 15.13, 0.0, 27.7, 15.06, 0.0,
+      ],
+      [
+        0, 0, 27.6, 16.89, 0.0, 27.6, 16.71, 0.0, 27.61, 16.57, 0.0, 27.61,
+        16.44, 0.0, 27.6, 16.35, 0.0, 27.6, 16.27, 0.0, 27.6, 16.2, 0.0, 27.59,
+        16.15, 0.0, 27.59, 16.1, 0.0, 27.59, 16.05, 0.0, 27.58, 16.01, 0.0,
+        27.58, 15.97, 0.0, 27.58, 15.92, 0.0, 27.57, 15.89, 0.0, 27.57, 15.85,
+        0.0, 27.57, 15.82, 0.0, 27.56, 15.79, 0.0, 27.56, 15.76, 0.0, 27.56,
+        15.73, 0.0, 27.55, 15.71, 0.0, 27.55, 15.68, 0.0, 27.55, 15.66, 0.0,
+        27.55, 15.65, 0.0, 27.54, 15.63, 0.0, 27.54, 15.61, 0.0, 27.54, 15.6,
+        0.0, 27.54, 15.59, 0.0, 27.54, 15.58, 0.0, 27.54, 15.57, 0.0, 27.55,
+        15.57, 0.0, 27.55, 15.56, 0.0, 27.55, 15.56, 0.0, 27.55, 15.55, 0.0,
+        27.56, 15.55, 0.0, 27.56, 15.54, 0.0, 27.57, 15.54, 0.0, 27.57, 15.54,
+        0.0, 27.57, 15.54, 0.0, 27.58, 15.54, 0.0, 27.58, 15.54, 0.0, 27.59,
+        15.54, 0.0, 27.59, 15.54, 0.0, 27.6, 15.54, 0.0, 27.6, 15.55, 0.0,
+        27.61, 15.55, 0.0, 27.61, 15.56, 0.0, 27.62, 15.56, 0.0, 27.62, 15.56,
+        0.0, 27.63, 15.57, 0.0, 27.63, 15.57, 0.0, 27.64, 15.57, 0.0, 27.64,
+        15.57, 0.0, 27.64, 15.57, 0.0, 27.65, 15.58, 0.0, 27.65, 15.58, 0.0,
+        27.66, 15.57, 0.0, 27.66, 15.57, 0.0, 27.67, 15.57, 0.0, 27.67, 15.57,
+        0.0, 27.67, 15.56, 0.0, 27.68, 15.56, 0.0, 27.68, 15.55, 0.0, 27.68,
+        15.54, 0.0, 27.68, 15.54, 0.0, 27.68, 15.53, 0.0, 27.68, 15.52, 0.0,
+        27.68, 15.51, 0.0, 27.67, 15.5, 0.0, 27.67, 15.49, 0.0, 27.66, 15.48,
+        0.0, 27.66, 15.46, 0.0, 27.65, 15.44, 0.0, 27.65, 15.42, 0.0, 27.64,
+        15.4, 0.0, 27.64, 15.37, 0.0, 27.63, 15.33, 0.0, 27.62, 15.3, 0.0,
+        27.61, 15.25, 0.0, 27.6, 15.2, 0.0, 27.59, 15.13, 0.0, 27.58, 15.06,
+        0.0,
+      ],
+      [
+        0, 0, 27.49, 16.89, 0.0, 27.48, 16.76, 0.0, 27.48, 16.64, 0.0, 27.48,
+        16.54, 0.0, 27.48, 16.44, 0.0, 27.47, 16.37, 0.0, 27.47, 16.3, 0.0,
+        27.47, 16.23, 0.0, 27.47, 16.18, 0.0, 27.47, 16.13, 0.0, 27.47, 16.08,
+        0.0, 27.47, 16.04, 0.0, 27.47, 16.0, 0.0, 27.47, 15.96, 0.0, 27.46,
+        15.92, 0.0, 27.46, 15.88, 0.0, 27.46, 15.85, 0.0, 27.46, 15.81, 0.0,
+        27.46, 15.78, 0.0, 27.46, 15.75, 0.0, 27.46, 15.71, 0.0, 27.45, 15.68,
+        0.0, 27.45, 15.65, 0.0, 27.45, 15.62, 0.0, 27.45, 15.6, 0.0, 27.45,
+        15.57, 0.0, 27.45, 15.55, 0.0, 27.45, 15.53, 0.0, 27.46, 15.51, 0.0,
+        27.46, 15.5, 0.0, 27.46, 15.48, 0.0, 27.46, 15.47, 0.0, 27.47, 15.46,
+        0.0, 27.47, 15.45, 0.0, 27.47, 15.44, 0.0, 27.48, 15.43, 0.0, 27.48,
+        15.43, 0.0, 27.48, 15.42, 0.0, 27.49, 15.41, 0.0, 27.49, 15.41, 0.0,
+        27.5, 15.4, 0.0, 27.5, 15.4, 0.0, 27.5, 15.39, 0.0, 27.51, 15.38, 0.0,
+        27.51, 15.38, 0.0, 27.51, 15.37, 0.0, 27.52, 15.36, 0.0, 27.52, 15.35,
+        0.0, 27.52, 15.35, 0.0, 27.52, 15.34, 0.0, 27.52, 15.33, 0.0, 27.52,
+        15.31, 0.0, 27.52, 15.3, 0.0, 27.52, 15.29, 0.0, 27.51, 15.28, 0.0,
+        27.51, 15.26, 0.0, 27.51, 15.25, 0.0, 27.5, 15.24, 0.0, 27.5, 15.22,
+        0.0, 27.5, 15.21, 0.0, 27.49, 15.19, 0.0, 27.48, 15.16, 0.0, 27.48,
+        15.13, 0.0, 27.47, 15.1, 0.0, 27.46, 15.06, 0.0,
+      ],
+      [
+        0, 0, 27.32, 16.89, 0.0, 27.33, 16.76, 0.0, 27.34, 16.64, 0.0, 27.34,
+        16.53, 0.0, 27.35, 16.42, 0.0, 27.35, 16.33, 0.0, 27.35, 16.25, 0.0,
+        27.35, 16.17, 0.0, 27.35, 16.1, 0.0, 27.35, 16.03, 0.0, 27.35, 15.97,
+        0.0, 27.35, 15.91, 0.0, 27.35, 15.86, 0.0, 27.35, 15.81, 0.0, 27.35,
+        15.76, 0.0, 27.35, 15.72, 0.0, 27.35, 15.68, 0.0, 27.35, 15.64, 0.0,
+        27.34, 15.6, 0.0, 27.34, 15.57, 0.0, 27.34, 15.54, 0.0, 27.34, 15.51,
+        0.0, 27.34, 15.48, 0.0, 27.34, 15.45, 0.0, 27.34, 15.43, 0.0, 27.34,
+        15.41, 0.0, 27.34, 15.39, 0.0, 27.35, 15.37, 0.0, 27.35, 15.35, 0.0,
+        27.35, 15.34, 0.0, 27.35, 15.32, 0.0, 27.35, 15.31, 0.0, 27.36, 15.29,
+        0.0, 27.36, 15.28, 0.0, 27.36, 15.27, 0.0, 27.36, 15.26, 0.0, 27.36,
+        15.25, 0.0, 27.37, 15.23, 0.0, 27.37, 15.22, 0.0, 27.37, 15.21, 0.0,
+        27.37, 15.19, 0.0, 27.36, 15.18, 0.0, 27.36, 15.16, 0.0, 27.36, 15.15,
+        0.0, 27.36, 15.13, 0.0, 27.36, 15.12, 0.0, 27.35, 15.11, 0.0, 27.35,
+        15.1, 0.0, 27.35, 15.09, 0.0, 27.35, 15.08, 0.0, 27.35, 15.08, 0.0,
+        27.35, 15.07, 0.0, 27.35, 15.07, 0.0, 27.35, 15.07, 0.0, 27.35, 15.07,
+        0.0, 27.35, 15.07, 0.0, 27.35, 15.06, 0.0,
+      ],
+      [
+        0, 0, 27.18, 16.89, 0.0, 27.19, 16.67, 0.0, 27.19, 16.49, 0.0, 27.2,
+        16.34, 0.0, 27.2, 16.23, 0.0, 27.2, 16.15, 0.0, 27.21, 16.08, 0.0,
+        27.21, 16.03, 0.0, 27.22, 15.99, 0.0, 27.22, 15.95, 0.0, 27.23, 15.92,
+        0.0, 27.23, 15.89, 0.0, 27.23, 15.85, 0.0, 27.24, 15.82, 0.0, 27.24,
+        15.8, 0.0, 27.24, 15.77, 0.0, 27.24, 15.74, 0.0, 27.25, 15.72, 0.0,
+        27.25, 15.69, 0.0, 27.25, 15.66, 0.0, 27.25, 15.64, 0.0, 27.25, 15.61,
+        0.0, 27.25, 15.59, 0.0, 27.25, 15.56, 0.0, 27.25, 15.54, 0.0, 27.25,
+        15.51, 0.0, 27.25, 15.49, 0.0, 27.25, 15.46, 0.0, 27.24, 15.43, 0.0,
+        27.24, 15.41, 0.0, 27.24, 15.38, 0.0, 27.24, 15.36, 0.0, 27.23, 15.33,
+        0.0, 27.23, 15.31, 0.0, 27.23, 15.29, 0.0, 27.22, 15.27, 0.0, 27.22,
+        15.25, 0.0, 27.22, 15.24, 0.0, 27.21, 15.22, 0.0, 27.21, 15.2, 0.0,
+        27.21, 15.19, 0.0, 27.21, 15.17, 0.0, 27.2, 15.16, 0.0, 27.2, 15.14,
+        0.0, 27.2, 15.12, 0.0, 27.2, 15.11, 0.0, 27.2, 15.09, 0.0, 27.2, 15.08,
+        0.0, 27.21, 15.06, 0.0,
+      ],
+      [
+        0, 0, 27.09, 16.89, 0.0, 27.1, 16.65, 0.0, 27.1, 16.45, 0.0, 27.11,
+        16.28, 0.0, 27.11, 16.15, 0.0, 27.12, 16.04, 0.0, 27.12, 15.95, 0.0,
+        27.12, 15.88, 0.0, 27.12, 15.82, 0.0, 27.13, 15.77, 0.0, 27.13, 15.71,
+        0.0, 27.13, 15.67, 0.0, 27.13, 15.62, 0.0, 27.13, 15.58, 0.0, 27.13,
+        15.55, 0.0, 27.13, 15.51, 0.0, 27.13, 15.48, 0.0, 27.13, 15.45, 0.0,
+        27.13, 15.42, 0.0, 27.13, 15.39, 0.0, 27.12, 15.37, 0.0, 27.12, 15.34,
+        0.0, 27.12, 15.32, 0.0, 27.12, 15.29, 0.0, 27.12, 15.27, 0.0, 27.12,
+        15.24, 0.0, 27.11, 15.22, 0.0, 27.11, 15.19, 0.0, 27.11, 15.16, 0.0,
+        27.11, 15.14, 0.0, 27.11, 15.11, 0.0, 27.11, 15.09, 0.0, 27.11, 15.06,
+        0.0,
+      ],
+      [
+        0, 0, 26.98, 16.89, 0.0, 26.98, 16.74, 0.0, 26.99, 16.61, 0.0, 26.99,
+        16.5, 0.0, 26.99, 16.41, 0.0, 26.99, 16.33, 0.0, 26.99, 16.26, 0.0,
+        26.99, 16.2, 0.0, 26.99, 16.15, 0.0, 26.99, 16.1, 0.0, 26.99, 16.05,
+        0.0, 26.99, 16.01, 0.0, 26.98, 15.97, 0.0, 26.98, 15.93, 0.0, 26.98,
+        15.9, 0.0, 26.98, 15.86, 0.0, 26.98, 15.83, 0.0, 26.98, 15.8, 0.0,
+        26.98, 15.77, 0.0, 26.97, 15.74, 0.0, 26.97, 15.71, 0.0, 26.97, 15.68,
+        0.0, 26.97, 15.65, 0.0, 26.97, 15.62, 0.0, 26.97, 15.58, 0.0, 26.97,
+        15.54, 0.0, 26.97, 15.5, 0.0, 26.98, 15.46, 0.0, 26.98, 15.4, 0.0,
+        26.99, 15.34, 0.0, 26.99, 15.26, 0.0, 27.0, 15.17, 0.0, 27.02, 15.06,
+        0.0,
+      ],
+      [0, 0, 20.0, 18.37, 0.0, 20.66, 18.37, 0.0, 20.66, 18.22, 0.0],
+      [0, 0, 20.66, 16.39, 0.0, 20.66, 16.24, 0.0, 20.0, 16.24, 0.0],
+      [0, 0, 23.3, 16.32, 0.0, 22.64, 16.31, 0.0, 22.64, 16.46, 0.0],
+      [0, 0, 22.61, 18.29, 0.0, 22.61, 18.44, 0.0, 23.27, 18.45, 0.0],
+      [
+        0, 1, 39.28, 12.12, 0.0, 40.17, 12.12, 0.0, 40.17, 12.08, 0.0, 39.28,
+        12.08, 0.0,
+      ],
+      [0, 0, 37.12, 7.42, 0.0, 36.46, 7.42, 0.0, 36.46, 7.57, 0.0],
+      [0, 0, 36.46, 9.4, 0.0, 36.46, 9.55, 0.0, 37.12, 9.55, 0.0],
+      [0, 0, 33.56, 6.97, 0.0, 33.56, 7.63, 0.0, 33.71, 7.63, 0.0],
+      [0, 0, 35.54, 7.65, 0.0, 35.69, 7.65, 0.0, 35.7, 6.99, 0.0],
+      [0, 0, 31.84, 9.55, 0.0, 32.5, 9.55, 0.0, 32.5, 9.39, 0.0],
+      [0, 0, 32.5, 7.56, 0.0, 32.5, 7.41, 0.0, 31.84, 7.41, 0.0],
+      [
+        0, 1, 37.47, 18.04, 0.0, 37.55, 18.04, 0.0, 37.55, 17.8, 0.0, 37.47,
+        17.8, 0.0,
+      ],
+      [
+        0, 1, 37.37, 18.0, 0.0, 37.41, 18.0, 0.0, 37.41, 16.96, 0.0, 37.37,
+        16.96, 0.0,
+      ],
+      [
+        0, 1, 36.12, 18.08, 0.0, 37.57, 18.08, 0.0, 37.57, 16.88, 0.0, 36.12,
+        16.88, 0.0,
+      ],
+    ],
+    EL: [
+      [0, 18.57, -5.28, -0.48, -0.88, 0.8423, 3.096, 3.2009],
+      [0, 24.38, 9.11, -6.14, 8.89, 0.8423, 1.3671, 1.3918],
+      [0, 18.37, 8.62, -0.29, 2.83, 0.8423, 0.0, 0.5903],
+      [0, 17.98, 10.24, 0.1, 0.52, 0.8423, 4.4351, 4.7182],
+      [0, 17.95, 10.24, 0.12, 0.52, 0.8423, 4.4351, 4.7182],
+      [0, 18.45, 10.09, -0.36, -0.01, 0.8423, 0.8797, 1.5708],
+      [0, 18.91, 10.15, -0.65, -0.09, 0.6038, -1.3956, 1.5813],
+      [0, 18.37, 10.99, -0.29, 0.52, 0.8423, 2.5513, 3.1416],
+      [0, 17.98, 9.37, 0.1, -0.03, 0.8423, 1.565, 1.848],
+      [0, 17.95, 9.37, 0.12, -0.03, 0.8423, 1.565, 1.848],
+      [0, 18.45, 9.52, -0.36, 0.51, 0.8423, 4.7124, 5.4035],
+      [0, 18.91, 9.47, -0.65, 0.59, 0.6038, -1.3956, 1.5813],
+      [0, 19.26, -258.31, -1.15, 530.61, 0.8423, -0.0134, 0.0028],
+      [0, 22.21, 10.72, -4.02, -0.58, 0.8423, -0.013, 1.2499],
+      [0, 24.38, 10.51, -6.14, 7.53, 0.8423, 1.7498, 1.7745],
+      [0, 18.05, 9.81, 0.02, 3.98, 0.8423, 4.5114, 4.9134],
+      [0, 18.53, 9.81, -0.44, 3.98, 0.8423, 4.5114, 4.9134],
+      [0, 21.7, 8.86, -3.54, 1.21, 0.8423, 3.1416, 4.7124],
+      [0, 21.09, 8.86, -2.94, 1.14, 0.8423, -1.5708, -0.0],
+      [0, 18.19, 8.86, -0.11, 1.21, 0.8423, 1.5708, 3.1416],
+      [0, 18.8, 8.86, -0.7, 1.14, 0.8423, -0.0, 1.5708],
+      [0, 21.7, 10.76, -3.54, -0.64, 0.8423, -1.5708, 0.0],
+      [0, 21.09, 10.76, -2.94, -0.71, 0.8423, 3.1416, 4.7124],
+      [0, 18.19, 10.76, -0.11, -0.71, 0.8423, 3.1416, 4.7124],
+      [0, 18.8, 10.76, -0.7, -0.64, 0.8423, -1.5708, 0.0],
+      [0, 21.86, 9.14, -3.69, 0.83, 0.8423, 4.7124, 6.2832],
+      [0, 21.86, 10.48, -3.69, -0.33, 0.8423, 0.0, 1.5708],
+      [0, 19.26, -258.31, -1.15, -7.47, 0.8423, 3.1338, 3.1404],
+      [0, 20.05, -83.32, -1.92, -2.93, 0.8423, 3.134, 3.1441],
+      [0, 18.66, 22.27, -0.57, -25.32, 0.8423, -0.0756, -0.0028],
+      [0, 21.05, 9.94, -2.9, 2.19, 0.8423, 1.2453, 1.5079],
+      [0, 21.05, 9.67, -2.9, -1.69, 0.8423, -1.5079, -1.2453],
+      [0, 21.42, 9.74, -3.26, -1.7, 0.8423, -1.4992, -1.2306],
+      [0, 21.42, 9.88, -3.26, -1.84, 0.8423, 4.3722, 4.6407],
+      [0, 19.26, -258.33, -1.15, 530.69, 0.8423, -0.0134, -0.013],
+      [0, 22.29, 10.64, -4.11, -0.7, 0.8423, 1.5708, 3.1282],
+      [0, 22.29, 8.97, -4.11, 0.93, 0.8423, 0.0134, 1.5708],
+      [0, 19.26, 277.94, -1.15, 8.05, 0.8423, 3.1546, 3.155],
+      [0, 22.21, 8.9, -4.02, 1.08, 0.8423, -1.2499, 0.013],
+      [0, 19.26, 277.92, -1.15, -530.08, 0.8423, 0.0012, 0.0078],
+      [0, 20.05, 102.93, -1.92, -184.45, 0.8423, -0.0025, 0.0075],
+      [0, 22.29, 10.66, -4.11, -0.66, 0.8423, 1.5708, 3.1282],
+      [0, 22.29, 8.96, -4.11, 1.15, 0.8423, 3.155, 4.7124],
+      [0, 19.26, 277.92, -1.15, 8.01, 0.8423, 3.1388, 3.155],
+      [0, 18.66, -2.66, -0.57, 25.82, 0.8423, 0.0028, 0.0756],
+      [0, 21.03, 9.94, -2.88, -2.16, 0.8423, 4.4495, 4.6523],
+      [0, 21.03, 9.67, -2.88, -1.9, 0.8423, -1.5108, -1.3079],
+      [0, 18.57, 24.89, -0.48, -30.29, 0.8423, -0.0593, 0.0455],
+      [0, 24.2, 10.51, -5.97, 7.32, 0.8423, 1.7213, 1.7546],
+      [0, 12.42, 8.48, 5.51, 7.92, 0.8423, -1.4344, -1.3854],
+      [0, 17.63, 9.81, 0.43, 0.23, 0.8423, 4.1315, 5.2933],
+      [0, 12.42, 11.14, 5.51, -7.42, 0.8423, 1.3854, 1.4344],
+      [0, 24.2, 9.11, -5.97, -6.82, 0.8423, 4.5286, 4.5618],
+    ],
+    TX: [
+      [0, 26.85, 14.5, 0.2, "Dinning"],
+      [0, 20.82, 15.76, 0.2, "Living Room"],
+      [0, 30.29, 16.48, 0.2, "Lobby\n"],
+      [0, 39.7, 17.93, 0.2, "Kitchen"],
+      [0, 39.16, 20.6, 0.2, "Storage"],
+      [0, 33.4, 20.47, 0.2, "Servant"],
+      [0, 33.96, 11.21, 0.2, "Living"],
+      [0, 39.65, 13.42, 0.2, "Office"],
+      [0, 17.6, 16.32, 0.2, "Stairs"],
+    ],
   },
-  lines: [
-    {
-      entity_type: "LINE",
-      handle: "272",
-      layer: "0",
-      start: {
-        x: 0.6108066156627175,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 3.610806615662716,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "273",
-      layer: "0",
-      start: {
-        x: 3.610806615662716,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 3.610806615662716,
-        y: 4.795196564956297,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "274",
-      layer: "0",
-      start: {
-        x: 2.110806615662716,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 1.680900782392767,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "275",
-      layer: "0",
-      start: {
-        x: 0.6108066156627175,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 0.6108066156627175,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "276",
-      layer: "0",
-      start: {
-        x: 3.610806615662716,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 6.610806615662717,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "277",
-      layer: "0",
-      start: {
-        x: 6.610806615662717,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 6.610806615662717,
-        y: 4.795196564956297,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "278",
-      layer: "0",
-      start: {
-        x: 6.610806615662717,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 10.31080661566271,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "279",
-      layer: "0",
-      start: {
-        x: 10.31080661566271,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 10.31080661566271,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "27A",
-      layer: "0",
-      start: {
-        x: 10.31080661566271,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 11.42530188863939,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "27B",
-      layer: "0",
-      start: {
-        x: 11.42530188863939,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 15.92798613906803,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "27C",
-      layer: "0",
-      start: {
-        x: 15.92798613906803,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 15.92798613906803,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "280",
-      layer: "0",
-      start: {
-        x: 10.31080661566271,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 11.81080661566271,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "281",
-      layer: "0",
-      start: {
-        x: 11.81080661566271,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 11.81080661566271,
-        y: 4.795196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "282",
-      layer: "0",
-      start: {
-        x: 11.81080661566271,
-        y: 4.795196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 10.31080661566271,
-        y: 4.795196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "28C",
-      layer: "0",
-      start: {
-        x: 3.610806615662716,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 3.610806615662716,
-        y: 4.795196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "28D",
-      layer: "0",
-      start: {
-        x: 3.610806615662716,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 4.13334673362405,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "28E",
-      layer: "0",
-      start: {
-        x: 4.13334673362405,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 3.610806615662716,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "28F",
-      layer: "0",
-      start: {
-        x: 3.610806615662716,
-        y: 7.295196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 3.610806615662716,
-        y: 4.963522484637849,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "291",
-      layer: "0",
-      start: {
-        x: 3.610806615662716,
-        y: 4.795196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 4.668873803766472,
-        y: 4.795196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "292",
-      layer: "0",
-      start: {
-        x: 8.551014477020999,
-        y: 3.945196564956298,
-        z: 0.0,
-      },
-      end: {
-        x: 12.56657259849683,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "293",
-      layer: "0",
-      start: {
-        x: 15.92798613906803,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 13.14993700878509,
-        y: 3.932085732014996,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "2AC",
-      layer: "0",
-      start: {
-        x: 0.6108066156627175,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 0.6108066156627175,
-        y: -2.704803435043701,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "2AD",
-      layer: "0",
-      start: {
-        x: 0.6108066156627175,
-        y: -2.704803435043701,
-        z: 0.0,
-      },
-      end: {
-        x: 7.837662520394188,
-        y: -2.704803435043701,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "2AE",
-      layer: "0",
-      start: {
-        x: 15.92798613906803,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 15.92798613906803,
-        y: -2.745149250328729,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "2AF",
-      layer: "0",
-      start: {
-        x: 15.92798613906803,
-        y: -2.745149250328729,
-        z: 0.0,
-      },
-      end: {
-        x: 9.116909095798805,
-        y: -2.745149250328729,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "2B9",
-      layer: "0",
-      start: {
-        x: 0.6108066156627165,
-        y: -2.704803435043701,
-        z: 0.0,
-      },
-      end: {
-        x: 0.6108066156627165,
-        y: 0.645196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "2BA",
-      layer: "0",
-      start: {
-        x: 0.6108066156627165,
-        y: 0.645196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 2.961460380407515,
-        y: 0.645196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "2C7",
-      layer: "0",
-      start: {
-        x: 4.224234568028452,
-        y: -2.704803435043701,
-        z: 0.0,
-      },
-      end: {
-        x: 4.224234568028452,
-        y: -2.704803435043701,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "2CF",
-      layer: "0",
-      start: {
-        x: 15.92798613906803,
-        y: -2.745149250328729,
-        z: 0.0,
-      },
-      end: {
-        x: 15.92798613906803,
-        y: 0.2548507496712702,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "2D0",
-      layer: "0",
-      start: {
-        x: 15.92798613906803,
-        y: 0.2548507496712702,
-        z: 0.0,
-      },
-      end: {
-        x: 12.16251774591546,
-        y: 0.2548507496712702,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "15A5",
-      layer: "0",
-      start: {
-        x: 3.610806615662716,
-        y: -1.359953888159623,
-        z: 0.0,
-      },
-      end: {
-        x: 3.610806615662716,
-        y: -2.704803435043701,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "15E1",
-      layer: "0",
-      start: {
-        x: 3.610806615662716,
-        y: 4.795196564956297,
-        z: 0.0,
-      },
-      end: {
-        x: 2.110806615662716,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "15E2",
-      layer: "0",
-      start: {
-        x: 6.610806615662717,
-        y: 4.795196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 7.941414477020996,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "15E3",
-      layer: "0",
-      start: {
-        x: 11.42798613906804,
-        y: -0.3897045409896123,
-        z: 0.0,
-      },
-      end: {
-        x: 11.42798613906805,
-        y: -0.7213204897056472,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "15E4",
-      layer: "0",
-      start: {
-        x: 12.16251774591546,
-        y: 0.2548507496712702,
-        z: 0.0,
-      },
-      end: {
-        x: 11.42798613906804,
-        y: -0.3897045409896123,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "15E5",
-      layer: "0",
-      start: {
-        x: 3.610806615662716,
-        y: 0.202466429484332,
-        z: 0.0,
-      },
-      end: {
-        x: 3.610806615662716,
-        y: -0.7503538881596233,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "15E6",
-      layer: "0",
-      start: {
-        x: 2.961460380407515,
-        y: 0.645196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 3.610806615662716,
-        y: 0.202466429484332,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "25C8",
-      layer: "0",
-      start: {
-        x: 5.278473803766472,
-        y: 4.795196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 6.610806615662717,
-        y: 4.795196564956299,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "25CA",
-      layer: "0",
-      start: {
-        x: 11.42798613906805,
-        y: -1.330920489705647,
-        z: 0.0,
-      },
-      end: {
-        x: 11.42798613906805,
-        y: -2.745149250328729,
-        z: 0.0,
-      },
-    },
-    {
-      entity_type: "LINE",
-      handle: "25CC",
-      layer: "0",
-      start: {
-        x: 1.162244020022889,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-      end: {
-        x: 0.6108066156627175,
-        y: 3.945196564956299,
-        z: 0.0,
-      },
-    },
-  ],
-  // arcs: [],
-  polylines: [],
-  texts: [
-    {
-      entity_type: "MTEXT",
-      handle: "286",
-      layer: "0",
-      text: "Kitchen\n3.0 X 3.35",
-      position: {
-        x: 1.229801813707154,
-        y: 5.960516156780832,
-        z: 0.0,
-      },
-      height: 0.2,
-    },
-    {
-      entity_type: "MTEXT",
-      handle: "287",
-      layer: "0",
-      text: "WC + Bath\n3.0m X 3.35",
-      position: {
-        x: 5.021054678442992,
-        y: 6.052879579090877,
-        z: 0.0,
-      },
-      height: 0.2,
-    },
-    {
-      entity_type: "MTEXT",
-      handle: "294",
-      layer: "0",
-      text: "Store\n3.7m X 3.35",
-      position: {
-        x: 7.591709183901571,
-        y: 5.978988852146534,
-        z: 0.0,
-      },
-      height: 0.2,
-    },
-    {
-      entity_type: "MTEXT",
-      handle: "2A4",
-      layer: "0",
-      text: "Store\n1.5m X 2.5",
-      position: {
-        x: 10.03290603215367,
-        y: 6.520098392898682,
-        z: 0.0,
-      },
-      height: 0.16,
-    },
-    {
-      entity_type: "MTEXT",
-      handle: "2AB",
-      layer: "0",
-      text: "BED Room\n4.5m X 3.35",
-      position: {
-        x: 12.75151177528369,
-        y: 6.169117344505799,
-        z: 0.0,
-      },
-      height: 0.2,
-    },
-    {
-      entity_type: "MTEXT",
-      handle: "2CE",
-      layer: "0",
-      text: "Room\n3.0m X 3.35",
-      position: {
-        x: 1.230241099470788,
-        y: -0.61292449318018,
-        z: 0.0,
-      },
-      height: 0.2,
-    },
-    {
-      entity_type: "MTEXT",
-      handle: "2DB",
-      layer: "0",
-      text: "Drawing Dinning",
-      position: {
-        x: 6.115583552940847,
-        y: 2.262510909754944,
-        z: 0.0,
-      },
-      height: 0.2,
-    },
-    {
-      entity_type: "MTEXT",
-      handle: "2E2",
-      layer: "0",
-      text: "Room\n4.5m X 3.35",
-      position: {
-        x: 12.97510712638473,
-        y: -0.8274489592508933,
-        z: 0.0,
-      },
-      height: 0.2,
-    },
-  ],
-  inserts: [
-    {
-      entity_type: "INSERT",
-      handle: "12A0",
-      layer: "0",
-      block_name: "*U8",
-      category: "door",
-      is_anonymous_block: true,
-      position: {
-        x: 3.451493532527251,
-        y: -0.7503538881596234,
-        z: 0.0,
-      },
-      rotation: 270.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
-      block_entity_count: 11,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "1B40",
-      layer: "0",
-      block_name: "*U14",
-      category: "door",
-      is_anonymous_block: true,
-      position: {
-        x: 13.14993700878509,
-        y: 4.033685732014995,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
-      block_entity_count: 11,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "1FDC",
-      layer: "0",
-      block_name: "*U14",
-      category: "door",
-      is_anonymous_block: true,
-      position: {
-        x: 1.771844020022889,
-        y: 4.070483277467122,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
-      block_entity_count: 11,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "21DB",
-      layer: "0",
-      block_name: "*U14",
-      category: "door",
-      is_anonymous_block: true,
-      position: {
-        x: 5.278473803766472,
-        y: 4.896796564956297,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
-      block_entity_count: 11,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "23DA",
-      layer: "0",
-      block_name: "*U14",
-      category: "door",
-      is_anonymous_block: true,
-      position: {
-        x: 8.551014477020999,
-        y: 4.046796564956299,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
-      block_entity_count: 11,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "2575",
-      layer: "0",
-      block_name: "*U23",
-      category: "door",
-      is_anonymous_block: true,
-      position: {
-        x: 11.56933367305038,
-        y: -0.7213204897056473,
-        z: 0.0,
-      },
-      rotation: 270.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
-      block_entity_count: 11,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "2682",
-      layer: "0",
-      block_name: "*U27",
-      category: "insert",
-      is_anonymous_block: true,
-      position: {
-        x: 1.56233022318554,
-        y: 7.237459516490105,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.001,
-        y: 0.001,
-        z: 0.001,
-      },
-      block_entity_types: ["LINE"],
-      block_entity_count: 3,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "2955",
-      layer: "0",
-      block_name: "Bed - Queen",
-      category: "furniture",
-      is_anonymous_block: false,
-      position: {
-        x: 2.372132069842834,
-        y: 3.479264313995376,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["LINE"],
-      block_entity_count: 16,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "2986",
-      layer: "0",
-      block_name: "Chair - Rocking",
-      category: "furniture",
-      is_anonymous_block: false,
-      position: {
-        x: 1.481668176941881,
-        y: 2.363800714190402,
-        z: 0.0,
-      },
-      rotation: 90.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE"],
-      block_entity_count: 40,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "29F9",
-      layer: "0",
-      block_name: "Copy Machine",
-      category: "furniture",
-      is_anonymous_block: false,
-      position: {
-        x: 13.81459250254958,
-        y: 2.278631800417986,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["LINE"],
-      block_entity_count: 40,
-      attributes: [],
-    },
-  ],
-  door_inserts: [
-    {
-      entity_type: "INSERT",
-      handle: "12A0",
-      layer: "0",
-      block_name: "*U8",
-      category: "door",
-      is_anonymous_block: true,
-      position: {
-        x: 3.451493532527251,
-        y: -0.7503538881596234,
-        z: 0.0,
-      },
-      rotation: 270.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
-      block_entity_count: 11,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "1B40",
-      layer: "0",
-      block_name: "*U14",
-      category: "door",
-      is_anonymous_block: true,
-      position: {
-        x: 13.14993700878509,
-        y: 4.033685732014995,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
-      block_entity_count: 11,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "1FDC",
-      layer: "0",
-      block_name: "*U14",
-      category: "door",
-      is_anonymous_block: true,
-      position: {
-        x: 1.771844020022889,
-        y: 4.070483277467122,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
-      block_entity_count: 11,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "21DB",
-      layer: "0",
-      block_name: "*U14",
-      category: "door",
-      is_anonymous_block: true,
-      position: {
-        x: 5.278473803766472,
-        y: 4.896796564956297,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
-      block_entity_count: 11,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "23DA",
-      layer: "0",
-      block_name: "*U14",
-      category: "door",
-      is_anonymous_block: true,
-      position: {
-        x: 8.551014477020999,
-        y: 4.046796564956299,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
-      block_entity_count: 11,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "2575",
-      layer: "0",
-      block_name: "*U23",
-      category: "door",
-      is_anonymous_block: true,
-      position: {
-        x: 11.56933367305038,
-        y: -0.7213204897056473,
-        z: 0.0,
-      },
-      rotation: 270.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE", "LWPOLYLINE"],
-      block_entity_count: 11,
-      attributes: [],
-    },
-  ],
-  window_inserts: [],
-  furniture_inserts: [
-    {
-      entity_type: "INSERT",
-      handle: "2955",
-      layer: "0",
-      block_name: "Bed - Queen",
-      category: "furniture",
-      is_anonymous_block: false,
-      position: {
-        x: 2.372132069842834,
-        y: 3.479264313995376,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["LINE"],
-      block_entity_count: 16,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "2986",
-      layer: "0",
-      block_name: "Chair - Rocking",
-      category: "furniture",
-      is_anonymous_block: false,
-      position: {
-        x: 1.481668176941881,
-        y: 2.363800714190402,
-        z: 0.0,
-      },
-      rotation: 90.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["ARC", "LINE"],
-      block_entity_count: 40,
-      attributes: [],
-    },
-    {
-      entity_type: "INSERT",
-      handle: "29F9",
-      layer: "0",
-      block_name: "Copy Machine",
-      category: "furniture",
-      is_anonymous_block: false,
-      position: {
-        x: 13.81459250254958,
-        y: 2.278631800417986,
-        z: 0.0,
-      },
-      rotation: 0.0,
-      scale: {
-        x: 0.0254,
-        y: 0.0254,
-        z: 0.0254,
-      },
-      block_entity_types: ["LINE"],
-      block_entity_count: 40,
-      attributes: [],
-    },
-  ],
-  stair_inserts: [],
-  arcs: [
-    {
-      entity_type: "ARC",
-      handle: "arc-door-1",
-      layer: "0",
-      center: { x: 3.451493532527251, y: -0.7503538881596234, z: 0 },
-      radius: 0.6096,
-      start_angle: 180,
-      end_angle: 270,
-    },
-    {
-      entity_type: "ARC",
-      handle: "arc-door-2",
-      layer: "0",
-      center: { x: 13.14993700878509, y: 4.033685732014995, z: 0 },
-      radius: 0.6096,
-      start_angle: 90,
-      end_angle: 180,
-    },
-    {
-      entity_type: "ARC",
-      handle: "arc-door-3",
-      layer: "0",
-      center: { x: 1.771844020022889, y: 4.070483277467122, z: 0 },
-      radius: 0.6096,
-      start_angle: 90,
-      end_angle: 180,
-    },
-    {
-      entity_type: "ARC",
-      handle: "arc-door-4",
-      layer: "0",
-      center: { x: 5.278473803766472, y: 4.896796564956297, z: 0 },
-      radius: 0.6096,
-      start_angle: 90,
-      end_angle: 180,
-    },
-    {
-      entity_type: "ARC",
-      handle: "arc-door-5",
-      layer: "0",
-      center: { x: 8.551014477020999, y: 4.046796564956299, z: 0 },
-      radius: 0.6096,
-      start_angle: 90,
-      end_angle: 180,
-    },
-    {
-      entity_type: "ARC",
-      handle: "arc-door-6",
-      layer: "0",
-      center: { x: 11.56933367305038, y: -0.7213204897056473, z: 0 },
-      radius: 0.6096,
-      start_angle: 270,
-      end_angle: 360,
-    },
-  ],
-  window_lines: [
-    {
-      entity_type: "LINE",
-      handle: "win-u27-1",
-      layer: "0",
-      start: { x: 1.56233022318554, y: 7.387459516490105, z: 0 },
-      end: { x: 1.56233022318554, y: 7.237459516490105, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "win-u27-2",
-      layer: "0",
-      start: { x: 2.46233022318554, y: 7.387459516490105, z: 0 },
-      end: { x: 2.46233022318554, y: 7.237459516490105, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "win-u27-3",
-      layer: "0",
-      start: { x: 1.56233022318554, y: 7.312459516490105, z: 0 },
-      end: { x: 2.46233022318554, y: 7.312459516490105, z: 0 },
-    },
-  ],
-  door_lines: [
-    // Door 1 — arc-door-1, INSERT "12A0" (rot=270°) — horizontal jambs
-    { entity_type: "LINE", handle: "dfl-door-1-1", layer: "0", start: { x: 3.451493532527252, y: -0.750353888159623, z: 0 }, end: { x: 3.603893532527252, y: -0.750353888159623, z: 0 } },
-    { entity_type: "LINE", handle: "dfl-door-1-2", layer: "0", start: { x: 3.451493532527252, y: -1.360153888159623, z: 0 }, end: { x: 3.603893532527252, y: -1.360153888159623, z: 0 } },
-    // Door 2 — arc-door-2, INSERT "1B40" (rot=0°) — vertical jambs
-    { entity_type: "LINE", handle: "dfl-door-2-1", layer: "0", start: { x: 13.1499370087851, y: 4.033685732015, z: 0 }, end: { x: 13.1499370087851, y: 3.932085732015, z: 0 } },
-    { entity_type: "LINE", handle: "dfl-door-2-2", layer: "0", start: { x: 12.5403370087851, y: 4.033685732015, z: 0 }, end: { x: 12.5403370087851, y: 3.932085732015, z: 0 } },
-    // Door 3 — arc-door-3, INSERT "1FDC" (rot=0°) — vertical jambs
-    { entity_type: "LINE", handle: "dfl-door-3-1", layer: "0", start: { x: 1.77184402002289, y: 4.07048327746712, z: 0 }, end: { x: 1.77184402002289, y: 3.96888327746712, z: 0 } },
-    { entity_type: "LINE", handle: "dfl-door-3-2", layer: "0", start: { x: 1.16224402002289, y: 4.07048327746712, z: 0 }, end: { x: 1.16224402002289, y: 3.96888327746712, z: 0 } },
-    // Door 4 — arc-door-4 — vertical jambs
-    { entity_type: "LINE", handle: "dfl-door-4-1", layer: "0", start: { x: 5.27847380376647, y: 4.8967965649563, z: 0 }, end: { x: 5.27847380376647, y: 4.7951965649563, z: 0 } },
-    { entity_type: "LINE", handle: "dfl-door-4-2", layer: "0", start: { x: 4.66887380376647, y: 4.8967965649563, z: 0 }, end: { x: 4.66887380376647, y: 4.7951965649563, z: 0 } },
-    // Door 5 — arc-door-5 — vertical jambs
-    { entity_type: "LINE", handle: "dfl-door-5-1", layer: "0", start: { x: 8.551014477021, y: 4.0467965649563, z: 0 }, end: { x: 8.551014477021, y: 3.9451965649563, z: 0 } },
-    { entity_type: "LINE", handle: "dfl-door-5-2", layer: "0", start: { x: 7.941414477021, y: 4.0467965649563, z: 0 }, end: { x: 7.941414477021, y: 3.9451965649563, z: 0 } },
-    // Door 6 — arc-door-6, INSERT "2700" (rot=270°) — horizontal jambs
-    { entity_type: "LINE", handle: "dfl-door-6-1", layer: "0", start: { x: 11.5693336730504, y: -0.721320489705647, z: 0 }, end: { x: 11.4169336730504, y: -0.721320489705647, z: 0 } },
-    { entity_type: "LINE", handle: "dfl-door-6-2", layer: "0", start: { x: 11.5693336730504, y: -1.330920489705647, z: 0 }, end: { x: 11.4169336730504, y: -1.330920489705647, z: 0 } },
-  ],
-  furniture_lines: [
-    // Bed - Queen (6 lines)
-    {
-      entity_type: "LINE",
-      handle: "furn-bed-1",
-      layer: "0",
-      start: { x: 2.372132069842834, y: 3.479264313995376, z: 0 },
-      end: { x: 2.372132069842834, y: 2.079264313995376, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "furn-bed-2",
-      layer: "0",
-      start: { x: 2.372132069842834, y: 2.079264313995376, z: 0 },
-      end: { x: 3.972132069842834, y: 2.079264313995376, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "furn-bed-3",
-      layer: "0",
-      start: { x: 3.972132069842834, y: 2.079264313995376, z: 0 },
-      end: { x: 3.972132069842834, y: 3.479264313995376, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "furn-bed-4",
-      layer: "0",
-      start: { x: 3.972132069842834, y: 3.479264313995376, z: 0 },
-      end: { x: 2.372132069842834, y: 3.479264313995376, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "furn-bed-pillow-1",
-      layer: "0",
-      start: { x: 2.692132069842834, y: 3.479264313995376, z: 0 },
-      end: { x: 2.692132069842834, y: 2.899264313995376, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "furn-bed-pillow-2",
-      layer: "0",
-      start: { x: 3.652132069842834, y: 3.479264313995376, z: 0 },
-      end: { x: 3.652132069842834, y: 2.899264313995376, z: 0 },
-    },
-
-    // Chair - Rocking (4 lines, with rotation applied)
-    {
-      entity_type: "LINE",
-      handle: "furn-chair-1",
-      layer: "0",
-      start: { x: 1.481668176941881, y: 2.363800714190402, z: 0 },
-      end: { x: 1.481668176941881, y: 2.013800714190402, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "furn-chair-2",
-      layer: "0",
-      start: { x: 1.481668176941881, y: 2.013800714190402, z: 0 },
-      end: { x: 1.831668176941881, y: 2.013800714190402, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "furn-chair-3",
-      layer: "0",
-      start: { x: 1.831668176941881, y: 2.013800714190402, z: 0 },
-      end: { x: 1.831668176941881, y: 2.363800714190402, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "furn-chair-back",
-      layer: "0",
-      start: { x: 1.656668176941881, y: 2.363800714190402, z: 0 },
-      end: { x: 1.656668176941881, y: 2.413800714190402, z: 0 },
-    },
-
-    // Copy Machine (5 lines)
-    {
-      entity_type: "LINE",
-      handle: "furn-copier-1",
-      layer: "0",
-      start: { x: 13.81459250254958, y: 2.278631800417986, z: 0 },
-      end: { x: 13.81459250254958, y: 1.878631800417986, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "furn-copier-2",
-      layer: "0",
-      start: { x: 13.81459250254958, y: 1.878631800417986, z: 0 },
-      end: { x: 14.21459250254958, y: 1.878631800417986, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "furn-copier-3",
-      layer: "0",
-      start: { x: 14.21459250254958, y: 1.878631800417986, z: 0 },
-      end: { x: 14.21459250254958, y: 2.278631800417986, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "furn-copier-4",
-      layer: "0",
-      start: { x: 14.21459250254958, y: 2.278631800417986, z: 0 },
-      end: { x: 13.81459250254958, y: 2.278631800417986, z: 0 },
-    },
-    {
-      entity_type: "LINE",
-      handle: "furn-copier-detail",
-      layer: "0",
-      start: { x: 13.96459250254958, y: 2.128631800417986, z: 0 },
-      end: { x: 14.06459250254958, y: 2.128631800417986, z: 0 },
-    },
-  ],
+  _stats: {
+    lines: 717,
+    circles: 4,
+    arcs: 69,
+    polylines: 35,
+    texts: 9,
+    hatches: 0,
+    hatch_lines: 0,
+    splines: 0,
+    ellipses: 53,
+    dim_lines: 0,
+    points: 0,
+  },
 };
+
+// ─── Shared flat-array parsers ───────────────────────────────────────────────
+
+/** Parse "LayerName:colorHex" → { name, color (as integer for compat) } */
+function _parseLayers(
+  arr: string[],
+): Array<{
+  name: string;
+  color: number;
+  _hex: string;
+  _visible: boolean;
+  _linetype: string;
+}> {
+  return arr.map((s) => {
+    const parts = s.split(":");
+    // parts: [name, colorHex, linetype, visible]
+    // Note: layer name itself may contain colons (rare), so take first part as name
+    // and last 3 as the fixed trailing fields
+    const visible = parts[parts.length - 1];
+    const linetype = parts[parts.length - 2];
+    const hex = parts[parts.length - 3];
+    const name = parts.slice(0, parts.length - 3).join(":") || parts[0];
+    return {
+      name,
+      color: 7,
+      _hex: hex?.startsWith("#") ? hex : "#FFFFFF",
+      _visible: visible !== "0",
+      _linetype: linetype ?? "CONTINUOUS",
+    };
+  });
+}
+
+/** Parse flat LN/DM array (stride 5: layerIdx x1 y1 x2 y2) */
+function _parseLNFlat(
+  ln: (number | string)[],
+  layers: Array<{ name: string }>,
+): Array<{
+  layer: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  color?: string;
+}> {
+  const result: Array<{
+    layer: string;
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    color?: string;
+  }> = [];
+  let i = 0;
+  while (i < ln.length) {
+    // Expect layerIdx (number) at position i
+    if (typeof ln[i] !== "number") {
+      i++;
+      continue;
+    }
+    if (i + 4 >= ln.length) break;
+    const layerIdx = ln[i] as number;
+    const x1 = ln[i + 1] as number;
+    const y1 = ln[i + 2] as number;
+    const x2 = ln[i + 3] as number;
+    const y2 = ln[i + 4] as number;
+    i += 5;
+    let color: string | undefined;
+    // Optional trailing color token
+    if (
+      i < ln.length &&
+      typeof ln[i] === "string" &&
+      (ln[i] as string).startsWith("#")
+    ) {
+      color = ln[i] as string;
+      i++;
+    }
+    result.push({
+      layer: layers[layerIdx]?.name ?? "0",
+      x1,
+      y1,
+      x2,
+      y2,
+      color,
+    });
+  }
+  return result;
+}
+
+/** Parse flat CI array (stride 4: layerIdx cx cy r) */
+function _parseCIFlat(
+  ci: (number | string)[],
+  layers: Array<{ name: string }>,
+): Array<{ layer: string; cx: number; cy: number; r: number; color?: string }> {
+  const result: Array<{
+    layer: string;
+    cx: number;
+    cy: number;
+    r: number;
+    color?: string;
+  }> = [];
+  let i = 0;
+  while (i < ci.length) {
+    if (typeof ci[i] !== "number") {
+      i++;
+      continue;
+    }
+    if (i + 3 >= ci.length) break;
+    const layerIdx = ci[i] as number;
+    const cx = ci[i + 1] as number;
+    const cy = ci[i + 2] as number;
+    const r = ci[i + 3] as number;
+    i += 4;
+    let color: string | undefined;
+    if (
+      i < ci.length &&
+      typeof ci[i] === "string" &&
+      (ci[i] as string).startsWith("#")
+    ) {
+      color = ci[i] as string;
+      i++;
+    }
+    result.push({ layer: layers[layerIdx]?.name ?? "0", cx, cy, r, color });
+  }
+  return result;
+}
+/** Parse flat AR array (stride 6: layerIdx cx cy r startAngle endAngle) */
+function _parseARFlat(
+  ar: (number | string)[],
+  layers: Array<{ name: string }>,
+): Array<{
+  layer: string;
+  cx: number;
+  cy: number;
+  r: number;
+  sa: number;
+  ea: number;
+  color?: string;
+}> {
+  const result: Array<{
+    layer: string;
+    cx: number;
+    cy: number;
+    r: number;
+    sa: number;
+    ea: number;
+    color?: string;
+  }> = [];
+  let i = 0;
+  while (i < ar.length) {
+    if (typeof ar[i] !== "number") {
+      i++;
+      continue;
+    }
+    if (i + 5 >= ar.length) break;
+    const layerIdx = ar[i] as number;
+    const cx = ar[i + 1] as number;
+    const cy = ar[i + 2] as number;
+    const r = ar[i + 3] as number;
+    const sa = ar[i + 4] as number;
+    const ea = ar[i + 5] as number;
+    i += 6;
+    let color: string | undefined;
+    if (
+      i < ar.length &&
+      typeof ar[i] === "string" &&
+      (ar[i] as string).startsWith("#")
+    ) {
+      color = ar[i] as string;
+      i++;
+    }
+    result.push({
+      layer: layers[layerIdx]?.name ?? "0",
+      cx,
+      cy,
+      r,
+      sa,
+      ea,
+      color,
+    });
+  }
+  return result;
+}
+
+/**
+ * Parse v5 LW entry with interleaved-bulge encoding.
+ *
+ * Layout: [layerIdx, closed, x1, y1, (bulge_if_nonzero_and_small), x2, y2, ...]
+ *
+ * Bulge values are always |bulge| ≤ 4.  Drawing coordinates in this file are
+ * ~8000–9500, so any value whose absolute value is < 100 after a valid (x,y)
+ * pair is treated as a bulge token.
+ */
+function _parseLWEntryV5(entry, layers) {
+  const layer = layers[entry[0]]?.name ?? "0";
+  const closed = entry[1] === 1;
+  const verts = [];
+  let i = 2;
+  while (i + 2 < entry.length) {
+    // stride 3: x, y, bulge
+    verts.push({ x: entry[i], y: entry[i + 1], z: 0, bulge: entry[i + 2] });
+    i += 3;
+  }
+  return { layer, closed, verts };
+}
+
+/** Parse v5 SP entry: [layerIdx, [x,y,x,y,...]] */
+function _parseSPEntryV5(
+  entry: any[],
+  layers: Array<{ name: string }>,
+): { layer: string; points: Array<{ x: number; y: number }> } {
+  const layer = layers[entry[0] as number]?.name ?? "0";
+  const flat = entry[1] as number[];
+  const pts: Array<{ x: number; y: number }> = [];
+  if (Array.isArray(flat)) {
+    for (let i = 0; i + 1 < flat.length; i += 2) {
+      pts.push({ x: flat[i], y: flat[i + 1] });
+    }
+  }
+  return { layer, points: pts };
+}
+
+/** Parse v5 EL entry: [layerIdx, cx, cy, majorX, majorY, ratio, startParam, endParam] */
+function _parseELEntryV5(
+  entry: number[],
+  layers: Array<{ name: string; _hex?: string }>,
+): DxfEllipse {
+  const [li, cx, cy, mAx, mAy, ratio, sp, ep] = entry;
+  return {
+    entity_type: "ELLIPSE",
+    handle: `el-${li}-${Math.round(cx)}-${Math.round(cy)}`,
+    layer: layers[li]?.name ?? "0",
+    center: { x: cx, y: cy, z: 0 },
+    major_axis: { x: mAx, y: mAy, z: 0 },
+    ratio: Math.abs(ratio),
+    start_param: sp,
+    end_param: ep,
+  };
+}
+
+/**
+ * Parse v5 HT entry:
+ *   [layerIdx, patternName, solidFillInt, [ [path], ... ]]
+ *
+ * Path is ['pl', closed, x, y, (bulge?), ...] or ['ep', edge, ...]
+ */
+function _parseHTEntryV5(
+  entry: any[],
+  layers: Array<{ name: string }>,
+  handleIdx: number,
+): DxfHatch {
+  const layer = layers[entry[0] as number]?.name ?? "0";
+  const patternName = String(entry[1] ?? "SOLID");
+  const solidFill = entry[2] === 1;
+  const rawPaths = (entry[3] ?? []) as any[][];
+
+  const boundaries: DxfHatchBoundary[] = rawPaths.map((path, pi) => {
+    const ptype = path[0];
+
+    if (ptype === "pl") {
+      const closed2 = path[1] === 1;
+      const verts: DxfPolylineVertex[] = [];
+      let j = 2;
+      while (j + 1 < path.length) {
+        const x = path[j] as number;
+        const y = path[j + 1] as number;
+        j += 2;
+        let bulge = 0;
+        if (j < path.length && Math.abs(path[j] as number) < 100) {
+          bulge = path[j] as number;
+          j++;
+        }
+        verts.push({ x, y, z: 0, bulge });
+      }
+      return { type: "POLYLINE" as const, is_outer: pi === 0, vertices: verts };
+    }
+
+    // Edge path
+    const edges: DxfHatchEdge[] = [];
+    for (let ei = 1; ei < path.length; ei++) {
+      const e = path[ei] as any[];
+      if (!Array.isArray(e)) continue;
+      const et2 = e[0];
+      if (et2 === "L") {
+        edges.push({
+          type: "LINE",
+          start: { x: e[1], y: e[2], z: 0 },
+          end: { x: e[3], y: e[4], z: 0 },
+        });
+      } else if (et2 === "A") {
+        edges.push({
+          type: "ARC",
+          center: { x: e[1], y: e[2], z: 0 },
+          radius: e[3],
+          start_angle: e[4],
+          end_angle: e[5],
+          is_ccw: e[6] === 1,
+        });
+      } else if (et2 === "E") {
+        edges.push({
+          type: "ELLIPSE",
+          center: { x: e[1], y: e[2], z: 0 },
+          major_axis_end: { x: e[3], y: e[4], z: 0 },
+          minor_to_major: e[5],
+          ellipse_start_angle: e[6],
+          ellipse_end_angle: e[7],
+        });
+      } else if (et2 === "S") {
+        edges.push({
+          type: "SPLINE",
+          spline_control_pts: (e[1] as number[][]).map((p) => ({
+            x: p[0],
+            y: p[1],
+            z: 0,
+          })),
+          spline_knots: e[2] as number[],
+        });
+      }
+    }
+    return { type: "EDGE" as const, is_outer: pi === 0, edges };
+  });
+
+  return {
+    entity_type: "HATCH",
+    handle: `ht-${handleIdx}`,
+    layer,
+    pattern_name: patternName,
+    solid_fill: solidFill,
+    associative: false,
+    boundaries,
+    pattern_angle: 0,
+    pattern_scale: 1,
+    gradient: null,
+  };
+}
+
+/** ACI index → rough hex colour for backward compat */
+function _aciToHex(aci: number): string {
+  const ACI: Record<number, string> = {
+    1: "#FF0000",
+    2: "#FFFF00",
+    3: "#00FF00",
+    4: "#00FFFF",
+    5: "#0000FF",
+    6: "#FF00FF",
+    7: "#FFFFFF",
+    8: "#808080",
+    9: "#C0C0C0",
+  };
+  return ACI[aci] ?? "#CCCCCC";
+}
+
+// ─── Main converter (v5) ─────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function _convertCompact(raw: any): DxfJsonDocument {
+  const parsedLayers = _parseLayers(raw.layers as string[]);
+  const data = (raw.data ?? raw.msp ?? {}) as Record<string, any>;
+
+  const _rawBbox = raw.meta?.bbox;
+  const _rawMin = _rawBbox?.min ?? [0, 0];
+  const _rawMax = _rawBbox?.max ?? [1, 1];
+
+  // ── Detect & fix invalid sentinel bbox (1e20 / -1e20) ────────────────────
+  const SENTINEL = 1e19;
+  const bboxHeaderValid =
+    Math.abs(_rawMin[0]) < SENTINEL &&
+    Math.abs(_rawMin[1]) < SENTINEL &&
+    Math.abs(_rawMax[0]) < SENTINEL &&
+    Math.abs(_rawMax[1]) < SENTINEL &&
+    (_rawMax[0] as number) > (_rawMin[0] as number) &&
+    (_rawMax[1] as number) > (_rawMin[1] as number);
+
+  // We'll compute the geometry-derived bbox below after parsing all arrays.
+  // For now grab the header values (may be replaced later).
+  let bboxMin: [number, number] = bboxHeaderValid
+    ? [_rawMin[0] as number, _rawMin[1] as number]
+    : [0, 0];
+  let bboxMax: [number, number] = bboxHeaderValid
+    ? [_rawMax[0] as number, _rawMax[1] as number]
+    : [1, 1];
+
+  // ── Lines ─────────────────────────────────────────────────────────────────
+  const lines: DxfLine[] = [];
+  if (Array.isArray(data.LN)) {
+    _parseLNFlat(data.LN as (number | string)[], parsedLayers).forEach(
+      (l, i) => {
+        lines.push({
+          entity_type: "LINE",
+          handle: `L${i}`,
+          layer: l.layer,
+          color: l.color,
+          start: { x: l.x1, y: l.y1, z: 0 },
+          end: { x: l.x2, y: l.y2, z: 0 },
+        });
+      },
+    );
+  }
+
+  // ── Dimension lines (DM) ──────────────────────────────────────────────────
+  if (Array.isArray(data.DM)) {
+    _parseLNFlat(data.DM as (number | string)[], parsedLayers).forEach(
+      (l, i) => {
+        lines.push({
+          entity_type: "LINE",
+          handle: `DM${i}`,
+          layer: l.layer,
+          color: l.color,
+          start: { x: l.x1, y: l.y1, z: 0 },
+          end: { x: l.x2, y: l.y2, z: 0 },
+        });
+      },
+    );
+  }
+
+  // ── Hatch lines (HL) ──────────────────────────────────────────────────────
+  if (Array.isArray(data.HL)) {
+    _parseLNFlat(data.HL as (number | string)[], parsedLayers).forEach(
+      (l, i) => {
+        lines.push({
+          entity_type: "LINE",
+          handle: `HL${i}`,
+          layer: l.layer,
+          color: l.color,
+          start: { x: l.x1, y: l.y1, z: 0 },
+          end: { x: l.x2, y: l.y2, z: 0 },
+        });
+      },
+    );
+  }
+
+  // ── Polylines (LW) ────────────────────────────────────────────────────────
+  const polylines: DxfPolyline[] = [];
+  if (Array.isArray(data.LW)) {
+    (data.LW as any[][]).forEach((entry, i) => {
+      const { layer, closed, verts, color } = _parseLWEntryV5(
+        entry,
+        parsedLayers,
+      );
+      polylines.push({
+        entity_type: "LWPOLYLINE",
+        handle: `P${i}`,
+        layer,
+        closed,
+        color,
+        vertex_count: verts.length,
+        vertices: verts,
+      });
+    });
+  }
+
+  // ── Circles (CI) ──────────────────────────────────────────────────────────
+  const circles: DxfCircle[] = [];
+  if (Array.isArray(data.CI)) {
+    _parseCIFlat(data.CI as (number | string)[], parsedLayers).forEach(
+      (c, i) => {
+        circles.push({
+          entity_type: "CIRCLE",
+          handle: `C${i}`,
+          layer: c.layer,
+          color: c.color,
+          center: { x: c.cx, y: c.cy, z: 0 },
+          radius: c.r,
+        });
+      },
+    );
+  }
+
+  // ── Arcs (AR) ─────────────────────────────────────────────────────────────
+  const arcs: DxfArc[] = [];
+  if (Array.isArray(data.AR)) {
+    _parseARFlat(data.AR as (number | string)[], parsedLayers).forEach(
+      (a, i) => {
+        arcs.push({
+          entity_type: "ARC",
+          handle: `A${i}`,
+          layer: a.layer,
+          color: a.color,
+          center: { x: a.cx, y: a.cy, z: 0 },
+          radius: a.r,
+          start_angle: a.sa,
+          end_angle: a.ea,
+        });
+      },
+    );
+  }
+
+  // ── Ellipses (EL) ─────────────────────────────────────────────────────────
+  const ellipses: DxfEllipse[] = [];
+  if (Array.isArray(data.EL)) {
+    (data.EL as any[][]).forEach((entry) => {
+      const el = _parseELEntryV5(entry, parsedLayers);
+      if (el) ellipses.push(el); // null = degenerate ellipse, skip
+    });
+  }
+
+  // ── Splines (SP) ──────────────────────────────────────────────────────────
+  const splines: DxfSpline[] = [];
+  if (Array.isArray(data.SP)) {
+    (data.SP as any[][]).forEach((entry, i) => {
+      const { layer, points } = _parseSPEntryV5(entry, parsedLayers);
+      if (points.length < 2) return;
+      splines.push({
+        entity_type: "SPLINE",
+        handle: `SP${i}`,
+        layer,
+        degree: 3,
+        closed: false,
+        knots: [],
+        control_points: [],
+        fit_points: [],
+        weights: [],
+        tessellation: points.map((p) => ({ x: p.x, y: p.y, z: 0 })),
+      });
+    });
+  }
+
+  // ── Points (PT) ───────────────────────────────────────────────────────────
+  const points_entities: DxfPoint_Entity[] = [];
+  if (Array.isArray(data.PT)) {
+    const pt = data.PT as (number | string)[];
+    let i = 0;
+    while (i < pt.length) {
+      const layerIdx = pt[i];
+      if (typeof layerIdx !== "number" || i + 2 >= pt.length) break;
+      const x = pt[i + 1] as number;
+      const y = pt[i + 2] as number;
+      i += 3;
+      let color: string | undefined;
+      if (
+        i < pt.length &&
+        typeof pt[i] === "string" &&
+        (pt[i] as string).startsWith("#")
+      ) {
+        color = pt[i] as string;
+        i++;
+      }
+      points_entities.push({
+        entity_type: "POINT",
+        handle: `PT${points_entities.length}`,
+        layer: parsedLayers[layerIdx as number]?.name ?? "0",
+        color,
+        location: { x, y, z: 0 },
+      });
+    }
+  }
+
+  // ── Texts (TX) ────────────────────────────────────────────────────────────
+  // Collect raw TX entries first; normalise heights at the end.
+  interface RawTX {
+    layerIdx: number;
+    x: number;
+    y: number;
+    rawHeight: number;
+    text: string;
+    rot: number;
+    color?: string;
+  }
+  const rawTexts: RawTX[] = [];
+  if (Array.isArray(data.TX)) {
+    (data.TX as any[][]).forEach((entry) => {
+      const [layerIdx, x, y, height, text] = entry as [
+        number,
+        number,
+        number,
+        number,
+        string,
+      ];
+      let rot = 0;
+      let color: string | undefined;
+      if (entry.length > 5) {
+        if (typeof entry[5] === "number") {
+          rot = entry[5];
+          if (
+            entry.length > 6 &&
+            typeof entry[6] === "string" &&
+            entry[6].startsWith("#")
+          )
+            color = entry[6];
+        } else if (typeof entry[5] === "string" && entry[5].startsWith("#")) {
+          color = entry[5];
+        }
+      }
+      const _text = String(text ?? "");
+      // Skip machine-readable metadata markers (WALL_META, DOOR_META, SPARKIX_META, etc.)
+      // and near-zero-height texts — these are invisible in AutoCAD by design.
+      const _isMeta = /^[A-Z_]+_META:/i.test(_text) || /^SPARKIX_/i.test(_text);
+      const _isInvisible = (height ?? 0) <= 0.01;
+      if (_isMeta || _isInvisible) return;
+      rawTexts.push({
+        layerIdx,
+        x,
+        y,
+        rawHeight: height ?? 5,
+        text: _text,
+        rot,
+        color,
+      });
+    });
+  }
+
+  // ── Hatches (HT) ─────────────────────────────────────────────────────────
+  const hatches: DxfHatch[] = [];
+  if (Array.isArray(data.HT)) {
+    (data.HT as any[][]).forEach((entry, i) => {
+      hatches.push(_parseHTEntryV5(entry, parsedLayers, i));
+    });
+  }
+
+  // ── Text heights ──────────────────────────────────────────────────────────
+  // The v7 converter outputs text heights in the same model-space units as all
+  // other geometry — NO normalisation factor is needed. The old bboxExt/60
+  // factor was a legacy hack for a previous format where heights were in a
+  // different unit space. Applying it here causes two bugs:
+  //   1. All text is scaled up ~5x (room labels appear huge on canvas)
+  //   2. Math.max(0.5, ...) inflates intentionally-invisible metadata texts
+  //      (h=0.01 WALL_META/DOOR_META markers) to the same size as room labels.
+  // The canvas renderer scales text proportionally via (pixelWidth / bboxWidth),
+  // exactly like it does for line coordinates — no pre-scaling needed here.
+
+  const texts: DxfText[] = rawTexts.map((rt, i) => ({
+    entity_type: "MTEXT",
+    handle: `TX${i}`,
+    layer: parsedLayers[rt.layerIdx]?.name ?? "0",
+    color: rt.color,
+    text: rt.text,
+    position: { x: rt.x, y: rt.y, z: 0 },
+    height: rt.rawHeight,
+    rotation: rt.rot,
+  }));
+  // ── Compute bbox from geometry if header bbox was invalid ─────────────────
+  if (!bboxHeaderValid) {
+    let mnX = Infinity,
+      mnY = Infinity,
+      mxX = -Infinity,
+      mxY = -Infinity;
+    const expandB = (x: number, y: number) => {
+      if (!isFinite(x) || !isFinite(y)) return;
+      if (x < mnX) mnX = x;
+      if (x > mxX) mxX = x;
+      if (y < mnY) mnY = y;
+      if (y > mxY) mxY = y;
+    };
+
+    // Lines (already parsed)
+    for (const l of lines) {
+      expandB(l.start.x, l.start.y);
+      expandB(l.end.x, l.end.y);
+    }
+    // Polylines
+    for (const pl of polylines) {
+      for (const v of pl.vertices) expandB(v.x, v.y);
+    }
+    // Circles & arcs (approximate with bbox of bounding box)
+    for (const ci of circles) {
+      expandB(ci.center.x - ci.radius, ci.center.y - ci.radius);
+      expandB(ci.center.x + ci.radius, ci.center.y + ci.radius);
+    }
+    for (const a of arcs) {
+      expandB(a.center.x - a.radius, a.center.y - a.radius);
+      expandB(a.center.x + a.radius, a.center.y + a.radius);
+    }
+
+    if (isFinite(mnX) && mxX > mnX) {
+      // The geometry may contain outlier blocks placed far from the main plan.
+      // Use a clustering heuristic: keep only coords within 5× the IQR of the centroid.
+      const allXs = lines.flatMap((l) => [l.start.x, l.end.x]);
+      const allYs = lines.flatMap((l) => [l.start.y, l.end.y]);
+      for (const pl of polylines)
+        for (const v of pl.vertices) {
+          allXs.push(v.x);
+          allYs.push(v.y);
+        }
+
+      allXs.sort((a, b) => a - b);
+      allYs.sort((a, b) => a - b);
+
+      const q1x = allXs[Math.floor(allXs.length * 0.25)];
+      const q3x = allXs[Math.floor(allXs.length * 0.75)];
+      const q1y = allYs[Math.floor(allYs.length * 0.25)];
+      const q3y = allYs[Math.floor(allYs.length * 0.75)];
+      const iqrX = q3x - q1x || mxX - mnX;
+      const iqrY = q3y - q1y || mxY - mnY;
+      const FENCE = 5.0;
+
+      let cx1 = q1x - iqrX * FENCE,
+        cx2 = q3x + iqrX * FENCE;
+      let cy1 = q1y - iqrY * FENCE,
+        cy2 = q3y + iqrY * FENCE;
+
+      // Re-expand using only inlier coordinates
+      let rx1 = Infinity,
+        ry1 = Infinity,
+        rx2 = -Infinity,
+        ry2 = -Infinity;
+      for (const l of lines) {
+        for (const p of [l.start, l.end]) {
+          if (p.x >= cx1 && p.x <= cx2 && p.y >= cy1 && p.y <= cy2) {
+            if (p.x < rx1) rx1 = p.x;
+            if (p.x > rx2) rx2 = p.x;
+            if (p.y < ry1) ry1 = p.y;
+            if (p.y > ry2) ry2 = p.y;
+          }
+        }
+      }
+      for (const pl of polylines) {
+        for (const v of pl.vertices) {
+          if (v.x >= cx1 && v.x <= cx2 && v.y >= cy1 && v.y <= cy2) {
+            if (v.x < rx1) rx1 = v.x;
+            if (v.x > rx2) rx2 = v.x;
+            if (v.y < ry1) ry1 = v.y;
+            if (v.y > ry2) ry2 = v.y;
+          }
+        }
+      }
+
+      if (isFinite(rx1) && rx2 > rx1) {
+        const padX = (rx2 - rx1) * 0.03;
+        const padY = (ry2 - ry1) * 0.03;
+        bboxMin = [rx1 - padX, ry1 - padY];
+        bboxMax = [rx2 + padX, ry2 + padY];
+      } else {
+        const padX = (mxX - mnX) * 0.03;
+        const padY = (mxY - mnY) * 0.03;
+        bboxMin = [mnX - padX, mnY - padY];
+        bboxMax = [mxX + padX, mxY + padY];
+      }
+    }
+  }
+
+  // ── Layer definitions ─────────────────────────────────────────────────────
+  const layerDefs: DxfLayerDef[] = (parsedLayers as any[]).map((l: any) => ({
+    name: l.name,
+    color: 7,
+    true_color: l._hex ?? _aciToHex(7),
+    linetype: "Continuous",
+    lineweight: -3,
+    plot: true,
+    is_frozen: l._visible === false,
+    is_locked: false,
+  }));
+
+  // ── Stats ─────────────────────────────────────────────────────────────────
+  const totalVerts = polylines.reduce((s, p) => s + p.vertices.length, 0);
+  const stats: DxfJsonDocument["stats"] = {
+    entity_counts: {
+      LINE: lines.length,
+      LWPOLYLINE: polylines.length,
+      CIRCLE: circles.length,
+      ARC: arcs.length,
+      ELLIPSE: ellipses.length,
+      SPLINE: splines.length,
+      TEXT: texts.length,
+      HATCH: hatches.length,
+      POINT: points_entities.length,
+    },
+    line_count: lines.length,
+    polyline_count: polylines.length,
+    arc_count: arcs.length,
+    text_count: texts.length,
+    total_vertex_count: totalVerts,
+    insert_count: 0,
+    door_insert_count: 0,
+    window_insert_count: 0,
+    furniture_insert_count: 0,
+    stair_insert_count: 0,
+    hatch_count: hatches.length,
+    spline_count: splines.length,
+  };
+
+  // ── Final extents ─────────────────────────────────────────────────────────
+  const extmin: [number, number, number] = [bboxMin[0], bboxMin[1], 0];
+  const extmax: [number, number, number] = [bboxMax[0], bboxMax[1], 0];
+
+  return {
+    source_file: raw.src ?? "unknown.dxf",
+    meta: {
+      acad_version: raw.meta?.acad ?? "AC1018",
+      extmin,
+      extmax,
+      insunits: raw.meta?.units,
+    },
+    stats,
+    layers: layerDefs,
+    lines,
+    arcs,
+    circles,
+    ellipses,
+    splines,
+    points: points_entities,
+    polylines,
+    texts,
+    hatches,
+    dimensions: [],
+    leaders: [],
+    inserts: [],
+    door_inserts: [],
+    window_inserts: [],
+    furniture_inserts: [],
+    stair_inserts: [],
+  };
+}
+
+export const DXF_JSON_DATA: DxfJsonDocument = _convertCompact(_VILLA_COMPACT);
