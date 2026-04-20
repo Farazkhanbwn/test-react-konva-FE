@@ -439,18 +439,13 @@ export default function DesignCanvasSection({
                 variant="outline"
                 size="sm"
                 onClick={() => {
-                  const json = JSON.stringify(canvas.state, null, 2)
-                  const blob = new Blob([json], { type: 'application/json' })
-                  const url = URL.createObjectURL(blob)
-                  const a = document.createElement('a')
-                  a.href = url
-                  a.download = `${canvas.state.meta?.projectName || 'floor-plan'}.json`
-                  a.click()
-                  URL.revokeObjectURL(url)
+                  const { exportCanvasToDxf } = require('@/utils/exportCanvasToDxf')
+                  const filename = `${canvas.state.meta?.projectName || 'floor-plan'}.dxf`
+                  exportCanvasToDxf(canvas.state, filename)
                 }}
                 type="button"
               >
-                <Download size={14} /> Export JSON
+                <Download size={14} /> Export DXF
               </Button>
             </div>
           </div>
