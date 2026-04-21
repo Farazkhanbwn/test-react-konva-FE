@@ -13,6 +13,11 @@ src/
 ├── DxfJsonViewPage.tsx          # Main editor component (2800 lines)
 ├── constants/
 │   └── dxfJsonData.ts            # DXF data structure + sample data
+├── contexts/                     # NEW in Phase 2
+│   ├── EditorStateContext.tsx    # Document, walls, undo/redo state
+│   ├── ToolStateContext.tsx      # Tool settings, snap, ortho
+│   ├── SelectionStateContext.tsx # Selection state management
+│   └── index.ts                  # Export all contexts
 ├── utils/
 │   ├── dxfGeometry.ts            # Math & coordinate transformations
 │   ├── dxfRoomDetection.ts       # Room detection algorithm
