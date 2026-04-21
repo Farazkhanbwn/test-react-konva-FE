@@ -68,6 +68,31 @@ import {
   renderItemsFromDxfJson,
 } from '@/utils/wallsFromDxfJson'
 import { downloadDxf } from './utils/exportToDxf'
+import {
+  toC,
+  toW,
+  buildTransform as buildT,
+  rotatePoint,
+  closestPointOnSegment,
+  polyArea,
+  arcPoints,
+  lineIntersectsRect,
+} from './utils/dxfGeometry'
+import { detectRooms, detectRoomsWithWalls, wallIdsOnRoomBoundary, translateWallsByIds } from './utils/dxfRoomDetection'
+import { getGroupWallIds } from './utils/dxfSelection'
+import {
+  cloneDoc,
+  appendUserLine,
+  appendUserArc,
+  appendUserPolyline,
+  appendUserText,
+  removeLineFromDocByWallId,
+  removeArcFromDocByHandle,
+  removePolylineFromDocByHandle,
+  removeTextFromDoc,
+  polylineHandleFromWallId,
+  roomLabelHandle,
+} from './utils/dxfDocumentUtils'
 
 /* ─────────────────────────────────────────────────────────────────────────────
    NEW: AutoCAD ACI colour palette (256 entries → hex)
@@ -110,131 +135,6 @@ interface Pt { x: number; y: number }
 interface EditorSnapshot {
   walls: WallSeg[]
   planDoc: DxfJsonDocument
-}
-
-function cloneDoc(doc: DxfJsonDocument): DxfJsonDocument {
-  return JSON.parse(JSON.stringify(doc)) as DxfJsonDocument
-}
-
-function appendUserLine(doc: DxfJsonDocument, start: Pt, end: Pt): { next: DxfJsonDocument; handle: string } {
-  const handle = `user-${Date.now()}`
-  const line: DxfLine = {
-    entity_type: 'LINE',
-    handle,
-    layer: '0',
-    start: { x: start.x, y: start.y, z: 0 },
-    end: { x: end.x, y: end.y, z: 0 },
-  }
-  const next = cloneDoc(doc)
-  next.lines = [...next.lines, line]
-  next.stats = {
-    ...next.stats,
-    line_count: next.stats.line_count + 1,
-    entity_counts: {
-      ...next.stats.entity_counts,
-      LINE: (next.stats.entity_counts.LINE ?? 0) + 1,
-    },
-  }
-  return { next, handle }
-}
-
-function appendUserArc(
-  doc: DxfJsonDocument,
-  center: Pt,
-  radius: number,
-  startAngle: number,
-  endAngle: number,
-): { next: DxfJsonDocument; arc: DxfArc } {
-  const handle = `user-ar-${Date.now()}`
-  const arc: DxfArc = {
-    entity_type: 'ARC',
-    handle,
-    layer: '0',
-    center: { x: center.x, y: center.y, z: 0 },
-    radius,
-    start_angle: startAngle,
-    end_angle: endAngle,
-  }
-  const next = cloneDoc(doc)
-  next.arcs = [...next.arcs, arc]
-  next.stats = {
-    ...next.stats,
-    arc_count: (next.stats.arc_count ?? 0) + 1,
-    entity_counts: { ...next.stats.entity_counts, ARC: (next.stats.entity_counts.ARC ?? 0) + 1 },
-  }
-  return { next, arc }
-}
-
-function removeArcFromDocByHandle(doc: DxfJsonDocument, handle: string): DxfJsonDocument {
-  const arcs = doc.arcs.filter(a => a.handle !== handle)
-  if (arcs.length === doc.arcs.length) return doc
-  const next = cloneDoc(doc)
-  next.arcs = arcs
-  next.stats = {
-    ...next.stats,
-    arc_count: Math.max(0, (next.stats.arc_count ?? 0) - 1),
-    entity_counts: {
-      ...next.stats.entity_counts,
-      ARC: Math.max(0, (next.stats.entity_counts.ARC ?? 0) - 1),
-    },
-  }
-  return next
-}
-
-function appendUserPolyline(
-  doc: DxfJsonDocument,
-  vertices: Pt[],
-  closed: boolean,
-): { next: DxfJsonDocument; poly: DxfPolyline } {
-  const handle = `user-pl-${Date.now()}`
-  const vertList: DxfPolylineVertex[] = vertices.map(v => ({ x: v.x, y: v.y, z: 0, bulge: 0 }))
-  const poly: DxfPolyline = {
-    entity_type: 'LWPOLYLINE',
-    handle,
-    layer: '0',
-    closed,
-    vertex_count: vertList.length,
-    vertices: vertList,
-  }
-  const next = cloneDoc(doc)
-  next.polylines = [...next.polylines, poly]
-  next.stats = {
-    ...next.stats,
-    polyline_count: next.stats.polyline_count + 1,
-    total_vertex_count: next.stats.total_vertex_count + vertList.length,
-    entity_counts: {
-      ...next.stats.entity_counts,
-      LWPOLYLINE: (next.stats.entity_counts.LWPOLYLINE ?? 0) + 1,
-    },
-  }
-  return { next, poly }
-}
-
-function polylineHandleFromWallId(wallId: string): string | null {
-  if (!wallId.startsWith('pl-')) return null
-  const rest = wallId.slice(3)
-  const dash = rest.lastIndexOf('-')
-  if (dash <= 0) return null
-  if (!/^\d+$/.test(rest.slice(dash + 1))) return null
-  return rest.slice(0, dash)
-}
-
-function removePolylineFromDocByHandle(doc: DxfJsonDocument, handle: string): DxfJsonDocument {
-  const polylines = doc.polylines.filter(p => p.handle !== handle)
-  if (polylines.length === doc.polylines.length) return doc
-  const removed = doc.polylines.find(p => p.handle === handle)!
-  const next = cloneDoc(doc)
-  next.polylines = polylines
-  next.stats = {
-    ...next.stats,
-    polyline_count: Math.max(0, next.stats.polyline_count - 1),
-    total_vertex_count: Math.max(0, next.stats.total_vertex_count - removed.vertex_count),
-    entity_counts: {
-      ...next.stats.entity_counts,
-      LWPOLYLINE: Math.max(0, (next.stats.entity_counts.LWPOLYLINE ?? 0) - 1),
-    },
-  }
-  return next
 }
 
 /* ─── Furniture category colours ──────────────────────────── */
@@ -293,73 +193,7 @@ function triggerDownload(href: string, filename: string) {
   document.body.removeChild(a)
 }
 
-/** Returns `room-lbl-{polyHandle}` — used to link a room label to its polyline. */
-function roomLabelHandle(polyHandle: string): string {
-  return `room-lbl-${polyHandle}`
-}
 
-function appendUserText(
-  doc: DxfJsonDocument,
-  position: Pt,
-  text = 'Label',
-  height = 0.2,
-  overrideHandle?: string,
-): { next: DxfJsonDocument; handle: string } {
-  const handle = overrideHandle ?? `user-t-${Date.now()}`
-  const entity: DxfText = {
-    entity_type: 'MTEXT',
-    handle,
-    layer: '0',
-    text,
-    position: { x: position.x, y: position.y, z: 0 },
-    height,
-  }
-  const next = cloneDoc(doc)
-  next.texts = [...next.texts, entity]
-  next.stats = {
-    ...next.stats,
-    text_count: next.stats.text_count + 1,
-    entity_counts: {
-      ...next.stats.entity_counts,
-      MTEXT: (next.stats.entity_counts.MTEXT ?? 0) + 1,
-    },
-  }
-  return { next, handle }
-}
-
-function removeLineFromDocByWallId(doc: DxfJsonDocument, wallId: string): DxfJsonDocument {
-  if (!wallId.startsWith('ln-')) return doc
-  const handle = wallId.slice(3)
-  const lines = doc.lines.filter(l => l.handle !== handle)
-  if (lines.length === doc.lines.length) return doc
-  const next = cloneDoc(doc)
-  next.lines = lines
-  next.stats = {
-    ...next.stats,
-    line_count: Math.max(0, next.stats.line_count - 1),
-    entity_counts: {
-      ...next.stats.entity_counts,
-      LINE: Math.max(0, (next.stats.entity_counts.LINE ?? 0) - 1),
-    },
-  }
-  return next
-}
-
-function removeTextFromDoc(doc: DxfJsonDocument, handle: string): DxfJsonDocument {
-  const texts = doc.texts.filter(t => t.handle !== handle)
-  if (texts.length === doc.texts.length) return doc
-  const next = cloneDoc(doc)
-  next.texts = texts
-  next.stats = {
-    ...next.stats,
-    text_count: Math.max(0, next.stats.text_count - 1),
-    entity_counts: {
-      ...next.stats.entity_counts,
-      MTEXT: Math.max(0, (next.stats.entity_counts.MTEXT ?? 0) - 1),
-    },
-  }
-  return next
-}
 
 /* ─── Constants ──────────────────────────────────────────────── */
 const PAD = 55
@@ -380,34 +214,7 @@ const ROOM_COLORS = [
 ]
 const ROOM_STROKES = ROOM_COLORS.map(c => c.replace('0.15', '0.55'))
 
-function nearSamePt(a: Pt, b: Pt, eps: number) {
-  return Math.abs(a.x - b.x) < eps && Math.abs(a.y - b.y) < eps
-}
 
-function wallIdsOnRoomBoundary(room: Pt[], segs: WallSeg[]): string[] {
-  const eps = Math.max(SNAP_TH * 5, 0.12)
-  const n = room.length
-  const found = new Set<string>()
-  for (let i = 0; i < n; i++) {
-    const a = room[i]
-    const b = room[(i + 1) % n]
-    for (const w of segs) {
-      const s = w.start, e = w.end
-      const fwd = nearSamePt(s, a, eps) && nearSamePt(e, b, eps)
-      const rev = nearSamePt(s, b, eps) && nearSamePt(e, a, eps)
-      if (fwd || rev) { found.add(w.id); break }
-    }
-  }
-  return [...found]
-}
-
-function translateWallsByIds(ws: WallSeg[], ids: Set<string>, dx: number, dy: number): WallSeg[] {
-  if (!ids.size || (dx === 0 && dy === 0)) return ws
-  return ws.map(w => {
-    if (!ids.has(w.id)) return w
-    return { ...w, start: { x: w.start.x + dx, y: w.start.y + dy }, end: { x: w.end.x + dx, y: w.end.y + dy } }
-  })
-}
 
 function applyRoomDeltaToDoc(doc: DxfJsonDocument, wallIds: string[], dx: number, dy: number): DxfJsonDocument {
   if (!wallIds.length || (dx === 0 && dy === 0)) return doc
@@ -456,27 +263,7 @@ function applyRoomDeltaToDoc(doc: DxfJsonDocument, wallIds: string[], dx: number
 }
 
 /* ─── Transform helpers ──────────────────────────────────────── */
-function buildT(emin: number[], emax: number[], canvasW: number, canvasH: number) {
-  const wW = emax[0] - emin[0]
-  const wH = emax[1] - emin[1]
-  const aW = Math.max(40, canvasW - PAD * 2)
-  const aH = Math.max(40, canvasH - PAD * 2)
-  const sc = Math.min(aW / wW, aH / wH)
-  const oX = PAD + (aW - wW * sc) / 2
-  const oY = PAD + (aH - wH * sc) / 2
-  return { sc, oX, oY, emin, wH }
-}
 type T = ReturnType<typeof buildT>
-
-const toC = (wx: number, wy: number, t: T): [number, number] => [
-  (wx - t.emin[0]) * t.sc + t.oX,
-  t.oY + (t.wH - (wy - t.emin[1])) * t.sc,
-]
-
-const toW = (cx: number, cy: number, t: T): [number, number] => [
-  (cx - t.oX) / t.sc + t.emin[0],
-  t.emin[1] + t.wH - (cy - t.oY) / t.sc,
-]
 
 function getStageCanvasPointer(stage: Konva.Stage): { x: number; y: number } | null {
   const p = stage.getPointerPosition()
@@ -485,33 +272,7 @@ function getStageCanvasPointer(stage: Konva.Stage): { x: number; y: number } | n
   return inv.point(p)
 }
 
-function arcPoints(arc: DxfArc, t: T, steps = 48): number[] {
-  const startRad = arc.start_angle * Math.PI / 180
-  const endDeg = arc.end_angle > arc.start_angle ? arc.end_angle : arc.end_angle + 360
-  const endRad = endDeg * Math.PI / 180
-  const pts: number[] = []
-  for (let i = 0; i <= steps; i++) {
-    const angle = startRad + (endRad - startRad) * i / steps
-    const [cx, cy] = toC(arc.center.x + arc.radius * Math.cos(angle), arc.center.y + arc.radius * Math.sin(angle), t)
-    pts.push(cx, cy)
-  }
-  return pts
-}
 
-function polyArea(pts: Pt[]): number {
-  let a = 0
-  for (let i = 0; i < pts.length; i++) {
-    const j = (i + 1) % pts.length
-    a += pts[i].x * pts[j].y - pts[j].x * pts[i].y
-  }
-  return a / 2
-}
-
-function rotatePoint(px: number, py: number, cx: number, cy: number, angle: number): [number, number] {
-  const cos = Math.cos(angle), sin = Math.sin(angle)
-  const dx = px - cx, dy = py - cy
-  return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos]
-}
 
 function applyRotation(ws: WallSeg[], ids: Set<string>, cx: number, cy: number, angle: number): WallSeg[] {
   if (angle === 0) return ws
@@ -523,129 +284,9 @@ function applyRotation(ws: WallSeg[], ids: Set<string>, cx: number, cy: number, 
   })
 }
 
-function closestPointOnSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): { pt: { x: number; y: number }; t: number; dist: number } {
-  const dx = bx - ax, dy = by - ay
-  const lenSq = dx * dx + dy * dy
-  if (lenSq < 1e-12) return { pt: { x: ax, y: ay }, t: 0, dist: Math.hypot(px - ax, py - ay) }
-  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq))
-  const cx = ax + t * dx, cy = ay + t * dy
-  return { pt: { x: cx, y: cy }, t, dist: Math.hypot(px - cx, py - cy) }
-}
 
-function getGroupWallIds(wallId: string, walls: WallSeg[]): string[] {
-  const target = walls.find(w => w.id === wallId)
-  if (!target?.groupId) return [wallId]
-  const gid = target.groupId
-  return walls.filter(w => w.groupId === gid).map(w => w.id)
-}
 
-function lineIntersectsRect(a: Pt, b: Pt, x1: number, y1: number, x2: number, y2: number): boolean {
-  if (a.x >= x1 && a.x <= x2 && a.y >= y1 && a.y <= y2) return true
-  if (b.x >= x1 && b.x <= x2 && b.y >= y1 && b.y <= y2) return true
-  const intersect = (p1: Pt, p2: Pt, p3: Pt, p4: Pt) => {
-    const den = (p4.y - p3.y) * (p2.x - p1.x) - (p4.x - p3.x) * (p2.y - p1.y)
-    if (den === 0) return false
-    const ua = ((p4.x - p3.x) * (p1.y - p3.y) - (p4.y - p3.y) * (p1.x - p3.x)) / den
-    const ub = ((p2.x - p1.x) * (p1.y - p3.y) - (p2.y - p1.y) * (p1.x - p3.x)) / den
-    return ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1
-  }
-  const rect = [
-    { a: { x: x1, y: y1 }, b: { x: x2, y: y1 } },
-    { a: { x: x2, y: y1 }, b: { x: x2, y: y2 } },
-    { a: { x: x2, y: y2 }, b: { x: x1, y: y2 } },
-    { a: { x: x1, y: y2 }, b: { x: x1, y: y1 } },
-  ]
-  return rect.some(edge => intersect(a, b, edge.a, edge.b))
-}
 
-/* ─── DCEL-based minimal face extraction ────────── */
-function detectRooms(walls: WallSeg[]): Pt[][] {
-  // Exclude arc chord segments (circles/arcs) — arcs form closed curves but are not rooms
-  const segs = walls.filter(w => !w.isDetail && !w.isOuter && !w.id.startsWith('pl-') && !w.fromArc)
-  if (segs.length < 3) return []
-
-  const nodes: Pt[] = []
-  const getN = (x: number, y: number): number => {
-    for (let i = 0; i < nodes.length; i++)
-      if (Math.abs(nodes[i].x - x) < SNAP_TH && Math.abs(nodes[i].y - y) < SNAP_TH) return i
-    return nodes.push({ x, y }) - 1
-  }
-
-  const eKeys = new Set<string>()
-  const eList: [number, number][] = []
-  for (const w of segs) {
-    const u = getN(w.start.x, w.start.y)
-    const v = getN(w.end.x, w.end.y)
-    if (u === v) continue
-    const k = `${Math.min(u, v)},${Math.max(u, v)}`
-    if (!eKeys.has(k)) { eKeys.add(k); eList.push([u, v]) }
-  }
-  if (eList.length < 3) return []
-
-  const adj = new Map<number, number[]>()
-  for (const [u, v] of eList)
-    for (const [a, b] of [[u, v], [v, u]] as const) {
-      if (!adj.has(a)) adj.set(a, [])
-      adj.get(a)!.push(b)
-    }
-  for (const [n, nb] of adj) {
-    const pn = nodes[n]
-    nb.sort((a, b) =>
-      Math.atan2(nodes[a].y - pn.y, nodes[a].x - pn.x) -
-      Math.atan2(nodes[b].y - pn.y, nodes[b].x - pn.x))
-  }
-
-  const nextHE = new Map<string, string>()
-  for (const [u, v] of eList) {
-    for (const [s, e] of [[u, v], [v, u]] as const) {
-      const backA = Math.atan2(nodes[s].y - nodes[e].y, nodes[s].x - nodes[e].x)
-      let bestW = -1, bestCW = Infinity
-      for (const w of adj.get(e) ?? []) {
-        const outA = Math.atan2(nodes[w].y - nodes[e].y, nodes[w].x - nodes[e].x)
-        let cw = backA - outA
-        while (cw <= 0) cw += 2 * Math.PI
-        if (cw < bestCW) { bestCW = cw; bestW = w }
-      }
-      if (bestW !== -1) nextHE.set(`${s},${e}`, `${e},${bestW}`)
-    }
-  }
-
-  const traced = new Set<string>()
-  const rawFaces: Pt[][] = []
-  for (const [u, v] of eList) {
-    for (const [s, e] of [[u, v], [v, u]] as const) {
-      const sk = `${s},${e}`
-      if (traced.has(sk) || !nextHE.has(sk)) continue
-      const ids: number[] = []
-      let cur = sk, guard = 0
-      do {
-        traced.add(cur)
-        ids.push(Number(cur.split(',')[0]))
-        cur = nextHE.get(cur) ?? ''
-        guard++
-      } while (cur !== sk && cur !== '' && guard < 60)
-      if (cur === sk && ids.length >= 3) rawFaces.push(ids.map(i => nodes[i]))
-    }
-  }
-
-  const interiorFaces = rawFaces.filter(f => polyArea(f) > 0.05)
-  if (!interiorFaces.length) return []
-
-  const validFaces: Pt[][] = []
-  for (const face of interiorFaces) {
-    try {
-      const ring = face.map(p => [p.x, p.y] as [number, number])
-      ring.push(ring[0])
-      const result = polygonClipping.union([[ring]])
-      for (const poly of result)
-        for (const contour of poly) {
-          const pts = contour.slice(0, -1).map(([x, y]) => ({ x, y }))
-          if (pts.length >= 3 && Math.abs(polyArea(pts)) > 0.05) validFaces.push(pts)
-        }
-    } catch { validFaces.push(face) }
-  }
-  return validFaces
-}
 
 function applyResizeToWalls(
   ws: WallSeg[], ids: Set<string>,
@@ -664,91 +305,7 @@ function applyResizeToWalls(
   })
 }
 
-function detectRoomsWithWalls(walls: WallSeg[]): Array<{ polygon: Pt[]; wallIds: string[] }> {
-  const segs = walls.filter(w => !w.isDetail && !w.isOuter && !w.id.startsWith('pl-') && !w.fromArc)
-  if (segs.length < 3) return []
 
-  const nodes: Pt[] = []
-  const getN = (x: number, y: number): number => {
-    for (let i = 0; i < nodes.length; i++)
-      if (Math.abs(nodes[i].x - x) < SNAP_TH && Math.abs(nodes[i].y - y) < SNAP_TH) return i
-    return nodes.push({ x, y }) - 1
-  }
-
-  const eKeys = new Set<string>()
-  const eList: [number, number][] = []
-  const eWallIds: string[] = []
-
-  for (const w of segs) {
-    const u = getN(w.start.x, w.start.y)
-    const v = getN(w.end.x, w.end.y)
-    if (u === v) continue
-    const k = `${Math.min(u, v)},${Math.max(u, v)}`
-    if (!eKeys.has(k)) { eKeys.add(k); eList.push([u, v]); eWallIds.push(w.id) }
-  }
-  if (eList.length < 3) return []
-
-  const adj = new Map<number, number[]>()
-  for (const [u, v] of eList)
-    for (const [a, b] of [[u, v], [v, u]] as const) {
-      if (!adj.has(a)) adj.set(a, [])
-      adj.get(a)!.push(b)
-    }
-  for (const [n, nb] of adj) {
-    const pn = nodes[n]
-    nb.sort((a, b) =>
-      Math.atan2(nodes[a].y - pn.y, nodes[a].x - pn.x) -
-      Math.atan2(nodes[b].y - pn.y, nodes[b].x - pn.x))
-  }
-
-  const heWallId = new Map<string, string>()
-  for (let idx = 0; idx < eList.length; idx++) {
-    const [u, v] = eList[idx]
-    const wid = eWallIds[idx]
-    heWallId.set(`${u},${v}`, wid)
-    heWallId.set(`${v},${u}`, wid)
-  }
-
-  const nextHE = new Map<string, string>()
-  for (const [u, v] of eList) {
-    for (const [s, e] of [[u, v], [v, u]] as const) {
-      const backA = Math.atan2(nodes[s].y - nodes[e].y, nodes[s].x - nodes[e].x)
-      let bestW = -1, bestCW = Infinity
-      for (const w of adj.get(e) ?? []) {
-        const outA = Math.atan2(nodes[w].y - nodes[e].y, nodes[w].x - nodes[e].x)
-        let cw = backA - outA
-        while (cw <= 0) cw += 2 * Math.PI
-        if (cw < bestCW) { bestCW = cw; bestW = w }
-      }
-      if (bestW !== -1) nextHE.set(`${s},${e}`, `${e},${bestW}`)
-    }
-  }
-
-  const traced = new Set<string>()
-  const result: Array<{ polygon: Pt[]; wallIds: string[] }> = []
-  for (const [u, v] of eList) {
-    for (const [s, e] of [[u, v], [v, u]] as const) {
-      const sk = `${s},${e}`
-      if (traced.has(sk) || !nextHE.has(sk)) continue
-      const ids: number[] = []
-      const faceWallIds: string[] = []
-      let cur = sk, guard = 0
-      do {
-        traced.add(cur)
-        ids.push(Number(cur.split(',')[0]))
-        const wid = heWallId.get(cur)
-        if (wid && !faceWallIds.includes(wid)) faceWallIds.push(wid)
-        cur = nextHE.get(cur) ?? ''
-        guard++
-      } while (cur !== sk && cur !== '' && guard < 60)
-      if (cur === sk && ids.length >= 3) {
-        const polygon = ids.map(i => nodes[i])
-        if (polyArea(polygon) > 0.05) result.push({ polygon, wallIds: faceWallIds })
-      }
-    }
-  }
-  return result
-}
 
 /* ─── Component ──────────────────────────────────────────────── */
 /** Group id for draggable furniture — lines with the same key move as one object. */
