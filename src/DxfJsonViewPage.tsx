@@ -1,40 +1,9 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable react-hooks/exhaustive-deps */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-/**
- * DXF JSON Interactive Floor-Plan Editor
- *
- * Libraries in use
- * ─────────────────
- * • Konva / react-konva  – hardware-accelerated 2D canvas rendering, hit-testing,
- *                          draggable handles, zoom/pan
- * • polygon-clipping     – robust polygon union / intersection (Greiner-Hormann).
- *                          Used to validate and merge room polygons after every edit
- *                          so the room fills are always geometrically correct.
- * • DCEL face extraction – pure-JS planar graph algorithm (no extra dependency) that
- *                          finds all minimal bounded faces from a set of wall segments
- *                          and feeds them into polygon-clipping for final validation.
- *
- * Key behaviours
- * ──────────────
- * • Select tool   – click a wall to select; background click deselects; canvas does
- *                   NOT pan (use Hand tool / Space to pan).
- * • Hand tool     – drag canvas to pan; scroll to zoom.
- * • Drag endpoint – moves one endpoint with snap-to-near-endpoint.
- * • Drag midpoint – translates the whole wall segment only (shared joints are not
- *                   pulled; other walls stay fixed).
- * • Room detection – recalculated live after every edit via useMemo.
- * • Select room (fill) vs wall (edge): walls layer is above fills — clicks on edges
- *   pick the wall; clicks inside a room pick that room. Drag the room centroid to
- *   translate all boundary walls together (doc lines / polylines stay in sync).
- * • Undo (Ctrl-Z) – 20-step stack; Delete/Backspace removes selected wall.
- * • Resize handles – scale selected items while maintaining relative positions.
- */
-
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent as ReactDragEvent } from 'react'
 import { Stage, Layer, Line, Text, Group, Rect, Circle } from 'react-konva'
-// NEW: Arc shape needed for DIMENSION arc geometry rendering
 import { Arc as KonvaArc } from 'react-konva'
 import type Konva from 'konva'
 import { Link } from 'react-router-dom'
@@ -49,7 +18,6 @@ import { FurnitureLibraryPanel, FURNITURE_DXF_DRAG_MIME } from '@/components/Fur
 import {
   buildFurnitureLinesFromLibraryId,
   getFurnitureDxfTemplate,
-  FURNITURE_DXF_TEMPLATES,
 } from '@/data/furnitureLibraryDxf'
 import { clientXYToWorldXY } from '@/utils/konvaDropToWorld'
 import type { WallSeg } from '@/utils/wallsFromDxfJson'
@@ -57,7 +25,6 @@ import {
   arcHandleFromArcSegWallId,
   isDoorStyleArc,
   wallSegsFromArc,
-  sortPolylineVertices,
   wallSegsFromPolyline,
   wallsFromDxfJson,
   renderItemsFromDxfJson,
@@ -92,31 +59,32 @@ import { EditorStateProvider } from '@/contexts/EditorStateContext'
 import { ToolStateProvider } from '@/contexts/ToolStateContext'
 import { SelectionStateProvider } from '@/contexts/SelectionStateContext'
 // Phase 3: Custom Hooks
-import { useDxfSelection, useDxfDrag, useDxfFurniture } from '@/hooks'
+// Constants
+import {
+  ACI_PALETTE,
+  FURNITURE_CATEGORY_COLORS,
+  FURNITURE_LABEL_TO_CATEGORY,
+  ROOM_TEMPLATE_MIME,
+  ROOM_TEMPLATES,
+  STAGE_MIN_W,
+  STAGE_MIN_H,
+  SNAP_TH,
+  SNAP_LINE_TH,
+  HP_SCR,
+  ROOM_COLORS,
+  ROOM_STROKES,
+} from '@/constants/editorConstants'
+// Types
+import type {
+  Pt,
+  EditorSnapshot,
+  ActiveDrag,
+  ActivePolylineDrag,
+  RotationDrag,
+  ResizeDrag,
+  RoomDrag,
+} from '@/types/editorTypes'
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   NEW: AutoCAD ACI colour palette (256 entries → hex)
-   Only the most common indices are listed; fill the rest from the full ACI
-   table if you need exact fidelity for every index.
-   Reference: https://gohtx.com/acadcolors.php
-   ───────────────────────────────────────────────────────────────────────── */
-const ACI_PALETTE: Record<number, string> = {
-  1:  '#FF0000', 2:  '#FFFF00', 3:  '#00FF00', 4:  '#00FFFF',
-  5:  '#0000FF', 6:  '#FF00FF', 7:  '#FFFFFF', 8:  '#808080',
-  9:  '#C0C0C0', 10: '#FF0000', 11: '#FF7F7F', 12: '#A50000',
-  13: '#A55252', 14: '#7F0000', 20: '#FF7F00', 21: '#FFBF7F',
-  22: '#A54F00', 30: '#FFBF00', 40: '#FFFF00', 50: '#7FFF00',
-  60: '#00FF00', 70: '#00FF7F', 80: '#00FFFF', 90: '#007FFF',
-  100:'#0000FF', 110:'#7F00FF', 120:'#FF00FF', 130:'#FF007F',
-  140:'#FF0000', 150:'#804040', 160:'#408040', 170:'#404080',
-  // 256 = BYLAYER (handled at runtime), 0 = BYBLOCK (fallback to white)
-  0:  '#FFFFFF', 256:'#FFFFFF',
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   NEW: Resolve display colour for a render entity.
-   Priority: true_color > ACI index > layer colour > fallback strokeHex
-   ───────────────────────────────────────────────────────────────────────── */
 function resolveEntityColor(
   color:         number | string | null | undefined,
   layer:         string,
@@ -129,60 +97,6 @@ function resolveEntityColor(
   return layerColorMap.get(layer) ?? fallback
 }
 
-/* ─── Types ──────────────────────────────────────────────── */
-interface Pt { x: number; y: number }
-
-interface EditorSnapshot {
-  walls: WallSeg[]
-  planDoc: DxfJsonDocument
-}
-
-/* ─── Furniture category colours ──────────────────────────── */
-const FURNITURE_CATEGORY_COLORS: Record<string, string> = {
-  'Kitchen':      '#f97316',
-  'Bedroom':      '#8b5cf6',
-  'Living Room':  '#3b82f6',
-  'Dining Room':  '#10b981',
-  'Bathroom':     '#06b6d4',
-  'Office':       '#ef4444',
-  'Conference':   '#6366f1',
-  'Break Room':   '#84cc16',
-  'Reception':    '#f59e0b',
-  'Corridor':     '#78716c',
-}
-
-/** Maps block_name / template label → category (built once at module load). */
-const FURNITURE_LABEL_TO_CATEGORY = new Map<string, string>(
-  FURNITURE_DXF_TEMPLATES.map(t => [t.label, t.category as string])
-)
-
-/* ─── Room library templates ───────────────────────────────── */
-export const ROOM_TEMPLATE_MIME = 'application/x-room-template'
-
-export const ROOM_TEMPLATES = [
-  { id: 'bedroom',        label: 'Bedroom',        w: 3.0, h: 3.6, color: '#8b5cf6' },
-  { id: 'master-bedroom', label: 'Master Bedroom',  w: 4.0, h: 4.5, color: '#7c3aed' },
-  { id: 'living-room',    label: 'Living Room',     w: 5.0, h: 4.0, color: '#3b82f6' },
-  { id: 'kitchen',        label: 'Kitchen',         w: 3.0, h: 3.0, color: '#f97316' },
-  { id: 'bathroom',       label: 'Bathroom',        w: 2.0, h: 2.5, color: '#06b6d4' },
-  { id: 'dining-room',    label: 'Dining Room',     w: 4.0, h: 3.5, color: '#10b981' },
-  { id: 'office',         label: 'Office',          w: 3.0, h: 3.0, color: '#ef4444' },
-  { id: 'hallway',        label: 'Hallway',         w: 1.5, h: 4.0, color: '#78716c' },
-] as const
-/* ─── DXF exporter ─────────────────────────────── */
-/**
- * Serialises a DxfJsonDocument to a standards-compliant AutoCAD ASCII DXF.
- *
- * Produces the sections Autodesk Viewer requires:
- *   HEADER → TABLES (VPORT/LTYPE/LAYER/STYLE/VIEW/UCS/APPID/DIMSTYLE/BLOCK_RECORD)
- *   → BLOCKS (*Model_Space + *Paper_Space) → ENTITIES → OBJECTS (root DICTIONARY)
- *
- * Group-code formatting matches AutoCAD output:
- *   • codes right-aligned in 3-char field ("  0", " 10", "100")
- *   • integer values right-aligned in 6-char field ("     1", "   256")
- *   • float / string values written verbatim
- */
-
 /** Trigger a browser download from a data-url or blob-url. */
 function triggerDownload(href: string, filename: string) {
   const a = document.createElement('a')
@@ -192,26 +106,6 @@ function triggerDownload(href: string, filename: string) {
   a.click()
   document.body.removeChild(a)
 }
-
-
-
-/* ─── Constants ──────────────────────────────────────────────── */
-const STAGE_MIN_W = 320
-const STAGE_MIN_H = 280
-const SNAP_TH     = 0.15
-const SNAP_LINE_TH = 0.25
-const HP_SCR  = 7
-const ROOM_COLORS = [
-  'rgba(59,130,246,0.15)',
-  'rgba(16,185,129,0.15)',
-  'rgba(245,158,11,0.15)',
-  'rgba(139,92,246,0.15)',
-  'rgba(236,72,153,0.15)',
-  'rgba(239,68,68,0.15)',
-  'rgba(20,184,166,0.15)',
-  'rgba(234,179,8,0.15)',
-]
-const ROOM_STROKES = ROOM_COLORS.map(c => c.replace('0.15', '0.55'))
 
 function applyRoomDeltaToDoc(doc: DxfJsonDocument, wallIds: string[], dx: number, dy: number): DxfJsonDocument {
   if (!wallIds.length || (dx === 0 && dy === 0)) return doc
@@ -269,8 +163,6 @@ function getStageCanvasPointer(stage: Konva.Stage): { x: number; y: number } | n
   return inv.point(p)
 }
 
-
-
 function applyRotation(ws: WallSeg[], ids: Set<string>, cx: number, cy: number, angle: number): WallSeg[] {
   if (angle === 0) return ws
   return ws.map(w => {
@@ -280,10 +172,6 @@ function applyRotation(ws: WallSeg[], ids: Set<string>, cx: number, cy: number, 
     return { ...w, start: { x: sx, y: sy }, end: { x: ex, y: ey } }
   })
 }
-
-
-
-
 
 function applyResizeToWalls(
   ws: WallSeg[], ids: Set<string>,
@@ -302,9 +190,6 @@ function applyResizeToWalls(
   })
 }
 
-
-
-/* ─── Component ──────────────────────────────────────────────── */
 /** Group id for draggable furniture — lines with the same key move as one object. */
 function furnitureGroupKeyFromHandle(handle: string): string {
   if (!handle.startsWith('furn-')) return handle
@@ -429,21 +314,6 @@ function DxfJsonViewPageInner() {
     [planDoc],
   )
 
-  interface ActiveDrag {
-    wallId:    string
-    toMoveWallIds: string[]
-    toMoveTextIds: string[]
-    toMoveArcHandles: string[]
-    initWX:    number
-    initWY:    number
-  }
-  interface ActivePolylineDrag {
-    polyHandle: string
-    leaderSegId: string
-    segments: { id: string; origStart: Pt; origEnd: Pt }[]
-    initCX: number
-    initCY: number
-  }
   const activeDragRef = useRef<ActiveDrag | null>(null)
   const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null)
   const [dragDelta, setDragDelta]   = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
@@ -451,32 +321,10 @@ function DxfJsonViewPageInner() {
   const selBeforeMouseDown = useRef<Set<string>>(new Set())
   const draggingEpInfo = useRef<{ wallId: string; ep: 'start' | 'end' } | null>(null)
 
-  interface RotationDrag {
-    centerWX: number
-    centerWY: number
-    startMouseAngle: number
-    wallIds: string[]
-    textHandles: string[]
-    arcHandles: string[]
-    winKey?: string    // window group key if rotating a window
-    furnKey?: string   // furniture group key if rotating furniture
-  }
   const rotationDragRef = useRef<RotationDrag | null>(null)
   const [rotationDrag, setRotationDrag] = useState<RotationDrag | null>(null)
   const rotationAngleDeltaRef = useRef(0)
   const [rotationAngleDelta, setRotationAngleDelta] = useState(0)
-
-  interface ResizeDrag {
-    handle: 'nw'|'n'|'ne'|'e'|'se'|'s'|'sw'|'w'
-    initBBox: { minWX: number; minWY: number; maxWX: number; maxWY: number }
-    initMouseWX: number
-    initMouseWY: number
-    wallIds: string[]
-    textHandles: string[]
-    arcHandles: string[]
-    winKey?: string    // window group key if resizing a window
-    furnKey?: string   // furniture group key if resizing furniture
-  }
   const resizeDragRef = useRef<ResizeDrag | null>(null)
   const [resizeDrag, setResizeDrag] = useState<ResizeDrag | null>(null)
   const resizePreviewRef = useRef<{ minWX: number; minWY: number; maxWX: number; maxWY: number } | null>(null)
@@ -487,11 +335,6 @@ function DxfJsonViewPageInner() {
   const [polyDragDelta, setPolyDragDelta] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
   const polyDragDeltaRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
 
-  interface RoomDrag {
-    wallIds: Set<string>
-    initCX: number
-    initCY: number
-  }
   const roomDragRef = useRef<RoomDrag | null>(null)
   const [roomDrag, setRoomDrag] = useState<RoomDrag | null>(null)
   const [roomDragDelta, setRoomDragDelta] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
