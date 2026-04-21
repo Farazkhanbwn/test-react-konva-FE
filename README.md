@@ -21,6 +21,8 @@ This project has been refactored and documented to make it **easy to understand 
 
 ### For Reference
 - **[PHASE_2_COMPLETE.md](./PHASE_2_COMPLETE.md)** - Phase 2 details
+- **[PHASE_3_COMPLETE.md](./PHASE_3_COMPLETE.md)** - Phase 3 details
+- **[src/hooks/README.md](./src/hooks/README.md)** - Custom hooks explained
 - **[REFACTORING_GUIDE.md](./REFACTORING_GUIDE.md)** - Original 4-phase plan
 
 ---
@@ -48,9 +50,11 @@ This project has been refactored and documented to make it **easy to understand 
    ↓
 4. src/contexts/README.md (30 min)
    ↓
-5. MIGRATION_GUIDE.md (45 min)
+5. src/hooks/README.md (20 min)
    ↓
-6. Start migration (1 hour)
+6. MIGRATION_GUIDE.md (45 min)
+   ↓
+7. Start migration (1 hour)
 ```
 
 ---
@@ -78,8 +82,16 @@ project-root/
     │   ├── EditorStateContext.tsx
     │   ├── ToolStateContext.tsx
     │   ├── SelectionStateContext.tsx
+    │   ├── types.ts
     │   ├── index.ts
     │   └── README.md           # Context documentation
+    │
+    ├── hooks/                  # ✅ Phase 3
+    │   ├── useDxfSelection.ts
+    │   ├── useDxfDrag.ts
+    │   ├── useDxfFurniture.ts
+    │   ├── index.ts
+    │   └── README.md           # Hooks documentation
     │
     ├── utils/                  # ✅ Phase 1
     │   ├── dxfGeometry.ts
@@ -117,11 +129,13 @@ project-root/
 | [REFACTORING_SUMMARY.md](./REFACTORING_SUMMARY.md) | What was done | 15 min read |
 | [src/utils/README.md](./src/utils/README.md) | Utility functions | 30 min read |
 | [src/contexts/README.md](./src/contexts/README.md) | Context providers | 30 min read |
+| [src/hooks/README.md](./src/hooks/README.md) | Custom hooks | 20 min read |
 
 ### Reference Guides
 | File | Purpose | Time |
 |------|---------|------|
 | [PHASE_2_COMPLETE.md](./PHASE_2_COMPLETE.md) | Phase 2 summary | 10 min read |
+| [PHASE_3_COMPLETE.md](./PHASE_3_COMPLETE.md) | Phase 3 summary | 10 min read |
 | [REFACTORING_GUIDE.md](./REFACTORING_GUIDE.md) | Original 4-phase plan | 15 min read |
 
 ---
@@ -164,9 +178,11 @@ After reading the documentation, you should be able to:
 - Added comprehensive documentation
 - Component reduced from 2800 → 2500 lines
 
-### ⏳ Phase 3: Extract Hooks (FUTURE)
-- Extract complex logic into custom hooks
-- Expected reduction: 2500 → 2000 lines
+### ✅ Phase 3: Extract Hooks (COMPLETE)
+- Created 3 custom hooks
+- Extracted selection, drag, and furniture logic
+- Added comprehensive documentation
+- Component ready for reduction: 2500 → 2000 lines (Phase 4)
 
 ### ⏳ Phase 4: Split Components (FUTURE)
 - Break into smaller sub-components
@@ -180,7 +196,8 @@ After reading the documentation, you should be able to:
 1. **Data Layer** - Constants and templates
 2. **Logic Layer** - Pure utility functions
 3. **State Layer** - Context providers
-4. **UI Layer** - React components
+4. **Hook Layer** - Custom hooks (combines contexts + utils)
+5. **UI Layer** - React components
 
 ### Dependencies
 - Always copy dependencies before files that use them
@@ -215,11 +232,11 @@ After reading the documentation, you should be able to:
 
 ### Code Organization
 - **Before:** 1 file (3000 lines)
-- **After:** 18 files (~4000 lines, organized)
+- **After:** 23 files (~4500 lines, organized)
 
 ### Documentation
 - **Before:** Minimal comments
-- **After:** 9 comprehensive guides (~4000 lines)
+- **After:** 11 comprehensive guides (~5000 lines)
 
 ### Maintainability
 - **Before:** Hard to understand, hard to test
@@ -288,6 +305,7 @@ This project is now:
 | Understand architecture | [ARCHITECTURE.md](./ARCHITECTURE.md) |
 | Understand utilities | [src/utils/README.md](./src/utils/README.md) |
 | Understand contexts | [src/contexts/README.md](./src/contexts/README.md) |
+| Understand hooks | [src/hooks/README.md](./src/hooks/README.md) |
 | Troubleshooting | [MIGRATION_GUIDE.md](./MIGRATION_GUIDE.md) |
 | What was done | [REFACTORING_SUMMARY.md](./REFACTORING_SUMMARY.md) |
 
