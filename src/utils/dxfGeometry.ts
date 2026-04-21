@@ -1,13 +1,63 @@
 /**
- * DXF Geometry Utilities
- * Pure functions for coordinate transformations and geometric calculations
+ * ═══════════════════════════════════════════════════════════════════════════
+ * DXF GEOMETRY UTILITIES
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 
+ * PURPOSE:
+ * This file contains pure mathematical functions for coordinate transformations
+ * and geometric calculations used in the DXF floor plan editor.
+ * 
+ * WHAT IT DOES:
+ * - Converts between world coordinates (meters) and canvas coordinates (pixels)
+ * - Performs geometric calculations (rotation, distance, area, intersection)
+ * - Generates rendering points for arcs and curves
+ * 
+ * WHY IT'S SEPARATE:
+ * - Pure functions with no side effects → easy to test
+ * - No React dependencies → can be used anywhere
+ * - Math operations are reusable across different components
+ * 
+ * USED BY:
+ * - DxfJsonViewPage.tsx (main editor component)
+ * - Other utility files (dxfRoomDetection, dxfSnapping)
+ * 
+ * ═══════════════════════════════════════════════════════════════════════════
  */
 
+/**
+ * ───────────────────────────────────────────────────────────────────────────
+ * TYPE DEFINITIONS
+ * ───────────────────────────────────────────────────────────────────────────
+ */
+
+/**
+ * Point in 2D space (world or canvas coordinates)
+ * 
+ * @property x - Horizontal position
+ * @property y - Vertical position
+ * 
+ * @example
+ * const worldPoint: Pt = { x: 5.5, y: 3.2 }  // 5.5m, 3.2m in world space
+ * const canvasPoint: Pt = { x: 450, y: 320 } // 450px, 320px on canvas
+ */
 export interface Pt {
   x: number
   y: number
 }
 
+/**
+ * Transformation matrix for converting between world and canvas coordinates
+ * 
+ * @property sc - Scale factor (pixels per meter)
+ * @property oX - Canvas X offset (pixels)
+ * @property oY - Canvas Y offset (pixels)
+ * @property emin - World space minimum extents [minX, minY]
+ * @property wH - World space height (meters)
+ * 
+ * @example
+ * const t = buildTransform([0, 0], [10, 8], 800, 600)
+ * // Fits a 10m×8m floor plan into an 800×600 canvas
+ */
 export interface Transform {
   sc: number
   oX: number
@@ -17,7 +67,26 @@ export interface Transform {
 }
 
 /**
+ * ───────────────────────────────────────────────────────────────────────────
+ * COORDINATE TRANSFORMATION FUNCTIONS
+ * ───────────────────────────────────────────────────────────────────────────
+ */
+
+/**
  * Convert world coordinates to canvas coordinates
+ * 
+ * World coordinates = real-world measurements in meters (e.g., 5.5m, 3.2m)
+ * Canvas coordinates = pixel positions on screen (e.g., 450px, 320px)
+ * 
+ * @param wx - World X coordinate (meters)
+ * @param wy - World Y coordinate (meters)
+ * @param t - Transformation matrix
+ * @returns [canvasX, canvasY] in pixels
+ * 
+ * @example
+ * const t = buildTransform([0, 0], [10, 8], 800, 600)
+ * const [cx, cy] = toC(5.0, 4.0, t)
+ * // Returns [400, 300] - center of canvas for center of room
  */
 export function toC(wx: number, wy: number, t: Transform): [number, number] {
   return [
@@ -28,6 +97,18 @@ export function toC(wx: number, wy: number, t: Transform): [number, number] {
 
 /**
  * Convert canvas coordinates to world coordinates
+ * 
+ * Inverse of toC() - converts mouse clicks (pixels) to real-world positions (meters)
+ * 
+ * @param cx - Canvas X coordinate (pixels)
+ * @param cy - Canvas Y coordinate (pixels)
+ * @param t - Transformation matrix
+ * @returns [worldX, worldY] in meters
+ * 
+ * @example
+ * const t = buildTransform([0, 0], [10, 8], 800, 600)
+ * const [wx, wy] = toW(400, 300, t)
+ * // Returns [5.0, 4.0] - center of room for center of canvas
  */
 export function toW(cx: number, cy: number, t: Transform): [number, number] {
   return [
@@ -37,7 +118,22 @@ export function toW(cx: number, cy: number, t: Transform): [number, number] {
 }
 
 /**
- * Build transform object from extents and canvas size
+ * Build transformation matrix to fit floor plan into canvas
+ * 
+ * Calculates scale and offset to center the floor plan on canvas with padding.
+ * Maintains aspect ratio - no distortion.
+ * 
+ * @param emin - World space minimum extents [minX, minY]
+ * @param emax - World space maximum extents [maxX, maxY]
+ * @param canvasW - Canvas width in pixels
+ * @param canvasH - Canvas height in pixels
+ * @param padding - Padding around edges in pixels (default: 55)
+ * @returns Transform object for coordinate conversion
+ * 
+ * @example
+ * // Floor plan is 10m × 8m, canvas is 800px × 600px
+ * const t = buildTransform([0, 0], [10, 8], 800, 600, 55)
+ * // Result: scale = 68.125 pixels/meter, centered with 55px padding
  */
 export function buildTransform(
   emin: number[],
@@ -57,7 +153,28 @@ export function buildTransform(
 }
 
 /**
- * Rotate a point around a center
+ * ───────────────────────────────────────────────────────────────────────────
+ * GEOMETRIC CALCULATION FUNCTIONS
+ * ───────────────────────────────────────────────────────────────────────────
+ */
+
+/**
+ * Rotate a point around a center point
+ * 
+ * Uses rotation matrix: [cos θ  -sin θ] [x]
+ *                        [sin θ   cos θ] [y]
+ * 
+ * @param px - Point X coordinate
+ * @param py - Point Y coordinate
+ * @param cx - Center X coordinate
+ * @param cy - Center Y coordinate
+ * @param angle - Rotation angle in radians (positive = counterclockwise)
+ * @returns [newX, newY] rotated coordinates
+ * 
+ * @example
+ * // Rotate point (5, 0) around origin by 90° (π/2 radians)
+ * const [x, y] = rotatePoint(5, 0, 0, 0, Math.PI / 2)
+ * // Returns [0, 5] - point moved from East to North
  */
 export function rotatePoint(
   px: number,
@@ -74,7 +191,28 @@ export function rotatePoint(
 }
 
 /**
- * Find closest point on a line segment
+ * Find the closest point on a line segment to a given point
+ * 
+ * Used for:
+ * - Snapping cursor to walls
+ * - Finding where to split a wall
+ * - Distance calculations
+ * 
+ * @param px - Point X coordinate
+ * @param py - Point Y coordinate
+ * @param ax - Segment start X
+ * @param ay - Segment start Y
+ * @param bx - Segment end X
+ * @param by - Segment end Y
+ * @returns Object with:
+ *   - pt: Closest point on segment
+ *   - t: Parameter (0 = start, 1 = end, 0.5 = midpoint)
+ *   - dist: Distance from point to segment
+ * 
+ * @example
+ * // Find closest point on wall from (2, 2) to (5, 2) for cursor at (3.5, 3)
+ * const result = closestPointOnSegment(3.5, 3, 2, 2, 5, 2)
+ * // Returns: { pt: {x: 3.5, y: 2}, t: 0.5, dist: 1.0 }
  */
 export function closestPointOnSegment(
   px: number,
@@ -108,7 +246,26 @@ export function closestPointOnSegment(
 }
 
 /**
- * Calculate polygon area (signed)
+ * Calculate polygon area using the shoelace formula
+ * 
+ * Returns signed area:
+ * - Positive = counterclockwise winding
+ * - Negative = clockwise winding
+ * - Zero = degenerate (line or point)
+ * 
+ * @param pts - Array of polygon vertices
+ * @returns Area in square meters (signed)
+ * 
+ * @example
+ * // Square room 3m × 3m
+ * const room = [
+ *   { x: 0, y: 0 },
+ *   { x: 3, y: 0 },
+ *   { x: 3, y: 3 },
+ *   { x: 0, y: 3 }
+ * ]
+ * const area = polyArea(room)
+ * // Returns 9.0 (or -9.0 depending on winding)
  */
 export function polyArea(pts: Pt[]): number {
   let a = 0
@@ -120,14 +277,50 @@ export function polyArea(pts: Pt[]): number {
 }
 
 /**
- * Check if two points are nearly the same
+ * Check if two points are nearly identical (within tolerance)
+ * 
+ * Used for:
+ * - Detecting connected walls
+ * - Snapping endpoints together
+ * - Finding room boundaries
+ * 
+ * @param a - First point
+ * @param b - Second point
+ * @param eps - Tolerance (epsilon) in meters
+ * @returns true if points are within eps distance
+ * 
+ * @example
+ * const p1 = { x: 5.0001, y: 3.0 }
+ * const p2 = { x: 5.0, y: 3.0 }
+ * nearSamePt(p1, p2, 0.01)  // true - within 1cm tolerance
+ * nearSamePt(p1, p2, 0.0001) // false - outside 0.1mm tolerance
  */
 export function nearSamePt(a: Pt, b: Pt, eps: number): boolean {
   return Math.abs(a.x - b.x) < eps && Math.abs(a.y - b.y) < eps
 }
 
 /**
- * Check if a line intersects a rectangle
+ * Check if a line segment intersects or is contained by a rectangle
+ * 
+ * Used for:
+ * - Selection box (crossing selection)
+ * - Collision detection
+ * - Visibility culling
+ * 
+ * @param a - Line start point
+ * @param b - Line end point
+ * @param x1 - Rectangle min X
+ * @param y1 - Rectangle min Y
+ * @param x2 - Rectangle max X
+ * @param y2 - Rectangle max Y
+ * @returns true if line intersects or is inside rectangle
+ * 
+ * @example
+ * // Wall from (1, 1) to (5, 5)
+ * const wall = { x: 1, y: 1 }, { x: 5, y: 5 }
+ * // Selection box from (0, 0) to (3, 3)
+ * const intersects = lineIntersectsRect(wall, wall, 0, 0, 3, 3)
+ * // Returns true - wall crosses selection box
  */
 export function lineIntersectsRect(
   a: Pt,
@@ -160,6 +353,29 @@ export function lineIntersectsRect(
   return rect.some(edge => intersect(a, b, edge.a, edge.b))
 }
 
+/**
+ * DXF ARC entity (used for doors, circles, curved walls)
+ * 
+ * @property entity_type - Always 'ARC'
+ * @property handle - Unique identifier (e.g., 'arc-123', 'user-ar-1234567890')
+ * @property layer - Layer name (e.g., '0', 'DOORS', 'WALLS')
+ * @property center - Arc center point in world coordinates
+ * @property radius - Arc radius in meters
+ * @property start_angle - Start angle in degrees (0° = East, counterclockwise)
+ * @property end_angle - End angle in degrees
+ * 
+ * @example
+ * // Door swing arc (90° arc with 0.9m radius)
+ * const doorArc: DxfArc = {
+ *   entity_type: 'ARC',
+ *   handle: 'arc-door-1',
+ *   layer: 'DOORS',
+ *   center: { x: 2.5, y: 3.0, z: 0 },
+ *   radius: 0.9,
+ *   start_angle: 0,
+ *   end_angle: 90
+ * }
+ */
 export interface DxfArc {
   entity_type: 'ARC'
   handle: string
@@ -171,7 +387,37 @@ export interface DxfArc {
 }
 
 /**
- * Generate arc points for rendering
+ * ───────────────────────────────────────────────────────────────────────────
+ * RENDERING HELPER FUNCTIONS
+ * ───────────────────────────────────────────────────────────────────────────
+ */
+
+/**
+ * Generate canvas points for rendering an arc as a polyline
+ * 
+ * Converts a DXF arc (center, radius, angles) into a series of canvas
+ * coordinates that can be drawn as a smooth curve.
+ * 
+ * @param arc - DXF arc entity
+ * @param t - Transformation matrix
+ * @param steps - Number of line segments (default: 48, higher = smoother)
+ * @returns Flat array [x1, y1, x2, y2, ...] for Konva Line component
+ * 
+ * @example
+ * const doorArc: DxfArc = {
+ *   entity_type: 'ARC',
+ *   handle: 'arc-1',
+ *   layer: '0',
+ *   center: { x: 2.5, y: 3.0, z: 0 },
+ *   radius: 0.9,
+ *   start_angle: 0,
+ *   end_angle: 90
+ * }
+ * const points = arcPoints(doorArc, transform, 24)
+ * // Returns [x1, y1, x2, y2, ..., x24, y24] for smooth 90° arc
+ * 
+ * // Usage in React:
+ * <Line points={arcPoints(arc, t)} stroke="black" />
  */
 export function arcPoints(
   arc: DxfArc,

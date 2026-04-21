@@ -38,16 +38,12 @@ import { Stage, Layer, Line, Text, Group, Rect, Circle } from 'react-konva'
 import { Arc as KonvaArc } from 'react-konva'
 import type Konva from 'konva'
 import { Link } from 'react-router-dom'
-import polygonClipping from 'polygon-clipping'
 import {
   DXF_JSON_DATA,
   type DxfJsonDocument,
   type DxfArc,
   type DxfInsert,
   type DxfLine,
-  type DxfPolyline,
-  type DxfPolylineVertex,
-  type DxfText,
 } from '@/constants/dxfJsonData'
 import { FurnitureLibraryPanel, FURNITURE_DXF_DRAG_MIME } from '@/components/FurnitureLibraryPanel'
 import {
@@ -64,7 +60,6 @@ import {
   sortPolylineVertices,
   wallSegsFromPolyline,
   wallsFromDxfJson,
-  // NEW: import the render-items builder
   renderItemsFromDxfJson,
 } from '@/utils/wallsFromDxfJson'
 import { downloadDxf } from './utils/exportToDxf'
@@ -196,7 +191,6 @@ function triggerDownload(href: string, filename: string) {
 
 
 /* ─── Constants ──────────────────────────────────────────────── */
-const PAD = 55
 const STAGE_MIN_W = 320
 const STAGE_MIN_H = 280
 const SNAP_TH     = 0.15
@@ -213,8 +207,6 @@ const ROOM_COLORS = [
   'rgba(234,179,8,0.15)',
 ]
 const ROOM_STROKES = ROOM_COLORS.map(c => c.replace('0.15', '0.55'))
-
-
 
 function applyRoomDeltaToDoc(doc: DxfJsonDocument, wallIds: string[], dx: number, dy: number): DxfJsonDocument {
   if (!wallIds.length || (dx === 0 && dy === 0)) return doc
