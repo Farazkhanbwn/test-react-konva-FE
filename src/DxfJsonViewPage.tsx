@@ -74,7 +74,6 @@ import {
   lineIntersectsRect,
 } from './utils/dxfGeometry'
 import { detectRooms, detectRoomsWithWalls, wallIdsOnRoomBoundary, translateWallsByIds } from './utils/dxfRoomDetection'
-import { getGroupWallIds } from './utils/dxfSelection'
 import {
   cloneDoc,
   appendUserLine,
@@ -88,6 +87,12 @@ import {
   polylineHandleFromWallId,
   roomLabelHandle,
 } from './utils/dxfDocumentUtils'
+// Phase 2: Context Providers
+import { EditorStateProvider } from '@/contexts/EditorStateContext'
+import { ToolStateProvider } from '@/contexts/ToolStateContext'
+import { SelectionStateProvider } from '@/contexts/SelectionStateContext'
+// Phase 3: Custom Hooks
+import { useDxfSelection, useDxfDrag, useDxfFurniture } from '@/hooks'
 
 /* ─────────────────────────────────────────────────────────────────────────────
    NEW: AutoCAD ACI colour palette (256 entries → hex)
@@ -310,8 +315,15 @@ function furnitureGroupKeyFromHandle(handle: string): string {
   return `furn-${handle.slice('furn-'.length).split('-')[0]}`
 }
 
-/* ─── Component ──────────────────────────────────── */
-export function DxfJsonViewPage() {
+/** Helper to get all wall IDs in a group */
+function getGroupWallIds(wallId: string, walls: WallSeg[]): string[] {
+  const wall = walls.find(w => w.id === wallId)
+  if (!wall?.groupId) return [wallId]
+  return walls.filter(w => w.groupId === wall.groupId).map(w => w.id)
+}
+
+/* ─── Inner Component ──────────────────────────────────── */
+function DxfJsonViewPageInner() {
   const stageRef = useRef<Konva.Stage>(null)
   const canvasHostRef = useRef<HTMLDivElement>(null)
   const [stageSize, setStageSize] = useState({ w: 900, h: 620 })
@@ -3152,5 +3164,20 @@ export function DxfJsonViewPage() {
         </aside>
       </div>
     </div>
+  )
+}
+
+/* ─── Wrapper Component with Context Providers ──────────────────────────────────── */
+export function DxfJsonViewPage() {
+  const initialWalls = wallsFromDxfJson(DXF_JSON_DATA)
+
+  return (
+    <EditorStateProvider initialDoc={DXF_JSON_DATA} initialWalls={initialWalls}>
+      <ToolStateProvider>
+        <SelectionStateProvider>
+          <DxfJsonViewPageInner />
+        </SelectionStateProvider>
+      </ToolStateProvider>
+    </EditorStateProvider>
   )
 }
