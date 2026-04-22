@@ -47,6 +47,7 @@ import {
   type DxfPolylineVertex,
   type DxfText,
 } from '@/constants/dxfJsonData'
+import type { CanvasGroup } from '@/utils/wallsFromDxfJson'
 import { FurnitureLibraryPanel, FURNITURE_DXF_DRAG_MIME } from '@/components/FurnitureLibraryPanel'
 import {
   buildFurnitureLinesFromLibraryId,
@@ -62,8 +63,8 @@ import {
   sortPolylineVertices,
   wallSegsFromPolyline,
   wallsFromDxfJson,
-  // NEW: import the render-items builder
   renderItemsFromDxfJson,
+  canvasGroupsFromDxfJson,
 } from '@/utils/wallsFromDxfJson'
 import { downloadDxf } from './utils/exportToDxf'
 
@@ -74,16 +75,85 @@ import { downloadDxf } from './utils/exportToDxf'
    Reference: https://gohtx.com/acadcolors.php
    ───────────────────────────────────────────────────────────────────────── */
 const ACI_PALETTE: Record<number, string> = {
-  1:  '#FF0000', 2:  '#FFFF00', 3:  '#00FF00', 4:  '#00FFFF',
-  5:  '#0000FF', 6:  '#FF00FF', 7:  '#FFFFFF', 8:  '#808080',
-  9:  '#C0C0C0', 10: '#FF0000', 11: '#FF7F7F', 12: '#A50000',
-  13: '#A55252', 14: '#7F0000', 20: '#FF7F00', 21: '#FFBF7F',
-  22: '#A54F00', 30: '#FFBF00', 40: '#FFFF00', 50: '#7FFF00',
-  60: '#00FF00', 70: '#00FF7F', 80: '#00FFFF', 90: '#007FFF',
-  100:'#0000FF', 110:'#7F00FF', 120:'#FF00FF', 130:'#FF007F',
-  140:'#FF0000', 150:'#804040', 160:'#408040', 170:'#404080',
-  // 256 = BYLAYER (handled at runtime), 0 = BYBLOCK (fallback to white)
-  0:  '#FFFFFF', 256:'#FFFFFF',
+  // Standard named indices
+  1: '#FF0000', 2: '#FFFF00', 3: '#00FF00', 4: '#00FFFF',
+  5: '#0000FF', 6: '#FF00FF', 7: '#FFFFFF', 8: '#414141', 9: '#808080',
+  // Red group
+  10: '#FF0000', 11: '#FF7F7F', 12: '#A50000', 13: '#A55252', 14: '#7F0000',
+  15: '#7F3F3F', 16: '#4F0000', 17: '#4F3232', 18: '#3F0000', 19: '#3F2929',
+  // Orange group
+  20: '#FF7F00', 21: '#FFBF7F', 22: '#A54F00', 23: '#A57F52', 24: '#7F3F00',
+  25: '#7F5F3F', 26: '#4F2700', 27: '#4F3F32', 28: '#3F1F00', 29: '#3F3229',
+  // Yellow-orange group
+  30: '#FFBF00', 31: '#FFDF7F', 32: '#A57B00', 33: '#A59152', 34: '#7F5F00',
+  35: '#7F6F3F', 36: '#4F3B00', 37: '#4F4532', 38: '#3F2F00', 39: '#3F3829',
+  // Yellow group
+  40: '#FFFF00', 41: '#FFFF7F', 42: '#A5A500', 43: '#A5A552', 44: '#7F7F00',
+  45: '#7F7F3F', 46: '#4F4F00', 47: '#4F4F32', 48: '#3F3F00', 49: '#3F3F29',
+  // Yellow-green group
+  50: '#BFFF00', 51: '#DFFF7F', 52: '#7BA500', 53: '#91A552', 54: '#5F7F00',
+  55: '#6F7F3F', 56: '#3B4F00', 57: '#454F32', 58: '#2F3F00', 59: '#383F29',
+  // Chartreuse group
+  60: '#7FFF00', 61: '#BFFF7F', 62: '#4FA500', 63: '#7CA552', 64: '#3F7F00',
+  65: '#5F7F3F', 66: '#274F00', 67: '#3F4F32', 68: '#1F3F00', 69: '#323F29',
+  // Spring green group
+  70: '#3FFF00', 71: '#9FFF7F', 72: '#27A500', 73: '#67A552', 74: '#1F7F00',
+  75: '#4F7F3F', 76: '#134F00', 77: '#374F32', 78: '#0F3F00', 79: '#2C3F29',
+  // Green group
+  80: '#00FF00', 81: '#7FFF7F', 82: '#00A500', 83: '#52A552', 84: '#007F00',
+  85: '#3F7F3F', 86: '#004F00', 87: '#324F32', 88: '#003F00', 89: '#293F29',
+  // Aquamarine group
+  90: '#00FF3F', 91: '#7FFF9F', 92: '#00A527', 93: '#52A567', 94: '#007F1F',
+  95: '#3F7F4F', 96: '#004F13', 97: '#324F37', 98: '#003F0F', 99: '#293F2C',
+  // Emerald group
+  100: '#00FF7F', 101: '#7FFFBF', 102: '#00A54F', 103: '#52A57C', 104: '#007F3F',
+  105: '#3F7F5F', 106: '#004F27', 107: '#324F3F', 108: '#003F1F', 109: '#293F32',
+  // Turquoise group
+  110: '#00FFBF', 111: '#7FFFDF', 112: '#00A57B', 113: '#52A591', 114: '#007F5F',
+  115: '#3F7F6F', 116: '#004F3B', 117: '#324F45', 118: '#003F2F', 119: '#293F38',
+  // Cyan group
+  120: '#00FFFF', 121: '#7FFFFF', 122: '#00A5A5', 123: '#52A5A5', 124: '#007F7F',
+  125: '#3F7F7F', 126: '#004F4F', 127: '#324F4F', 128: '#003F3F', 129: '#293F3F',
+  // Sky blue group
+  130: '#00BFFF', 131: '#7FDFFF', 132: '#007BA5', 133: '#5291A5', 134: '#005F7F',
+  135: '#3F6F7F', 136: '#003B4F', 137: '#32454F', 138: '#002F3F', 139: '#29383F',
+  // Azure group
+  140: '#007FFF', 141: '#7FBFFF', 142: '#004FA5', 143: '#527CA5', 144: '#003F7F',
+  145: '#3F5F7F', 146: '#00274F', 147: '#323F4F', 148: '#001F3F', 149: '#29323F',
+  // Cerulean group
+  150: '#003FFF', 151: '#7F9FFF', 152: '#0027A5', 153: '#5267A5', 154: '#001F7F',
+  155: '#3F4F7F', 156: '#00134F', 157: '#32374F', 158: '#000F3F', 159: '#292C3F',
+  // Blue group
+  160: '#0000FF', 161: '#7F7FFF', 162: '#0000A5', 163: '#5252A5', 164: '#00007F',
+  165: '#3F3F7F', 166: '#00004F', 167: '#32324F', 168: '#00003F', 169: '#29293F',
+  // Violet group
+  170: '#3F00FF', 171: '#9F7FFF', 172: '#2700A5', 173: '#6752A5', 174: '#1F007F',
+  175: '#4F3F7F', 176: '#13004F', 177: '#37324F', 178: '#0F003F', 179: '#2C293F',
+  // Purple group
+  180: '#7F00FF', 181: '#BF7FFF', 182: '#4F00A5', 183: '#7C52A5', 184: '#3F007F',
+  185: '#5F3F7F', 186: '#27004F', 187: '#3F324F', 188: '#1F003F', 189: '#32293F',
+  // Fuchsia group
+  190: '#BF00FF', 191: '#DF7FFF', 192: '#7B00A5', 193: '#9152A5', 194: '#5F007F',
+  195: '#6F3F7F', 196: '#3B004F', 197: '#45324F', 198: '#2F003F', 199: '#38293F',
+  // Magenta group
+  200: '#FF00FF', 201: '#FF7FFF', 202: '#A500A5', 203: '#A552A5', 204: '#7F007F',
+  205: '#7F3F7F', 206: '#4F004F', 207: '#4F324F', 208: '#3F003F', 209: '#3F293F',
+  // Pink-magenta group
+  210: '#FF00BF', 211: '#FF7FDF', 212: '#A5007B', 213: '#A55291', 214: '#7F005F',
+  215: '#7F3F6F', 216: '#4F003B', 217: '#4F3245', 218: '#3F002F', 219: '#3F2938',
+  // Hot pink / rose group
+  220: '#FF007F', 221: '#FF7FBF', 222: '#A5004F', 223: '#A5527C', 224: '#7F003F',
+  225: '#7F3F5F', 226: '#4F0027', 227: '#4F323F', 228: '#3F001F', 229: '#3F2932',
+  // Deep pink group
+  230: '#FF003F', 231: '#FF7F9F', 232: '#A50027', 233: '#A55267', 234: '#7F001F',
+  235: '#7F3F4F', 236: '#4F0013', 237: '#4F3237', 238: '#3F000F', 239: '#3F292C',
+  // Red (repeat group, wraps back)
+  240: '#FF0000', 241: '#FF7F7F', 242: '#A50000', 243: '#A55252', 244: '#7F0000',
+  245: '#7F3F3F', 246: '#4F0000', 247: '#4F3232', 248: '#3F0000', 249: '#3F2929',
+  // Grays
+  250: '#505050', 251: '#696969', 252: '#828282', 253: '#BEBEBE', 254: '#D2D2D2', 255: '#E1E1E1',
+  // Special
+  0: '#FFFFFF', 256: '#FFFFFF',
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -100,6 +170,43 @@ function resolveEntityColor(
   if (typeof color === 'number' && color !== 256 && color > 0 && color < 256)
     return ACI_PALETTE[color] ?? fallback
   return layerColorMap.get(layer) ?? fallback
+}
+
+/**
+ * Resolve stroke colour for structural elements (walls, arcs, windows, furniture, text).
+ * Uses entity colour first, then layer colour.
+ * White (#FFFFFF) is replaced with fallback because canvas background is white.
+ */
+function resolveExplicitColor(
+  color: number | string | null | undefined,
+  layer: string,
+  layerColorMap: Map<string, string>,
+  fallback: string,
+): string {
+  // Helper to check and filter white
+  const filterWhite = (hex: string): string => {
+    return hex.toUpperCase() === '#FFFFFF' ? fallback : hex
+  }
+  
+  // 1. If entity has explicit color (true-color hex string)
+  if (typeof color === 'string' && color.startsWith('#')) {
+    return filterWhite(color)
+  }
+  
+  // 2. If entity has explicit ACI color index (1-255)
+  if (typeof color === 'number' && color !== 256 && color > 0 && color < 256) {
+    const hex = ACI_PALETTE[color]
+    if (hex) return filterWhite(hex)
+  }
+  
+  // 3. Use layer's color from the layer table
+  const layerColor = layerColorMap.get(layer)
+  if (layerColor) {
+    return filterWhite(layerColor)
+  }
+  
+  // 4. Fallback to user-defined stroke color
+  return fallback
 }
 
 /* ─── Types ──────────────────────────────────────────────── */
@@ -669,7 +776,7 @@ const STAGE_MIN_W = 320
 const STAGE_MIN_H = 280
 const SNAP_TH     = 0.15
 const SNAP_LINE_TH = 0.25
-const HP_SCR  = 7
+const HP_SCR  = 5
 const ROOM_COLORS = [
   'rgba(59,130,246,0.15)',
   'rgba(16,185,129,0.15)',
@@ -1114,10 +1221,6 @@ export function DxfJsonViewPage() {
   const [planDoc, setPlanDoc] = useState<DxfJsonDocument>(() => ({ ...DXF_JSON_DATA }))
 
   const displayDoc = planDoc
-  const t = useMemo(
-    () => buildT(displayDoc.meta.extmin, displayDoc.meta.extmax, stageSize.w, stageSize.h),
-    [displayDoc.meta.extmin, displayDoc.meta.extmax, stageSize.w, stageSize.h],
-  )
 
   useLayoutEffect(() => {
     const el = canvasHostRef.current
@@ -1135,11 +1238,20 @@ export function DxfJsonViewPage() {
   }, [])
 
   const [walls, setWalls]         = useState<WallSeg[]>(() => wallsFromDxfJson(DXF_JSON_DATA))
+
+  const t = useMemo(
+    () => buildT(displayDoc.meta.extmin, displayDoc.meta.extmax, stageSize.w, stageSize.h),
+    [displayDoc.meta.extmin, displayDoc.meta.extmax, stageSize.w, stageSize.h],
+  )
+
   const [history, setHistory]     = useState<EditorSnapshot[]>([])
   const [zoom, setZoom]           = useState(1)
   const [pos, setPos]             = useState({ x: 0, y: 0 })
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const [selectionBox, setSelectionBox] = useState<{ start: Pt; current: Pt } | null>(null)
+  // Rubber-band selection: ref for coords (updated imperatively), boolean for visibility
+  const [isRubberBanding, setIsRubberBanding] = useState(false)
+  const selectionBoxRef = useRef<{ start: Pt; current: Pt } | null>(null)
+  const rubberBandRectRef = useRef<Konva.Rect>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selectedRoomIndex, setSelectedRoomIndex] = useState<number | null>(null)
   const [selectedTextHandle, setSelectedTextHandle] = useState<string | null>(null)
@@ -1162,6 +1274,8 @@ export function DxfJsonViewPage() {
   const [selectedArcHandle, setSelectedArcHandle] = useState<string | null>(null)
   const [selectedWinKey, setSelectedWinKey]       = useState<string | null>(null)
   const [selectedFurnKey, setSelectedFurnKey]     = useState<string | null>(null)
+  /** ID of the DXF-group (from GROUPS array) currently selected as a whole. */
+  const [selectedGroupId, setSelectedGroupId]     = useState<number | null>(null)
 
   const [arcDraftCenter,     setArcDraftCenter]     = useState<Pt | null>(null)
   const [arcDraftRadius,     setArcDraftRadius]     = useState<number | null>(null)
@@ -1196,21 +1310,42 @@ export function DxfJsonViewPage() {
   )
 
   // NEW: Layer colour map — built from planDoc.layers
-  const layerColorMap = useMemo(() => {
-    const m = new Map<string, string>()
-    for (const lyr of planDoc.layers ?? []) {
-      if (lyr.true_color) { m.set(lyr.name, lyr.true_color); continue }
-      const c = lyr.color > 0 ? lyr.color : 7
-      m.set(lyr.name, ACI_PALETTE[c] ?? '#888888')
+const layerColorMap = useMemo(() => {
+  const m = new Map<string, string>()
+  for (const lyr of planDoc.layers ?? []) {
+    if (lyr.true_color) {
+      m.set(lyr.name, lyr.true_color)
+    } else if (lyr.color) {
+      // Use ACI_PALETTE for the layer's color index
+      m.set(lyr.name, ACI_PALETTE[lyr.color] ?? '#888888')
+    } else {
+      m.set(lyr.name, '#888888')
     }
-    return m
-  }, [planDoc.layers])
+  }
+  return m
+}, [planDoc.layers])
 
-  // NEW: Render items — all non-wall entities converted to canvas-ready shapes.
+  // Render items — all non-wall entities converted to canvas-ready shapes.
   const renderItems = useMemo(
     () => renderItemsFromDxfJson(planDoc),
     [planDoc],
   )
+
+  // DXF-group metadata — built from GROUPS array + current walls (O(n) on load).
+  const canvasGroups = useMemo<CanvasGroup[]>(
+    () => canvasGroupsFromDxfJson(planDoc, walls),
+    [planDoc, walls],
+  )
+
+  // Fast wall-id / arc-handle → group-id lookup map.
+  const wallIdToGroupId = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const g of canvasGroups) {
+      for (const wid of g.wallIds) m.set(wid, g.id)
+      for (const ah of g.arcHandles) m.set(ah, g.id)
+    }
+    return m
+  }, [canvasGroups])
 
   interface ActiveDrag {
     wallId:    string
@@ -1231,7 +1366,9 @@ export function DxfJsonViewPage() {
   const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null)
   const [dragDelta, setDragDelta]   = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
   const dragDeltaRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
-  const selBeforeMouseDown = useRef<Set<string>>(new Set())
+  const dragGroupRef = useRef<Konva.Group>(null)
+ const selBeforeMouseDown = useRef<Set<string>>(new Set())
+const didDragRef = useRef(false)
   const draggingEpInfo = useRef<{ wallId: string; ep: 'start' | 'end' } | null>(null)
 
   interface RotationDrag {
@@ -1462,13 +1599,18 @@ export function DxfJsonViewPage() {
     return lines
   }, [planDoc.furniture_lines, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
 
+  // Walls eligible for room detection: exclude group members (furniture, fixtures) and
+  // skip recomputation during any active drag to keep interactions smooth.
+  const roomDetectionWalls = useMemo(
+    () => walls.filter(w => !wallIdToGroupId.has(w.id)),
+    [walls, wallIdToGroupId],
+  )
+
   const roomsWithWalls = useMemo(() => {
-    let ws = walls
-    if (activeDrag) ws = applyDrag(ws, activeDrag, dragDelta)
-    if (rotationDrag && rotationAngleDelta !== 0) ws = applyRotation(ws, new Set(rotationDrag.wallIds), rotationDrag.centerWX, rotationDrag.centerWY, rotationAngleDelta)
-    if (resizeDrag && resizePreview) ws = applyResizeToWalls(ws, new Set(resizeDrag.wallIds), resizeDrag.initBBox, resizePreview)
-    return detectRoomsWithWalls(ws)
-  }, [walls, activeDrag, dragDelta, applyDrag, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
+    // Skip expensive DCEL during drag — return stale result; rooms update on drag-end
+    if (activeDrag || rotationDrag || resizeDrag) return null
+    return detectRoomsWithWalls(roomDetectionWalls)
+  }, [roomDetectionWalls, activeDrag, rotationDrag, resizeDrag])
 
   const wallsBase = useMemo(() => {
     if (activePolyDrag) return applyPolylineDrag(walls, activePolyDrag, polyDragDelta)
@@ -1477,9 +1619,11 @@ export function DxfJsonViewPage() {
   }, [walls, activeDrag, dragDelta, activePolyDrag, polyDragDelta, applyDrag, applyPolylineDrag])
 
   const rooms = useMemo(() => {
-    const g = roomDrag ? translateWallsByIds(wallsBase, roomDrag.wallIds, roomDragDelta.dx, roomDragDelta.dy) : wallsBase
+    // Skip during drag — rooms update after drag-end commit
+    if (activeDrag || rotationDrag || resizeDrag) return []
+    const g = roomDrag ? translateWallsByIds(roomDetectionWalls, roomDrag.wallIds, roomDragDelta.dx, roomDragDelta.dy) : roomDetectionWalls
     return detectRooms(g)
-  }, [wallsBase, roomDrag, roomDragDelta])
+  }, [roomDetectionWalls, roomDrag, roomDragDelta, activeDrag, rotationDrag, resizeDrag])
 
   const snapshot = useCallback(() => {
     setHistory(h => [...h.slice(-20), {
@@ -1749,13 +1893,29 @@ export function DxfJsonViewPage() {
     setWalls(prev => prev.map(w => (w.groupId && touchedGroups.has(w.groupId)) ? { ...w, groupId: undefined } : w))
   }, [walls, selectedIds, snapshot])
 
+  /** Select all walls belonging to a DXF group (by group id). */
+  const selectDxfGroup = useCallback((groupId: number, addToExisting = false) => {
+    const grp = canvasGroups.find(g => g.id === groupId)
+    if (!grp) return
+    setSelectedGroupId(groupId)
+    setSelectedId(null); setSelectedRoomIndex(null)
+    setSelectedTextHandle(null); setSelectedArcHandle(null)
+    setSelectedWinKey(null); setSelectedFurnKey(null)
+    setSelectedIds(prev => {
+      const next = addToExisting ? new Set(prev) : new Set<string>()
+      grp.wallIds.forEach(id => next.add(id))
+      return next
+    })
+  }, [canvasGroups])
+
   const onStageMouseDown = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     const isStage = e.target === stageRef.current || e.target.name() === 'background-rect'
     if (!isStage || activeTool !== 'select' || spaceHeld) return
     const pos = stageRef.current?.getRelativePointerPosition()
     if (!pos) return
     const [wx, wy] = toW(pos.x, pos.y, t)
-    setSelectionBox({ start: { x: wx, y: wy }, current: { x: wx, y: wy } })
+    selectionBoxRef.current = { start: { x: wx, y: wy }, current: { x: wx, y: wy } }
+    setIsRubberBanding(true)
     if (!(e.evt.ctrlKey || e.evt.metaKey)) setSelectedIds(new Set())
   }, [activeTool, spaceHeld, t])
 
@@ -1763,14 +1923,32 @@ export function DxfJsonViewPage() {
     const pos = stageRef.current?.getRelativePointerPosition()
     if (!pos) return
     const [wx, wy] = toW(pos.x, pos.y, t)
-    if (selectionBox) {
-      setSelectionBox(prev => prev ? { ...prev, current: { x: wx, y: wy } } : null)
+    if (selectionBoxRef.current) {
+      selectionBoxRef.current = { ...selectionBoxRef.current, current: { x: wx, y: wy } }
+      // Imperatively update the rubber-band rect — zero React re-renders during drag
+      const rr = rubberBandRectRef.current
+      if (rr) {
+        const { start, current } = selectionBoxRef.current
+        const [sx, sy] = toC(start.x, start.y, t)
+        const [cx, cy] = toC(current.x, current.y, t)
+        const isWindow = start.x < current.x
+        rr.x(Math.min(sx, cx)); rr.y(Math.min(sy, cy))
+        rr.width(Math.abs(cx - sx)); rr.height(Math.abs(cy - sy))
+        rr.fill(isWindow ? 'rgba(59,130,246,0.2)' : 'rgba(34,197,94,0.2)')
+        rr.stroke(isWindow ? '#3b82f6' : '#22c55e')
+        rr.getLayer()?.batchDraw()
+      }
     } else if (activeDrag) {
       let dx = wx - activeDrag.initWX
       let dy = wy - activeDrag.initWY
       if (orthoEnabled) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0 }
       dragDeltaRef.current = { dx, dy }
-      setDragDelta({ dx, dy })
+      // Move selected walls imperatively via Konva Group — zero React re-renders during drag
+      if (dragGroupRef.current) {
+        dragGroupRef.current.x(dx * t.sc)
+        dragGroupRef.current.y(-dy * t.sc)
+        dragGroupRef.current.getLayer()?.batchDraw()
+      }
     } else if (rotationDragRef.current) {
       const rd = rotationDragRef.current
       const [ccx, ccy] = toC(rd.centerWX, rd.centerWY, t)
@@ -1811,14 +1989,15 @@ export function DxfJsonViewPage() {
       if (snapTarget !== null) setSnapTarget(null)
       if (alignGuides.length > 0) setAlignGuides([])
     }
-  }, [selectionBox, activeDrag, t, orthoEnabled, activeTool, getSnap])
+  }, [activeDrag, t, orthoEnabled, activeTool, getSnap])
 
   const onStageMouseUp = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     if (rotationDragRef.current) { commitRotation(); return }
     if (resizeDragRef.current) { commitResize(); return }
-    if (!selectionBox) return
-    const { start, current } = selectionBox
-    setSelectionBox(null)
+    if (!selectionBoxRef.current) { setIsRubberBanding(false); return }
+    const { start, current } = selectionBoxRef.current
+    selectionBoxRef.current = null
+    setIsRubberBanding(false)
     const x1 = Math.min(start.x, current.x), x2 = Math.max(start.x, current.x)
     const y1 = Math.min(start.y, current.y), y2 = Math.max(start.y, current.y)
     const isWindow = start.x < current.x
@@ -1839,11 +2018,44 @@ export function DxfJsonViewPage() {
     for (const a of planDoc.arcs) {
       if (a.center.x >= x1 && a.center.x <= x2 && a.center.y >= y1 && a.center.y <= y2) newlySelected.add(a.handle)
     }
-    setSelectedIds(prev => {
-      if (e.evt.ctrlKey || e.evt.metaKey) { const next = new Set(prev); newlySelected.forEach(id => next.add(id)); return next }
-      return newlySelected
-    })
-  }, [selectionBox, walls, commitRotation, commitResize])
+    const expandedIds = new Set(newlySelected)
+    const touchedGroupIds = new Set<number>()
+
+    // 1. Expand DXF block groups (furniture, doors, etc.)
+    for (const id of newlySelected) {
+      const gid = wallIdToGroupId.get(id)
+      if (gid !== undefined) {
+        touchedGroupIds.add(gid)
+        const grp = canvasGroups.find(g => g.id === gid)
+        if (grp) grp.wallIds.forEach(wid => expandedIds.add(wid))
+      }
+    }
+
+    // 2. Expand polyline groups — selecting one segment selects all segments of
+    //    the same polyline (walls sharing a groupId like "pl-P3")
+    const touchedPolyGroups = new Set<string>()
+    for (const id of newlySelected) {
+      const w = walls.find(seg => seg.id === id)
+      if (w?.groupId) touchedPolyGroups.add(w.groupId)
+    }
+    for (const gid of touchedPolyGroups) {
+      walls.filter(w => w.groupId === gid).forEach(w => expandedIds.add(w.id))
+    }
+// If exactly one group was touched, also set selectedGroupId
+if (touchedGroupIds.size === 1) {
+  const gid = [...touchedGroupIds][0]
+  setSelectedGroupId(gid)
+  setSelectedId(null); setSelectedRoomIndex(null)
+  setSelectedTextHandle(null); setSelectedArcHandle(null)
+  setSelectedWinKey(null); setSelectedFurnKey(null)
+} else if (touchedGroupIds.size > 1) {
+  setSelectedGroupId(null)
+}
+setSelectedIds(prev => {
+  if (e.evt.ctrlKey || e.evt.metaKey) { const next = new Set(prev); expandedIds.forEach(id => next.add(id)); return next }
+  return expandedIds
+})
+  }, [walls, commitRotation, commitResize])
 
   const onMidDragStart = useCallback((_e: Konva.KonvaEventObject<MouseEvent>, targetId: string, currentSel: Set<string>) => {
     const targetWall = walls.find(w => w.id === targetId)
@@ -1892,6 +2104,12 @@ export function DxfJsonViewPage() {
         return { ...l, start: { ...l.start, x: l.start.x + delta.dx, y: l.start.y + delta.dy }, end: { ...l.end, x: l.end.x + delta.dx, y: l.end.y + delta.dy } }
       }),
     }))
+     const _finalDelta = dragDeltaRef.current
+    if (Math.abs(_finalDelta.dx) > 0.02 || Math.abs(_finalDelta.dy) > 0.02) {
+      didDragRef.current = true
+    }
+    // Reset drag group position before unmounting its children so walls don't flash at old offset
+    if (dragGroupRef.current) { dragGroupRef.current.x(0); dragGroupRef.current.y(0) }
     activeDragRef.current = null; setActiveDrag(null)
     dragDeltaRef.current = { dx: 0, dy: 0 }; setDragDelta({ dx: 0, dy: 0 })
   }, [applyDrag, applyPolylineDrag])
@@ -1989,17 +2207,17 @@ export function DxfJsonViewPage() {
 
   const onRoomMoveDragStart = useCallback((e: Konva.KonvaEventObject<DragEvent>) => {
     if (selectedRoomIndex === null || activeDragRef.current) return
-    const snapshotRooms = detectRooms(wallsBase)
+    const snapshotRooms = detectRooms(roomDetectionWalls)
     const poly = snapshotRooms[selectedRoomIndex]
     if (!poly) return
-    const idsArr = wallIdsOnRoomBoundary(poly, wallsBase)
+    const idsArr = wallIdsOnRoomBoundary(poly, roomDetectionWalls)
     if (!idsArr.length) return
     snapshot()
     const drag: RoomDrag = { wallIds: new Set(idsArr), initCX: e.target.x(), initCY: e.target.y() }
     roomDragRef.current = drag; setRoomDrag(drag)
     roomDragDeltaRef.current = { dx: 0, dy: 0 }; setRoomDragDelta({ dx: 0, dy: 0 })
     setIsDraggingRoom(true)
-  }, [selectedRoomIndex, wallsBase, snapshot])
+  }, [selectedRoomIndex, roomDetectionWalls, snapshot])
 
   const onRoomMoveDragMove = useCallback((e: Konva.KonvaEventObject<DragEvent>) => {
     const drag = roomDragRef.current
@@ -2023,28 +2241,77 @@ export function DxfJsonViewPage() {
     setPlanDoc(prev => applyRoomDeltaToDoc(prev, idList, dx, dy))
   }, [])
 
+  const zoomRafRef = useRef<number>(0)
   const handleWheel = useCallback((e: Konva.KonvaEventObject<WheelEvent>) => {
     e.evt.preventDefault()
     const stage = stageRef.current; if (!stage) return
+    const oldScale = stage.scaleX()
     const pt = stage.getPointerPosition() ?? { x: 0, y: 0 }
-    const mpX = (pt.x - pos.x) / zoom, mpY = (pt.y - pos.y) / zoom
-    const nz = Math.min(8, Math.max(0.25, zoom * (e.evt.deltaY < 0 ? 1.12 : 0.9)))
-    setZoom(nz)
-    setPos({ x: pt.x - mpX * nz, y: pt.y - mpY * nz })
-  }, [zoom, pos])
+    const mpX = (pt.x - stage.x()) / oldScale
+    const mpY = (pt.y - stage.y()) / oldScale
+    const nz = Math.min(8, Math.max(0.25, oldScale * (e.evt.deltaY < 0 ? 1.12 : 0.9)))
+    // Update Konva imperatively — zero React re-renders during scroll
+    stage.scaleX(nz); stage.scaleY(nz)
+    stage.x(pt.x - mpX * nz); stage.y(pt.y - mpY * nz)
+    stage.batchDraw()
+    // Sync React state at most once per animation frame (for HR, strokeWidths, memos)
+    if (!zoomRafRef.current) {
+      zoomRafRef.current = requestAnimationFrame(() => {
+        const s = stageRef.current
+        if (s) { setZoom(s.scaleX()); setPos({ x: s.x(), y: s.y() }) }
+        zoomRafRef.current = 0
+      })
+    }
+  }, [])
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedIds.size > 0) { snapshot(); setWalls(p => p.filter(w => !selectedIds.has(w.id))); setSelectedIds(new Set()) }
+        if (selectedGroupId !== null) {
+          // Delete all walls belonging to the selected DXF group
+          const grp = canvasGroups.find(g => g.id === selectedGroupId)
+          if (grp) {
+            snapshot()
+            const toDelete = new Set(grp.wallIds)
+            setWalls(p => p.filter(w => !toDelete.has(w.id)))
+            // Also remove from planDoc: lines, polylines, arcs
+            setPlanDoc(prev => {
+              let next = { ...prev }
+              // lines: ln-L{i} → handle L{i}
+              const lineHandles = new Set(
+                [...toDelete].filter(id => id.startsWith('ln-')).map(id => id.slice(3))
+              )
+              if (lineHandles.size) next = { ...next, lines: next.lines.filter(l => !lineHandles.has(l.handle)) }
+              // polylines: pl-P{i}-* → handle P{i}
+              const plHandles = new Set(
+                [...toDelete].filter(id => id.startsWith('pl-')).map(id => {
+                  const rest = id.slice(3); const dash = rest.lastIndexOf('-'); return dash > 0 ? rest.slice(0, dash) : rest
+                })
+              )
+              if (plHandles.size) next = { ...next, polylines: next.polylines.filter(p => !plHandles.has(p.handle)) }
+              // arcs: fromArc handle
+              const arcHandleSet = new Set(
+                [...toDelete].filter(id => id.startsWith('ar-')).map(id => {
+                  const rest = id.slice(3); const dash = rest.lastIndexOf('-'); return dash > 0 ? rest.slice(0, dash) : rest
+                })
+              )
+              if (arcHandleSet.size) next = { ...next, arcs: next.arcs.filter(a => !arcHandleSet.has(a.handle)) }
+              return next
+            })
+            setSelectedGroupId(null)
+            setSelectedIds(new Set())
+          }
+        } else if (selectedIds.size > 0) {
+          snapshot(); setWalls(p => p.filter(w => !selectedIds.has(w.id))); setSelectedIds(new Set())
+        }
       }
       if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); undo() }
       if (e.key === 'Escape') {
         if (rotationDragRef.current) { rotationDragRef.current = null; rotationAngleDeltaRef.current = 0; setRotationDrag(null); setRotationAngleDelta(0) }
         else if (resizeDragRef.current) { resizeDragRef.current = null; resizePreviewRef.current = null; setResizeDrag(null); setResizePreview(null) }
-        else setSelectedIds(new Set())
+        else { setSelectedIds(new Set()); setSelectedGroupId(null) }
       }
       if (e.key === 'o' || e.key === 'O') setOrthoEnabled(v => !v)
       if (e.key === 'j' || e.key === 'J') { e.preventDefault(); joinSelected() }
@@ -2055,7 +2322,7 @@ export function DxfJsonViewPage() {
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
     return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp) }
-  }, [selectedIds, snapshot, undo, joinSelected, ungroupSelected])
+  }, [selectedIds, selectedGroupId, canvasGroups, snapshot, undo, joinSelected, ungroupSelected])
 
   useEffect(() => {
     const onGlobalMouseUp = () => {
@@ -2066,10 +2333,18 @@ export function DxfJsonViewPage() {
     }
     window.addEventListener('mouseup', onGlobalMouseUp)
     return () => window.removeEventListener('mouseup', onGlobalMouseUp)
-  }, [onMidDragEnd, commitRotation, commitResize, onEpDragEnd, selectionBox, isDraggingEp])
+  }, [onMidDragEnd, commitRotation, commitResize, onEpDragEnd, isRubberBanding, isDraggingEp])
 
-  const HR  = HP_SCR / zoom
-  const visWalls = useMemo(() => (showDetail ? walls : walls.filter(w => !w.isDetail)), [walls, showDetail])
+  // Set of wall IDs being dragged — used to split static vs dragged wall render.
+  // Only changes at drag start/end; stable during drag movement.
+  const toMoveSet = useMemo(
+    () => activeDrag ? new Set(activeDrag.toMoveWallIds) : new Set<string>(),
+    [activeDrag],
+  )
+    const visWalls = useMemo(
+     () => showDetail ? walls : walls.filter(w => !w.isDetail || wallIdToGroupId.has(w.id)),
+     [walls, showDetail, wallIdToGroupId]
+   )
 
   const gridLines = useMemo(() => {
     const sw = stageSize.w, sh = stageSize.h
@@ -2087,17 +2362,18 @@ export function DxfJsonViewPage() {
 
   const effectiveWalls = useMemo(() => {
     let ws = visWalls
-    if (activeDrag) ws = applyDrag(ws, activeDrag, dragDelta)
+    // activeDrag translation is applied imperatively via dragGroupRef (Konva Group x/y),
+    // not via React state, so we get zero re-renders during drag movement.
     if (rotationDrag && rotationAngleDelta !== 0) ws = applyRotation(ws, new Set(rotationDrag.wallIds), rotationDrag.centerWX, rotationDrag.centerWY, rotationAngleDelta)
     if (resizeDrag && resizePreview) ws = applyResizeToWalls(ws, new Set(resizeDrag.wallIds), resizeDrag.initBBox, resizePreview)
     return ws
-  }, [visWalls, activeDrag, dragDelta, applyDrag, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
+  }, [visWalls, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
 
   const effectiveSelBBox = useMemo(() => {
     if (selectedIds.size === 0 && !selectedWinKey && !selectedFurnKey) return null
     let minCX = Infinity, minCY = Infinity, maxCX = -Infinity, maxCY = -Infinity
     let hasAny = false
-    for (const w of effectiveWalls.filter(w => selectedIds.has(w.id))) {
+    for (const w of walls.filter(w => selectedIds.has(w.id))) {
       for (const p of [w.start, w.end]) {
         const [cx, cy] = toC(p.x, p.y, t)
         minCX = Math.min(minCX, cx); maxCX = Math.max(maxCX, cx)
@@ -2363,8 +2639,18 @@ export function DxfJsonViewPage() {
       setActiveTool('select'); return
     }
 
+    // Check if the click falls inside a DXF group bounding box (world coords).
+    for (const grp of canvasGroups) {
+      const { minX, minY, maxX, maxY } = grp.bounds
+      if (wx >= minX && wx <= maxX && wy >= minY && wy <= maxY) {
+        selectDxfGroup(grp.id)
+        return
+      }
+    }
+
+    setSelectedGroupId(null)
     setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null)
-  }, [activeTool, t, getSnap, planDoc, snapshot, setActiveTool, arcDraftCenter, arcDraftRadius, arcDraftStartAngle, circleDraftCenter])
+  }, [activeTool, t, getSnap, planDoc, snapshot, setActiveTool, arcDraftCenter, arcDraftRadius, arcDraftStartAngle, circleDraftCenter, canvasGroups, selectDxfGroup])
 
   const finishPolyline = useCallback(() => {
     const pts = polylineDraftRef.current
@@ -2379,6 +2665,8 @@ export function DxfJsonViewPage() {
   }, [planDoc, snapshot, polylineClosed, setActiveTool])
 
   useEffect(() => { finishPolylineRef.current = finishPolyline }, [finishPolyline])
+
+
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -2453,7 +2741,7 @@ export function DxfJsonViewPage() {
       if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); undo() }
       if (e.key === 'Enter' && activeTool === 'drawPolyline' && polylineDraftRef.current.length >= 2) { e.preventDefault(); finishPolylineRef.current() }
       if (e.key === 'Escape') {
-        setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedArcHandle(null); setSelectedWinKey(null)
+        setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedGroupId(null)
         drawLineAnchorRef.current = null; setDrawLineAnchor(null); setDrawLinePointer(null)
         polylineDraftRef.current = []; setPolylineDraft([]); setPolylineHover(null)
         setArcDraftCenter(null); setArcDraftRadius(null); setArcDraftStartAngle(null); setCircleDraftCenter(null); setShapePointer(null)
@@ -2672,7 +2960,7 @@ export function DxfJsonViewPage() {
                 onMouseUp={onStageMouseUp}
                 onClick={e => {
                   if (isDrawingTool) { handleStageClick(e) }
-                  else if (e.target === stageRef.current) { setSelectedIds(new Set()); handleStageClick(e) }
+                  else if (e.target === stageRef.current) { setSelectedIds(new Set()); setSelectedGroupId(null); handleStageClick(e) }
                 }}
                 onDblClick={() => {
                   if (activeTool === 'drawLine' && drawLineAnchorRef.current) {
@@ -2692,7 +2980,7 @@ export function DxfJsonViewPage() {
                   cursor: resizeDrag ? `${resizeDrag.handle}-resize`
                     : (isDraggingEp || rotationDrag) ? 'crosshair'
                     : (activeTool === 'hand' || spaceHeld) ? 'grab'
-                    : selectionBox ? 'default'
+                    : isRubberBanding ? 'default'
                     : activeTool === 'draw' || activeTool === 'text' ? 'crosshair'
                     : 'default',
                 }}
@@ -2717,7 +3005,8 @@ export function DxfJsonViewPage() {
                     if (item.visible === false) return null
 
                     const col = resolveEntityColor(item.color, item.layer, layerColorMap, strokeHex)
-                    const sw = (1 * strokeScale) / zoom   // hairline, matches wall default
+                    // strokeScaleEnabled={false} on all elements → widths are screen-pixels, stable during zoom
+                    const sw = strokeScale
 
                     // ── CIRCLE ─────────────────────────────────────────────
                     if (item.kind === 'circle') {
@@ -2727,6 +3016,8 @@ export function DxfJsonViewPage() {
                           x={cx} y={cy}
                           radius={Math.max(0, item.r * t.sc)}
                           stroke={col} strokeWidth={sw}
+                          strokeScaleEnabled={false}
+                          perfectDrawEnabled={false}
                           fill="transparent"
                         />
                       )
@@ -2749,6 +3040,7 @@ export function DxfJsonViewPage() {
                       return (
                         <Line key={item.id} points={pts}
                           stroke={col} strokeWidth={sw}
+                          strokeScaleEnabled={false} perfectDrawEnabled={false}
                           closed={Math.abs(item.endParam - item.startParam - Math.PI * 2) < 0.01}
                         />
                       )
@@ -2760,6 +3052,7 @@ export function DxfJsonViewPage() {
                       return (
                         <Line key={item.id} points={pts}
                           stroke={col} strokeWidth={sw}
+                          strokeScaleEnabled={false} perfectDrawEnabled={false}
                           closed={item.closed}
                           tension={0}
                         />
@@ -2778,6 +3071,7 @@ export function DxfJsonViewPage() {
                             fill={col}
                             opacity={0.30}
                             stroke="transparent"
+                            strokeScaleEnabled={false} perfectDrawEnabled={false}
                             closed
                           />
                         )
@@ -2787,8 +3081,9 @@ export function DxfJsonViewPage() {
                         <Line key={item.id}
                           points={toCanvas(item.outerBoundary)}
                           stroke={col}
-                          strokeWidth={0.5 / zoom}
-                          dash={[4 / zoom, 4 / zoom]}
+                          strokeWidth={0.5}
+                          strokeScaleEnabled={false} perfectDrawEnabled={false}
+                          dash={[4, 4]}
                           closed
                         />
                       )
@@ -2800,7 +3095,8 @@ export function DxfJsonViewPage() {
                       return (
                         <Line key={item.id} points={pts}
                           fill={col} opacity={0.75}
-                          stroke={col} strokeWidth={0.5 / zoom}
+                          stroke={col} strokeWidth={0.5}
+                          strokeScaleEnabled={false} perfectDrawEnabled={false}
                           closed
                         />
                       )
@@ -2811,7 +3107,8 @@ export function DxfJsonViewPage() {
                       const pts = item.points.flatMap(p => toC(p.x, p.y, t))
                       return (
                         <Line key={item.id} points={pts}
-                          stroke={col} strokeWidth={0.5 / zoom}
+                          stroke={col} strokeWidth={0.5}
+                          strokeScaleEnabled={false} perfectDrawEnabled={false}
                           fill="transparent"
                           closed
                         />
@@ -2828,7 +3125,8 @@ export function DxfJsonViewPage() {
                             return (
                               <Line key={i}
                                 points={[x1, y1, x2, y2]}
-                                stroke={col} strokeWidth={0.5 / zoom}
+                                stroke={col} strokeWidth={0.5}
+                                strokeScaleEnabled={false} perfectDrawEnabled={false}
                               />
                             )
                           })}
@@ -2842,6 +3140,7 @@ export function DxfJsonViewPage() {
                       return (
                         <Line key={item.id} points={pts}
                           stroke={col} strokeWidth={sw}
+                          strokeScaleEnabled={false} perfectDrawEnabled={false}
                         />
                       )
                     }
@@ -2853,10 +3152,12 @@ export function DxfJsonViewPage() {
                       const pts = item.boundary.flatMap(p => toC(p.x, p.y, t))
                       return (
                         <Group key={item.id}>
-                          <Line points={pts} fill="#ffffff" stroke="transparent" closed />
+                          <Line points={pts} fill="#ffffff" stroke="transparent"
+                            strokeScaleEnabled={false} perfectDrawEnabled={false} closed />
                           {item.showFrame && (
                             <Line points={pts}
-                              stroke={col} strokeWidth={0.5 / zoom}
+                              stroke={col} strokeWidth={0.5}
+                              strokeScaleEnabled={false} perfectDrawEnabled={false}
                               fill="transparent" closed
                             />
                           )}
@@ -2874,11 +3175,11 @@ export function DxfJsonViewPage() {
                         <Group key={item.id}>
                           <Rect x={ix} y={iy} width={wCanvas} height={hCanvas}
                             fill="#2a2a2a" stroke="#666666"
-                            strokeWidth={0.8 / zoom} opacity={0.5}
+                            strokeWidth={0.8} strokeScaleEnabled={false} opacity={0.5}
                           />
-                          <Text x={ix + 4 / zoom} y={iy + 4 / zoom}
+                          <Text x={ix + 4} y={iy + 4}
                             text={`IMG: ${fname}`}
-                            fontSize={Math.max(8, 10 / zoom)} fill="#aaaaaa"
+                            fontSize={11} fill="#aaaaaa"
                             listening={false}
                           />
                         </Group>
@@ -2890,18 +3191,20 @@ export function DxfJsonViewPage() {
                       const pts = item.vertices.flatMap(v => toC(v.x, v.y, t))
                       return (
                         <Group key={item.id}>
-                          <Line points={pts} stroke={col} strokeWidth={sw} />
+                          <Line points={pts} stroke={col} strokeWidth={sw}
+                            strokeScaleEnabled={false} perfectDrawEnabled={false} />
                           {item.hasArrowhead && pts.length >= 4 && (
                             <Circle x={pts[0]} y={pts[1]}
-                              radius={3 / zoom} fill={col}
+                              radius={3} fill={col}
+                              strokeScaleEnabled={false}
                             />
                           )}
                           {item.annotationText && pts.length >= 2 && (
                             <Text
-                              x={pts[pts.length - 2] + 4 / zoom}
-                              y={pts[pts.length - 1] - 4 / zoom}
+                              x={pts[pts.length - 2] + 4}
+                              y={pts[pts.length - 1] - 4}
                               text={item.annotationText}
-                              fontSize={Math.max(8, 11 / zoom)} fill={col}
+                              fontSize={11} fill={col}
                             />
                           )}
                         </Group>
@@ -2914,14 +3217,15 @@ export function DxfJsonViewPage() {
                         <Group key={item.id}>
                           {item.lines.map((line, li) => {
                             const pts = line.flatMap(v => toC(v.x, v.y, t))
-                            return <Line key={li} points={pts} stroke={col} strokeWidth={sw} />
+                            return <Line key={li} points={pts} stroke={col} strokeWidth={sw}
+                              strokeScaleEnabled={false} perfectDrawEnabled={false} />
                           })}
                           {item.text && item.textPos && (() => {
                             const [tx2, ty2] = toC(item.textPos.x, item.textPos.y, t)
                             return (
                               <Text x={tx2} y={ty2}
                                 text={item.text}
-                                fontSize={Math.max(8, 11 / zoom)} fill={col}
+                                fontSize={11} fill={col}
                               />
                             )
                           })()}
@@ -2932,16 +3236,16 @@ export function DxfJsonViewPage() {
                     // ── TOLERANCE (GD&T frame) ─────────────────────────────
                     if (item.kind === 'tolerance') {
                       const [px, py] = toC(item.position.x, item.position.y, t)
-                      const fs = Math.max(8, 10 / zoom)
-                      const boxW = item.text.length * fs * 0.62
-                      const boxH = fs * 1.6
+                      const boxW = item.text.length * 11 * 0.62
+                      const boxH = 11 * 1.6
                       return (
                         <Group key={item.id}>
                           <Rect x={px} y={py - boxH * 0.5} width={boxW} height={boxH}
-                            stroke={col} strokeWidth={0.6 / zoom} fill="transparent"
+                            stroke={col} strokeWidth={0.6}
+                            strokeScaleEnabled={false} fill="transparent"
                           />
-                          <Text x={px + 3 / zoom} y={py - boxH * 0.35}
-                            text={item.text} fontSize={fs} fill={col}
+                          <Text x={px + 3} y={py - boxH * 0.35}
+                            text={item.text} fontSize={11} fill={col}
                           />
                         </Group>
                       )
@@ -2957,7 +3261,8 @@ export function DxfJsonViewPage() {
                             const [x1, y1] = toC(l.start.x, l.start.y, t)
                             const [x2, y2] = toC(l.end.x, l.end.y, t)
                             return <Line key={`dl${i}`} points={[x1, y1, x2, y2]}
-                              stroke={col} strokeWidth={0.6 / zoom} />
+                              stroke={col} strokeWidth={0.6}
+                              strokeScaleEnabled={false} perfectDrawEnabled={false} />
                           })}
                           {item.arcs.map((a, i) => {
                             // KonvaArc: angle measured CW from +X, in degrees.
@@ -2973,19 +3278,19 @@ export function DxfJsonViewPage() {
                                 outerRadius={Math.max(0, a.r * t.sc)}
                                 angle={spanDeg}
                                 rotation={-(a.startAngle + spanDeg)}
-                                stroke={col} strokeWidth={0.6 / zoom}
+                                stroke={col} strokeWidth={0.6}
+                                strokeScaleEnabled={false}
                                 fill="transparent"
                               />
                             )
                           })}
                           {item.text && (() => {
                             const [dtx, dty] = toC(item.textPos.x, item.textPos.y, t)
-                            const fs = Math.max(7, 11 / zoom)
                             return (
                               <Text key="dt" x={dtx} y={dty}
                                 text={item.text}
-                                fontSize={fs} fill={col}
-                                offsetX={(item.text.length * fs * 0.55) / 2}
+                                fontSize={11} fill={col}
+                                offsetX={(item.text.length * 11 * 0.55) / 2}
                               />
                             )
                           })()}
@@ -3004,14 +3309,17 @@ export function DxfJsonViewPage() {
                             const [x1, y1] = toC(l.start.x, l.start.y, t)
                             const [x2, y2] = toC(l.end.x, l.end.y, t)
                             return <Line key={`il${i}`} points={[x1, y1, x2, y2]}
-                              stroke={lc} strokeWidth={sw} lineCap="round" />
+                              stroke={lc} strokeWidth={sw} lineCap="round"
+                              strokeScaleEnabled={false} perfectDrawEnabled={false} />
                           })}
                           {item.circles.map((c, i) => {
                             const cc = resolveEntityColor(c.color, item.layer, layerColorMap, col)
                             const [cx2, cy2] = toC(c.cx, c.cy, t)
                             return <Circle key={`ic${i}`} x={cx2} y={cy2}
                               radius={Math.max(0, c.r * t.sc)}
-                              stroke={cc} strokeWidth={sw} fill="transparent" />
+                              stroke={cc} strokeWidth={sw}
+                              strokeScaleEnabled={false} perfectDrawEnabled={false}
+                              fill="transparent" />
                           })}
                           {item.arcs.map((a, i) => {
                             const ac = resolveEntityColor(a.color, item.layer, layerColorMap, col)
@@ -3027,6 +3335,7 @@ export function DxfJsonViewPage() {
                                 angle={spanDeg}
                                 rotation={-(a.startAngle + spanDeg)}
                                 stroke={ac} strokeWidth={sw}
+                                strokeScaleEnabled={false}
                                 fill="transparent"
                               />
                             )
@@ -3035,7 +3344,8 @@ export function DxfJsonViewPage() {
                             const pc = resolveEntityColor(pl.color, item.layer, layerColorMap, col)
                             const pts = pl.points.flatMap(p => toC(p.x, p.y, t))
                             return <Line key={`ip${i}`} points={pts}
-                              stroke={pc} strokeWidth={sw} closed={pl.closed} />
+                              stroke={pc} strokeWidth={sw} closed={pl.closed}
+                              strokeScaleEnabled={false} perfectDrawEnabled={false} />
                           })}
                         </Group>
                       )
@@ -3050,7 +3360,7 @@ export function DxfJsonViewPage() {
 
                 {/* ── room fills ── */}
                 <Layer>
-                  {roomsWithWalls.map((r, i) => {
+                  {(roomsWithWalls ?? []).map((r, i) => {
                     const isHovered = hoveredRoomIdx === i
                     return (
                       <Group key={`room-${i}`}>
@@ -3063,12 +3373,42 @@ export function DxfJsonViewPage() {
                           listening={true}
                           onClick={e => {
                             e.cancelBubble = true
+                            const pos = stageRef.current?.getRelativePointerPosition()
+                            if (pos) {
+                              const [wx, wy] = toW(pos.x, pos.y, t)
+                              for (const grp of canvasGroups) {
+                                const { minX, minY, maxX, maxY } = grp.bounds
+                                if (wx >= minX && wx <= maxX && wy >= minY && wy <= maxY) {
+                                  selectDxfGroup(grp.id)
+                                  return
+                                }
+                              }
+                            }
                             const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                            setSelectedGroupId(null)
                             setSelectedIds(prev => { if (isCtrl) { const next = new Set(prev); r.wallIds.forEach(id => next.add(id)); return next } return new Set(r.wallIds) })
                           }}
                           onMouseDown={e => {
                             if (rotationDragRef.current) return
                             e.cancelBubble = true
+                            const pos = stageRef.current?.getRelativePointerPosition()
+                            if (pos) {
+                              const [wx, wy] = toW(pos.x, pos.y, t)
+                              for (const grp of canvasGroups) {
+                                const { minX, minY, maxX, maxY } = grp.bounds
+                                if (wx >= minX && wx <= maxX && wy >= minY && wy <= maxY) {
+                                  const persistedSel = new Set<string>(grp.wallIds)
+                                  const selForDrag = new Set(persistedSel)
+                                  grp.arcHandles.forEach(h => selForDrag.add(h))
+                                  setSelectedGroupId(grp.id)
+                                  setSelectedId(null); setSelectedRoomIndex(null)
+                                  setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null)
+                                  setSelectedIds(persistedSel)
+                                  onMidDragStart(e as any, [...grp.wallIds][0] ?? '', selForDrag)
+                                  return
+                                }
+                              }
+                            }
                             const currentSel = new Set(r.wallIds)
                             setSelectedIds(currentSel)
                             onMidDragStart(e as any, r.wallIds[0] ?? '', currentSel)
@@ -3088,7 +3428,7 @@ export function DxfJsonViewPage() {
                   {windowGroups.map(({ key, lines }) => {
                     const isSelWin = selectedWinKey === key
                     const winColor = isSelWin ? '#f59e0b' : strokeHex
-                    const sw = (1.5 * strokeScale) / zoom
+                    const sw = 1.5 * strokeScale
                     return (
                       <Group key={`wingrp-${key}`} draggable
                         onDragStart={e => { e.cancelBubble = true; snapshot(); setSelectedWinKey(key); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null) }}
@@ -3100,7 +3440,9 @@ export function DxfJsonViewPage() {
                         {lines.map(ln => {
                           const [x1, y1] = toC(ln.start.x, ln.start.y, t)
                           const [x2, y2] = toC(ln.end.x, ln.end.y, t)
-                          return <Line key={ln.handle} points={[x1, y1, x2, y2]} stroke={winColor} strokeWidth={sw} lineCap="round" hitStrokeWidth={10 / zoom} />
+                          const lnColor = isSelWin ? '#f59e0b' : resolveExplicitColor(ln.color, ln.layer, layerColorMap, strokeHex)
+                          return <Line key={ln.handle} points={[x1, y1, x2, y2]} stroke={lnColor} strokeWidth={sw} lineCap="round"
+                            strokeScaleEnabled={false} perfectDrawEnabled={false} hitStrokeWidth={10} />
                         })}
                       </Group>
                     )
@@ -3114,7 +3456,7 @@ export function DxfJsonViewPage() {
                     const categoryColor = category ? FURNITURE_CATEGORY_COLORS[category] : undefined
                     const baseColor = categoryColor ?? strokeHex
                     const furnColor = isSel ? '#f59e0b' : baseColor
-                    const sw = (1.5 * strokeScale) / zoom
+                    const sw = 1.5 * strokeScale
                     let cx = 0, cy = 0
                     if (lines.length > 0) {
                       let sx = 0, sy = 0, n = 0
@@ -3132,10 +3474,12 @@ export function DxfJsonViewPage() {
                         {lines.map(ln => {
                           const [x1, y1] = toC(ln.start.x, ln.start.y, t)
                           const [x2, y2] = toC(ln.end.x, ln.end.y, t)
-                          return <Line key={ln.handle} points={[x1, y1, x2, y2]} stroke={furnColor} strokeWidth={sw} lineCap="round" hitStrokeWidth={10 / zoom} />
+                          const lnColor = isSel ? '#f59e0b' : resolveExplicitColor(ln.color, ln.layer, layerColorMap, baseColor)
+                          return <Line key={ln.handle} points={[x1, y1, x2, y2]} stroke={lnColor} strokeWidth={sw} lineCap="round"
+                            strokeScaleEnabled={false} perfectDrawEnabled={false} hitStrokeWidth={10} />
                         })}
-                        {showFurnitureLabels && label && (
-                          <Text x={cx} y={cy} text={label} fontSize={11 / zoom} fill={isSel ? '#f59e0b' : (categoryColor ?? '#64748b')} listening={false} />
+                        {showFurnitureLabels && label && !isSel && (
+                          <Text x={cx} y={cy} text={label} fontSize={11} fill={categoryColor ?? '#64748b'} listening={false} />
                         )}
                       </Group>
                     )
@@ -3144,13 +3488,37 @@ export function DxfJsonViewPage() {
                   {/* Door arcs */}
                   {effectiveArcs.map((arc) => {
                     const isFullCircle = arc.end_angle - arc.start_angle >= 360
-                    const isSelArc  = selectedIds.has(arc.handle)
-                    const arcKey    = arc.handle.replace(/^arc-/, '')
-                    const frameLines = effectiveLines.filter(ln => ln.handle.startsWith(`dfl-${arcKey}`))
-                    const arcColor  = isSelArc ? '#f59e0b' : strokeHex
-                    const sw = (1.5 * strokeScale) / zoom
+  const isSelArc  = selectedIds.has(arc.handle)
+  const arcKey    = arc.handle.replace(/^arc-/, '')
+  const frameLines = effectiveLines.filter(ln => ln.handle.startsWith(`dfl-${arcKey}`))
+  const arcGid = wallIdToGroupId.get(arc.handle)
+  const arcIsGroupSel = arcGid !== undefined && arcGid === selectedGroupId
+  
+  // ========== ADD THIS BLOCK HERE ==========
+  // Get the group's insert_layer color if available
+  let groupColor: string | null = null
+  if (arcGid !== undefined) {
+    const grp = canvasGroups.find(g => g.id === arcGid)
+    if (grp && grp.insertLayer && grp.insertLayer !== '0') {
+      groupColor = layerColorMap.get(grp.insertLayer) ?? null
+    }
+  }
+  
+  // Determine the final color
+  let finalColor: string
+  if (isSelArc || arcIsGroupSel) {
+    finalColor = '#0073cf'  // Selection color
+  } else if (groupColor && groupColor.toUpperCase() !== '#FFFFFF') {
+    finalColor = groupColor  // Use group's insert_layer color
+  } else {
+    finalColor = resolveExplicitColor(arc.color, arc.layer, layerColorMap, strokeHex)
+  }
+                    const arcColor  = finalColor
+                    const sw = 1.5 * strokeScale
                     const [arcCx, arcCy] = toC(arc.center.x, arc.center.y, t)
                     const rCanvas = arc.radius * t.sc
+
+                    const panelColor = finalColor
 
                     return (
                       <Group key={arc.handle}
@@ -3158,14 +3526,38 @@ export function DxfJsonViewPage() {
                           if (isDrawingTool) return
                           e.cancelBubble = true
                           if (activeTool === 'hand' || spaceHeld) return
+                          if (didDragRef.current) { didDragRef.current = false; return }
                           setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedId(null)
                           const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                          // Check DXF group membership (e.g. door arc belongs to door group)
+                          const arcDxfGid = wallIdToGroupId.get(arc.handle)
+                          if (arcDxfGid !== undefined) {
+                            selectDxfGroup(arcDxfGid, isCtrl)
+                            return
+                          }
                           setSelectedIds(prev => { const next = new Set(isCtrl ? prev : []); if (isSelArc && isCtrl) next.delete(arc.handle); else next.add(arc.handle); return next })
                         }}
-                        onMouseDown={e => {
+                       onMouseDown={e => {
                           if (isDrawingTool) return
                           e.cancelBubble = true
                           if (activeTool !== 'select' || spaceHeld) return
+                          didDragRef.current = false
+                          // Check if arc belongs to a DXF group (e.g. door arc + jamb lines)
+                          const arcDxfGid = wallIdToGroupId.get(arc.handle)
+                          if (arcDxfGid !== undefined) {
+                            const grp = canvasGroups.find(g => g.id === arcDxfGid)
+                            if (grp) {
+                              setSelectedGroupId(arcDxfGid)
+                              setSelectedId(null); setSelectedRoomIndex(null)
+                              setSelectedTextHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null)
+                              const persistedSel = new Set<string>(grp.wallIds)
+                              setSelectedIds(persistedSel)
+                              const selForDrag = new Set(persistedSel)
+                              grp.arcHandles.forEach(h => selForDrag.add(h))
+                              onMidDragStart(e as any, arc.handle, selForDrag)
+                              return
+                            }
+                          }
                           const isCtrl = e.evt.ctrlKey || e.evt.metaKey
                           const currentSel = new Set(isCtrl ? selectedIds : (isSelArc ? selectedIds : new Set<string>()))
                           currentSel.add(arc.handle)
@@ -3177,11 +3569,13 @@ export function DxfJsonViewPage() {
                         onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                       >
                         {isFullCircle ? (
-                          <Circle x={arcCx} y={arcCy} radius={Math.max(0, rCanvas)} stroke={arcColor} strokeWidth={sw} fill="transparent" hitStrokeWidth={10 / zoom} />
+                          <Circle x={arcCx} y={arcCy} radius={Math.max(0, rCanvas)} stroke={arcColor} strokeWidth={sw} fill="transparent"
+                            strokeScaleEnabled={false} perfectDrawEnabled={false} hitStrokeWidth={10} />
                         ) : (
                           <>
                             {/* Arc sweep */}
-                            <Line points={arcPoints(arc, t)} stroke={arcColor} strokeWidth={sw} lineCap="round" lineJoin="round" hitStrokeWidth={10 / zoom} />
+                            <Line points={arcPoints(arc, t)} stroke={arcColor} strokeWidth={sw} lineCap="round" lineJoin="round"
+                              strokeScaleEnabled={false} perfectDrawEnabled={false} hitStrokeWidth={10} />
                             {/* Door panel line: from hinge to closed position.
                                 Closed position = whichever arc endpoint (start or end angle)
                                 is closest to a jamb (dfl-*) line endpoint. */}
@@ -3207,65 +3601,122 @@ export function DxfJsonViewPage() {
                                 arc.center.y + arc.radius * Math.sin(panelRad),
                                 t
                               )
-                              return <Line points={[arcCx, arcCy, px, py]} stroke={arcColor} strokeWidth={sw} lineCap="round" listening={false} />
+                              return <Line points={[arcCx, arcCy, px, py]} stroke={arcColor} strokeWidth={sw} lineCap="round"
+                                strokeScaleEnabled={false} perfectDrawEnabled={false} listening={false} />
                             })()}
                           </>
                         )}
                         {/* Jamb stubs (wall thickness at door opening) */}
-                        {frameLines.map(ln => {
-                          const [x1, y1] = toC(ln.start.x, ln.start.y, t)
-                          const [x2, y2] = toC(ln.end.x, ln.end.y, t)
-                          return <Line key={ln.handle} points={[x1, y1, x2, y2]} stroke={arcColor} strokeWidth={sw} lineCap="round" listening={false} />
-                        })}
+                      {/* Jamb stubs (wall thickness at door opening) */}
+{frameLines.map(ln => {
+  const [x1, y1] = toC(ln.start.x, ln.start.y, t)
+  const [x2, y2] = toC(ln.end.x, ln.end.y, t)
+  
+  // Use the same finalColor for frame lines
+  const frameColor = (isSelArc || arcIsGroupSel)
+    ? '#0073cf'
+    : (groupColor && groupColor.toUpperCase() !== '#FFFFFF'
+        ? groupColor
+        : resolveExplicitColor(ln.color, ln.layer, layerColorMap, strokeHex))
+  
+  return <Line key={ln.handle} points={[x1, y1, x2, y2]} 
+    stroke={frameColor}
+    strokeWidth={sw} lineCap="round"
+    strokeScaleEnabled={false} perfectDrawEnabled={false} listening={false}
+  />
+})}
                       </Group>
                     )
                   })}
                 </Layer>
 
-                {/* ── walls ── */}
-                <Layer>
-                  {effectiveWalls.map(wall => {
+                {/* ── walls ──
+                    Static walls render without drag transform (their Group has no offset).
+                    Walls in toMoveSet render inside dragGroupRef which is moved imperatively
+                    via Konva x/y during drag — zero React re-renders during drag movement. */}
+                <Layer>{(() => {
+                  const renderWall = (wall: WallSeg) => {
                     if (wall.fromArc) return null
                     const [sx, sy] = toC(wall.start.x, wall.start.y, t)
                     const [ex, ey] = toC(wall.end.x, wall.end.y, t)
                     const isSel = selectedIds.has(wall.id)
                     const isDragging = activeDrag?.wallId === wall.id
-                    const wallColor = wall.isDetail ? '#60a5fa' : strokeHex
-                    const strokeW = ((wall.isOuter ? 2.8 : wall.isDetail ? 0.65 : 1.15) * strokeScale) / zoom
-
+                    const wallColor = wall.isDetail ? '#60a5fa' : resolveExplicitColor(wall.color, wall.layer ?? '0', layerColorMap, strokeHex)
+                    // strokeScaleEnabled={false} → widths are screen-pixels, no zoom needed → stable JSX during zoom
+                    const strokeW = (wall.isOuter ? 2.8 : wall.isDetail ? 0.65 : 1.15) * strokeScale
                     return (
                       <Group key={wall.id}>
-                        <Line points={[sx, sy, ex, ey]} stroke="transparent" strokeWidth={16 / zoom}
-                          onMouseDown={e => {
+                        <Line points={[sx, sy, ex, ey]} stroke="transparent" strokeWidth={16}
+                          strokeScaleEnabled={false}
+                         onMouseDown={e => {
                             if (isDrawingTool) return
                             e.cancelBubble = true
+                            didDragRef.current = false
                             selBeforeMouseDown.current = new Set(selectedIds)
+                            const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                            const dxfGid = wallIdToGroupId.get(wall.id)
+                            if (dxfGid !== undefined) {
+                              const grp = canvasGroups.find(g => g.id === dxfGid)
+                              if (grp) {
+                                setSelectedGroupId(dxfGid)
+                                setSelectedId(null); setSelectedRoomIndex(null)
+                                setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null)
+                                const persistedSel = new Set<string>(isCtrl ? selectedIds : [])
+                                grp.wallIds.forEach(id => persistedSel.add(id))
+                                setSelectedIds(persistedSel)
+                                const selForDrag = new Set(persistedSel)
+                                grp.arcHandles.forEach(h => selForDrag.add(h))
+                                onMidDragStart(e as any, wall.id, selForDrag)
+                                return
+                              }
+                            }
                             const groupIds = getGroupWallIds(wall.id, walls)
-                            // If this polyline has a linked room label, include it
                             if (wall.groupId?.startsWith('pl-')) {
                               const lbl = roomLabelHandle(wall.groupId.slice(3))
                               if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
                             }
-                            const groupFullySelected = groupIds.every(id => selectedIds.has(id))
-                            let currentSel = selectedIds
-                            if (!groupFullySelected) {
-                              const isCtrl = e.evt.ctrlKey || e.evt.metaKey
-                              currentSel = new Set(isCtrl ? selectedIds : [])
-                              groupIds.forEach(id => currentSel.add(id))
-                              setSelectedIds(currentSel)
+                            let currentSel: Set<string>
+                            if (selectedIds.has(wall.id)) {
+                              // Already selected — keep full multi-selection so rubber-band drag moves everything together
+                              currentSel = selectedIds
+                            } else {
+                              const groupFullySelected = groupIds.every(id => selectedIds.has(id))
+                              if (groupFullySelected) {
+                                currentSel = selectedIds
+                              } else {
+                                currentSel = new Set(isCtrl ? selectedIds : [])
+                                groupIds.forEach(id => currentSel.add(id))
+                                setSelectedIds(currentSel)
+                              }
                             }
+                            if (selectedGroupId !== null) setSelectedGroupId(null)
                             onMidDragStart(e as any, wall.id, currentSel)
                           }}
                           onMouseUp={e => { e.cancelBubble = true; onMidDragEnd() }}
                           onClick={e => {
                             if (isDrawingTool) return
                             e.cancelBubble = true
+                            if (didDragRef.current) { didDragRef.current = false; return }
                             const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                            const dxfGid = wallIdToGroupId.get(wall.id)
+                            if (dxfGid !== undefined) {
+                              const grp = canvasGroups.find(g => g.id === dxfGid)
+                              if (grp) {
+                                if (isCtrl && selBeforeMouseDown.current.has(wall.id)) {
+                                  setSelectedIds(prev => { const next = new Set(prev); grp.wallIds.forEach(id => next.delete(id)); return next })
+                                  if (selectedGroupId === dxfGid) setSelectedGroupId(null)
+                                } else {
+                                  selectDxfGroup(dxfGid, isCtrl)
+                                }
+                                return
+                              }
+                            }
                             const groupIds = getGroupWallIds(wall.id, walls)
                             if (wall.groupId?.startsWith('pl-')) {
                               const lbl = roomLabelHandle(wall.groupId.slice(3))
                               if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
                             }
+                            setSelectedGroupId(null)
                             setSelectedIds(prev => {
                               if (!isCtrl) return new Set(groupIds)
                               if (selBeforeMouseDown.current.has(wall.id)) { const next = new Set(prev); groupIds.forEach(id => next.delete(id)); return next }
@@ -3277,24 +3728,32 @@ export function DxfJsonViewPage() {
                         />
                         {(() => {
                           const isHoverGroup = !isSel && !isDragging && !!wall.groupId && wall.groupId === hoveredGroupId
+                          const isGroupSelected = isSel && selectedGroupId !== null && wallIdToGroupId.get(wall.id) === selectedGroupId
                           return (
                             <Line points={[sx, sy, ex, ey]}
-                              stroke={isDragging ? '#3b82f6' : isSel ? '#f59e0b' : isHoverGroup ? '#a855f7' : wallColor}
-                              strokeWidth={(isDragging || isSel || isHoverGroup) ? 2.2 / zoom : strokeW}
-                              lineCap="round" listening={false}
+                              stroke={(isDragging || isGroupSelected || isSel) ? '#0073cf' : isHoverGroup ? '#60a5fa' : wallColor}
+                              strokeWidth={(isDragging || isSel || isHoverGroup) ? 2.0 : strokeW}
+                              strokeScaleEnabled={false}
+                              lineCap="round" listening={false} perfectDrawEnabled={false}
                             />
                           )
                         })()}
-                        {isSel && (
+                        {isSel && !wallIdToGroupId.has(wall.id) && (
                           <>
-                            <Circle x={sx} y={sy} radius={HR} fill="#3b82f6" stroke="#fff" strokeWidth={1.2 / zoom} draggable
+                            <Circle x={sx} y={sy} radius={HP_SCR} fill="#3b82f6" stroke="#fff"
+                              strokeWidth={1.2} strokeScaleEnabled={false}
+                              scale={{ x: 1 / zoom, y: 1 / zoom }}
+                              draggable perfectDrawEnabled={false}
                               onDragStart={() => { snapshot(); setIsDraggingEp(true); draggingEpInfo.current = { wallId: wall.id, ep: 'start' } }}
                               onDragMove={e => onEpDragMove(e, wall.id, 'start')}
                               onDragEnd={onEpDragEnd}
                               onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'crosshair' }}
                               onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                             />
-                            <Circle x={ex} y={ey} radius={HR} fill="#3b82f6" stroke="#fff" strokeWidth={1.2 / zoom} draggable
+                            <Circle x={ex} y={ey} radius={HP_SCR} fill="#3b82f6" stroke="#fff"
+                              strokeWidth={1.2} strokeScaleEnabled={false}
+                              scale={{ x: 1 / zoom, y: 1 / zoom }}
+                              draggable perfectDrawEnabled={false}
                               onDragStart={() => { snapshot(); setIsDraggingEp(true); draggingEpInfo.current = { wallId: wall.id, ep: 'end' } }}
                               onDragMove={e => onEpDragMove(e, wall.id, 'end')}
                               onDragEnd={onEpDragEnd}
@@ -3305,7 +3764,17 @@ export function DxfJsonViewPage() {
                         )}
                       </Group>
                     )
-                  })}
+                  }
+                  return (
+                    <>
+                      {effectiveWalls.filter(w => !toMoveSet.has(w.id)).map(renderWall)}
+                      {/* Dragged walls live in their own Group — moved via Konva x/y, not React state */}
+                      <Group ref={dragGroupRef}>
+                        {effectiveWalls.filter(w => toMoveSet.has(w.id)).map(renderWall)}
+                      </Group>
+                    </>
+                  )
+                })()}
 
                   {/* ── Alignment guide lines (cyan, extend across stage) ── */}
                   {alignGuides.map((g, i) => {
@@ -3392,20 +3861,17 @@ export function DxfJsonViewPage() {
                   })()}
                 </Layer>
 
-                {/* ── rubber-band selection ── */}
-                {selectionBox && (() => {
-                  const [sx, sy] = toC(selectionBox.start.x, selectionBox.start.y, t)
-                  const [cx, cy] = toC(selectionBox.current.x, selectionBox.current.y, t)
-                  const isWindow = selectionBox.start.x < selectionBox.current.x
-                  return (
-                    <Layer listening={false}>
-                      <Rect x={Math.min(sx, cx)} y={Math.min(sy, cy)} width={Math.abs(cx - sx)} height={Math.abs(cy - sy)}
-                        fill={isWindow ? 'rgba(59, 130, 246, 0.2)' : 'rgba(34, 197, 94, 0.2)'}
-                        stroke={isWindow ? '#3b82f6' : '#22c55e'} strokeWidth={1 / zoom} dash={[4 / zoom, 2 / zoom]}
-                      />
-                    </Layer>
-                  )
-                })()}
+                {/* ── rubber-band selection ── (imperatively updated — no React re-renders during drag) */}
+                {isRubberBanding && (
+                  <Layer listening={false}>
+                    <Rect ref={rubberBandRectRef}
+                      x={0} y={0} width={0} height={0}
+                      fill="rgba(59,130,246,0.2)" stroke="#3b82f6"
+                      strokeWidth={1} strokeScaleEnabled={false}
+                      dash={[4, 2]}
+                    />
+                  </Layer>
+                )}
 
                 {/* ── labels ── */}
                 {showLabels && (
@@ -3461,7 +3927,7 @@ export function DxfJsonViewPage() {
                         >
                           {/* Hide background rect and text while the HTML textarea overlay is active */}
                           {isTxtSel && !isEditing && <Rect x={-4 / zoom} y={-fs - 4 / zoom} width={estW + 8 / zoom} height={boxH} fill="rgba(245,158,11,0.12)" stroke="#f59e0b" strokeWidth={1.2 / zoom} cornerRadius={2 / zoom} listening={false} />}
-                          {!isEditing && <Text x={0} y={-fs} text={textLines[0]} fontSize={fs} fontStyle="bold" fill={isTxtSel ? '#f59e0b' : '#2563eb'} fontFamily="'Inter', system-ui, -apple-system, sans-serif" />}
+                          {!isEditing && <Text x={0} y={-fs} text={textLines[0]} fontSize={fs} fontStyle="bold" fill={isTxtSel ? '#f59e0b' : resolveExplicitColor(tx.color, tx.layer, layerColorMap, '#2563eb')} fontFamily="'Inter', system-ui, -apple-system, sans-serif" />}
                           {!isEditing && textLines[1] && <Text x={0} y={-fs + fs * 1.25} text={textLines[1]} fontSize={fs * 0.78} fill={isTxtSel ? '#f59e0b' : '#64748b'} fontFamily="'Inter', system-ui, -apple-system, sans-serif" />}
                           {isTxtSel && selectedIds.size === 1 && activeTool === 'select' && (
                             <Circle x={handleX} y={handleY} radius={HR} fill="#3b82f6" stroke="#fff" strokeWidth={1.2 / zoom} draggable

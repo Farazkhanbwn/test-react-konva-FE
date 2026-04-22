@@ -34,6 +34,24 @@ import type {
 } from '@/constants/dxfJsonData'
 
 /* ──────────────────────────────────────────────────────────────────────────
+   CanvasGroup  — pre-computed group metadata for O(1) hit-testing
+   ────────────────────────────────────────────────────────────────────────── */
+
+export interface CanvasGroup {
+  /** Matches DxfGroup.id from the compact GROUPS array */
+  id: number
+  name: string
+  category: string
+  insert: { x: number; y: number }
+  bounds: { minX: number; minY: number; maxX: number; maxY: number }
+  /** Wall-segment IDs (ln-*, pl-*, ar-*) — safe to add to selectedIds */
+  wallIds: Set<string>
+  /** Raw arc handles (e.g. 'A12') — kept separate to avoid bbox inflation via center±radius */
+  arcHandles: Set<string>
+  insertLayer: string 
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
    WallSeg  (unchanged public shape — editing engine depends on this)
    ────────────────────────────────────────────────────────────────────────── */
 
@@ -740,4 +758,107 @@ export function renderItemsFromDxfJson(doc: DxfJsonDocument): RenderItem[] {
   }
 
   return items
+}
+
+/**
+ * Build CanvasGroup[] from a DxfJsonDocument and the current wall segments.
+ *
+ * Call once on load (or whenever walls change) and cache the result with useMemo.
+ * Mapping rules (compact v7.2):
+ *   group.primitives.LN[i]  → handle `L{i}` → wall id `ln-L{i}`
+ *   group.primitives.LW[i]  → handle `P{i}` → wall ids `pl-P{i}-*`
+ *   group.primitives.AR[i]  → handle `A{i}` → wall ids `ar-A{i}-*`
+ */
+export function canvasGroupsFromDxfJson(
+  doc: DxfJsonDocument,
+  walls: WallSeg[],
+): CanvasGroup[] {
+  if (!doc.groups?.length) return []
+ 
+  // ── Build fast lookup maps ───────────────────────────────────────────────
+  const wallById = new Map<string, WallSeg>()
+  for (const w of walls) wallById.set(w.id, w)
+ 
+  // Tessellated arc walls indexed by their fromArc handle
+  const arcWalls = new Map<string, WallSeg[]>()
+  for (const w of walls) {
+    if (!w.fromArc) continue
+    if (!arcWalls.has(w.fromArc)) arcWalls.set(w.fromArc, [])
+    arcWalls.get(w.fromArc)!.push(w)
+  }
+ 
+  // Polyline wall segments indexed by polyline handle (e.g. "P0", "P3")
+  const plWalls = new Map<string, WallSeg[]>()
+  for (const w of walls) {
+    if (!w.id.startsWith('pl-')) continue
+    const rest = w.id.slice(3)
+    const dash = rest.lastIndexOf('-')
+    if (dash <= 0) continue
+    const ph = rest.slice(0, dash)   // e.g. "P3"
+    if (!plWalls.has(ph)) plWalls.set(ph, [])
+    plWalls.get(ph)!.push(w)
+  }
+ 
+  // ── Build one CanvasGroup per DxfGroup ───────────────────────────────────
+  return doc.groups.map(g => {
+    const wallIds = new Set<string>()
+ 
+    // LN[i]: 0-based index into the compact LN flat array
+    // _parseLNFlat generates handle = "L{i}" → wall id = "ln-L{i}"
+    for (const idx of g.primitives.LN) {
+      wallIds.add(`ln-L${idx}`)
+    }
+ 
+    // LW[i]: 0-based polyline index
+    // _parseLWEntryV5 loop index i → handle = "P{i}"
+    // Wall ids are "pl-P{i}-0", "pl-P{i}-1", ...
+    for (const idx of g.primitives.LW) {
+      const segs = plWalls.get(`P${idx}`)
+      if (segs) for (const s of segs) wallIds.add(s.id)
+    }
+ 
+    // AR[i]: 0-based arc index → handle = "A{i}"
+    // Door arcs: handle goes to arcHandles (no tessellated wall segs)
+    // Non-door arcs: tessellated segs go to wallIds, handle still to arcHandles
+    const arcHandles = new Set<string>()
+    for (const idx of g.primitives.AR) {
+      const arcHandle = `A${idx}`
+      arcHandles.add(arcHandle)                    // kept separate — never in selectedIds
+      const segs = arcWalls.get(arcHandle)
+      if (segs) for (const s of segs) wallIds.add(s.id)
+    }
+
+    // ── Recompute bounds from actual wall positions ───────────────────────
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    let hasPts = false
+    for (const id of wallIds) {
+      const w = wallById.get(id)
+      if (!w) continue
+      for (const p of [w.start, w.end]) {
+        if (!isFinite(p.x) || !isFinite(p.y)) continue
+        if (p.x < minX) minX = p.x
+        if (p.x > maxX) maxX = p.x
+        if (p.y < minY) minY = p.y
+        if (p.y > maxY) maxY = p.y
+        hasPts = true
+      }
+    }
+
+    // Fallback to stored bounds only when no walls matched at all
+    if (!hasPts) {
+      minX = g.bounds[0]; minY = g.bounds[1]
+      maxX = g.bounds[2]; maxY = g.bounds[3]
+    }
+
+    return {
+      id: g.id,
+      name: g.name,
+      category: g.category,
+      insert: { x: g.insert[0], y: g.insert[1] },
+      bounds: { minX, minY, maxX, maxY },
+      wallIds,
+      arcHandles,
+       insertLayer: g.insert_layer ?? "0",  
+    }
+  })
 }
