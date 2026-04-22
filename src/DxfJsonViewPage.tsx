@@ -1,58 +1,24 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+/* eslint-disable react-hooks/exhaustive-deps */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-/**
- * DXF JSON Interactive Floor-Plan Editor
- *
- * Libraries in use
- * ─────────────────
- * • Konva / react-konva  – hardware-accelerated 2D canvas rendering, hit-testing,
- *                          draggable handles, zoom/pan
- * • polygon-clipping     – robust polygon union / intersection (Greiner-Hormann).
- *                          Used to validate and merge room polygons after every edit
- *                          so the room fills are always geometrically correct.
- * • DCEL face extraction – pure-JS planar graph algorithm (no extra dependency) that
- *                          finds all minimal bounded faces from a set of wall segments
- *                          and feeds them into polygon-clipping for final validation.
- *
- * Key behaviours
- * ──────────────
- * • Select tool   – click a wall to select; background click deselects; canvas does
- *                   NOT pan (use Hand tool / Space to pan).
- * • Hand tool     – drag canvas to pan; scroll to zoom.
- * • Drag endpoint – moves one endpoint with snap-to-near-endpoint.
- * • Drag midpoint – translates the whole wall segment only (shared joints are not
- *                   pulled; other walls stay fixed).
- * • Room detection – recalculated live after every edit via useMemo.
- * • Select room (fill) vs wall (edge): walls layer is above fills — clicks on edges
- *   pick the wall; clicks inside a room pick that room. Drag the room centroid to
- *   translate all boundary walls together (doc lines / polylines stay in sync).
- * • Undo (Ctrl-Z) – 20-step stack; Delete/Backspace removes selected wall.
- * • Resize handles – scale selected items while maintaining relative positions.
- */
-
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent as ReactDragEvent } from 'react'
 import { Stage, Layer, Line, Text, Group, Rect, Circle } from 'react-konva'
-// NEW: Arc shape needed for DIMENSION arc geometry rendering
 import { Arc as KonvaArc } from 'react-konva'
 import type Konva from 'konva'
 import { Link } from 'react-router-dom'
-import polygonClipping from 'polygon-clipping'
 import {
   DXF_JSON_DATA,
   type DxfJsonDocument,
   type DxfArc,
   type DxfInsert,
   type DxfLine,
-  type DxfPolyline,
-  type DxfPolylineVertex,
-  type DxfText,
 } from '@/constants/dxfJsonData'
 import type { CanvasGroup } from '@/utils/wallsFromDxfJson'
 import { FurnitureLibraryPanel, FURNITURE_DXF_DRAG_MIME } from '@/components/FurnitureLibraryPanel'
 import {
   buildFurnitureLinesFromLibraryId,
   getFurnitureDxfTemplate,
-  FURNITURE_DXF_TEMPLATES,
 } from '@/data/furnitureLibraryDxf'
 import { clientXYToWorldXY } from '@/utils/konvaDropToWorld'
 import type { WallSeg } from '@/utils/wallsFromDxfJson'
@@ -60,106 +26,67 @@ import {
   arcHandleFromArcSegWallId,
   isDoorStyleArc,
   wallSegsFromArc,
-  sortPolylineVertices,
   wallSegsFromPolyline,
   wallsFromDxfJson,
   renderItemsFromDxfJson,
   canvasGroupsFromDxfJson,
 } from '@/utils/wallsFromDxfJson'
 import { downloadDxf } from './utils/exportToDxf'
+import {
+  toC,
+  toW,
+  buildTransform as buildT,
+  rotatePoint,
+  closestPointOnSegment,
+  polyArea,
+  arcPoints,
+  lineIntersectsRect,
+} from './utils/dxfGeometry'
+import { detectRooms, detectRoomsWithWalls, wallIdsOnRoomBoundary, translateWallsByIds } from './utils/dxfRoomDetection'
+import {
+  cloneDoc,
+  appendUserLine,
+  appendUserArc,
+  appendUserPolyline,
+  appendUserText,
+  removeLineFromDocByWallId,
+  removeArcFromDocByHandle,
+  removePolylineFromDocByHandle,
+  removeTextFromDoc,
+  polylineHandleFromWallId,
+  roomLabelHandle,
+} from './utils/dxfDocumentUtils'
+// Phase 2: Context Providers
+import { EditorStateProvider } from '@/contexts/EditorStateContext'
+import { ToolStateProvider } from '@/contexts/ToolStateContext'
+import { SelectionStateProvider } from '@/contexts/SelectionStateContext'
+// Phase 3: Custom Hooks
+// Constants
+import {
+  ACI_PALETTE,
+  FURNITURE_CATEGORY_COLORS,
+  FURNITURE_LABEL_TO_CATEGORY,
+  ROOM_TEMPLATE_MIME,
+  ROOM_TEMPLATES,
+  STAGE_MIN_W,
+  STAGE_MIN_H,
+  SNAP_TH,
+  SNAP_LINE_TH,
+  HP_SCR,
+  ROOM_COLORS,
+  ROOM_STROKES,
+} from '@/constants/editorConstants'
+// Types
+import type {
+  Pt,
+  EditorSnapshot,
+  ActiveDrag,
+  ActivePolylineDrag,
+  RotationDrag,
+  ResizeDrag,
+  RoomDrag,
+} from '@/types/editorTypes'
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   NEW: AutoCAD ACI colour palette (256 entries → hex)
-   Only the most common indices are listed; fill the rest from the full ACI
-   table if you need exact fidelity for every index.
-   Reference: https://gohtx.com/acadcolors.php
-   ───────────────────────────────────────────────────────────────────────── */
-const ACI_PALETTE: Record<number, string> = {
-  // Standard named indices
-  1: '#FF0000', 2: '#FFFF00', 3: '#00FF00', 4: '#00FFFF',
-  5: '#0000FF', 6: '#FF00FF', 7: '#FFFFFF', 8: '#414141', 9: '#808080',
-  // Red group
-  10: '#FF0000', 11: '#FF7F7F', 12: '#A50000', 13: '#A55252', 14: '#7F0000',
-  15: '#7F3F3F', 16: '#4F0000', 17: '#4F3232', 18: '#3F0000', 19: '#3F2929',
-  // Orange group
-  20: '#FF7F00', 21: '#FFBF7F', 22: '#A54F00', 23: '#A57F52', 24: '#7F3F00',
-  25: '#7F5F3F', 26: '#4F2700', 27: '#4F3F32', 28: '#3F1F00', 29: '#3F3229',
-  // Yellow-orange group
-  30: '#FFBF00', 31: '#FFDF7F', 32: '#A57B00', 33: '#A59152', 34: '#7F5F00',
-  35: '#7F6F3F', 36: '#4F3B00', 37: '#4F4532', 38: '#3F2F00', 39: '#3F3829',
-  // Yellow group
-  40: '#FFFF00', 41: '#FFFF7F', 42: '#A5A500', 43: '#A5A552', 44: '#7F7F00',
-  45: '#7F7F3F', 46: '#4F4F00', 47: '#4F4F32', 48: '#3F3F00', 49: '#3F3F29',
-  // Yellow-green group
-  50: '#BFFF00', 51: '#DFFF7F', 52: '#7BA500', 53: '#91A552', 54: '#5F7F00',
-  55: '#6F7F3F', 56: '#3B4F00', 57: '#454F32', 58: '#2F3F00', 59: '#383F29',
-  // Chartreuse group
-  60: '#7FFF00', 61: '#BFFF7F', 62: '#4FA500', 63: '#7CA552', 64: '#3F7F00',
-  65: '#5F7F3F', 66: '#274F00', 67: '#3F4F32', 68: '#1F3F00', 69: '#323F29',
-  // Spring green group
-  70: '#3FFF00', 71: '#9FFF7F', 72: '#27A500', 73: '#67A552', 74: '#1F7F00',
-  75: '#4F7F3F', 76: '#134F00', 77: '#374F32', 78: '#0F3F00', 79: '#2C3F29',
-  // Green group
-  80: '#00FF00', 81: '#7FFF7F', 82: '#00A500', 83: '#52A552', 84: '#007F00',
-  85: '#3F7F3F', 86: '#004F00', 87: '#324F32', 88: '#003F00', 89: '#293F29',
-  // Aquamarine group
-  90: '#00FF3F', 91: '#7FFF9F', 92: '#00A527', 93: '#52A567', 94: '#007F1F',
-  95: '#3F7F4F', 96: '#004F13', 97: '#324F37', 98: '#003F0F', 99: '#293F2C',
-  // Emerald group
-  100: '#00FF7F', 101: '#7FFFBF', 102: '#00A54F', 103: '#52A57C', 104: '#007F3F',
-  105: '#3F7F5F', 106: '#004F27', 107: '#324F3F', 108: '#003F1F', 109: '#293F32',
-  // Turquoise group
-  110: '#00FFBF', 111: '#7FFFDF', 112: '#00A57B', 113: '#52A591', 114: '#007F5F',
-  115: '#3F7F6F', 116: '#004F3B', 117: '#324F45', 118: '#003F2F', 119: '#293F38',
-  // Cyan group
-  120: '#00FFFF', 121: '#7FFFFF', 122: '#00A5A5', 123: '#52A5A5', 124: '#007F7F',
-  125: '#3F7F7F', 126: '#004F4F', 127: '#324F4F', 128: '#003F3F', 129: '#293F3F',
-  // Sky blue group
-  130: '#00BFFF', 131: '#7FDFFF', 132: '#007BA5', 133: '#5291A5', 134: '#005F7F',
-  135: '#3F6F7F', 136: '#003B4F', 137: '#32454F', 138: '#002F3F', 139: '#29383F',
-  // Azure group
-  140: '#007FFF', 141: '#7FBFFF', 142: '#004FA5', 143: '#527CA5', 144: '#003F7F',
-  145: '#3F5F7F', 146: '#00274F', 147: '#323F4F', 148: '#001F3F', 149: '#29323F',
-  // Cerulean group
-  150: '#003FFF', 151: '#7F9FFF', 152: '#0027A5', 153: '#5267A5', 154: '#001F7F',
-  155: '#3F4F7F', 156: '#00134F', 157: '#32374F', 158: '#000F3F', 159: '#292C3F',
-  // Blue group
-  160: '#0000FF', 161: '#7F7FFF', 162: '#0000A5', 163: '#5252A5', 164: '#00007F',
-  165: '#3F3F7F', 166: '#00004F', 167: '#32324F', 168: '#00003F', 169: '#29293F',
-  // Violet group
-  170: '#3F00FF', 171: '#9F7FFF', 172: '#2700A5', 173: '#6752A5', 174: '#1F007F',
-  175: '#4F3F7F', 176: '#13004F', 177: '#37324F', 178: '#0F003F', 179: '#2C293F',
-  // Purple group
-  180: '#7F00FF', 181: '#BF7FFF', 182: '#4F00A5', 183: '#7C52A5', 184: '#3F007F',
-  185: '#5F3F7F', 186: '#27004F', 187: '#3F324F', 188: '#1F003F', 189: '#32293F',
-  // Fuchsia group
-  190: '#BF00FF', 191: '#DF7FFF', 192: '#7B00A5', 193: '#9152A5', 194: '#5F007F',
-  195: '#6F3F7F', 196: '#3B004F', 197: '#45324F', 198: '#2F003F', 199: '#38293F',
-  // Magenta group
-  200: '#FF00FF', 201: '#FF7FFF', 202: '#A500A5', 203: '#A552A5', 204: '#7F007F',
-  205: '#7F3F7F', 206: '#4F004F', 207: '#4F324F', 208: '#3F003F', 209: '#3F293F',
-  // Pink-magenta group
-  210: '#FF00BF', 211: '#FF7FDF', 212: '#A5007B', 213: '#A55291', 214: '#7F005F',
-  215: '#7F3F6F', 216: '#4F003B', 217: '#4F3245', 218: '#3F002F', 219: '#3F2938',
-  // Hot pink / rose group
-  220: '#FF007F', 221: '#FF7FBF', 222: '#A5004F', 223: '#A5527C', 224: '#7F003F',
-  225: '#7F3F5F', 226: '#4F0027', 227: '#4F323F', 228: '#3F001F', 229: '#3F2932',
-  // Deep pink group
-  230: '#FF003F', 231: '#FF7F9F', 232: '#A50027', 233: '#A55267', 234: '#7F001F',
-  235: '#7F3F4F', 236: '#4F0013', 237: '#4F3237', 238: '#3F000F', 239: '#3F292C',
-  // Red (repeat group, wraps back)
-  240: '#FF0000', 241: '#FF7F7F', 242: '#A50000', 243: '#A55252', 244: '#7F0000',
-  245: '#7F3F3F', 246: '#4F0000', 247: '#4F3232', 248: '#3F0000', 249: '#3F2929',
-  // Grays
-  250: '#505050', 251: '#696969', 252: '#828282', 253: '#BEBEBE', 254: '#D2D2D2', 255: '#E1E1E1',
-  // Special
-  0: '#FFFFFF', 256: '#FFFFFF',
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   NEW: Resolve display colour for a render entity.
-   Priority: true_color > ACI index > layer colour > fallback strokeHex
-   ───────────────────────────────────────────────────────────────────────── */
 function resolveEntityColor(
   color:         number | string | null | undefined,
   layer:         string,
@@ -865,61 +792,13 @@ function applyRoomDeltaToDoc(doc: DxfJsonDocument, wallIds: string[], dx: number
 }
 
 /* ─── Transform helpers ──────────────────────────────────────── */
-function buildT(emin: number[], emax: number[], canvasW: number, canvasH: number) {
-  const wW = emax[0] - emin[0]
-  const wH = emax[1] - emin[1]
-  const aW = Math.max(40, canvasW - PAD * 2)
-  const aH = Math.max(40, canvasH - PAD * 2)
-  const sc = Math.min(aW / wW, aH / wH)
-  const oX = PAD + (aW - wW * sc) / 2
-  const oY = PAD + (aH - wH * sc) / 2
-  return { sc, oX, oY, emin, wH }
-}
 type T = ReturnType<typeof buildT>
-
-const toC = (wx: number, wy: number, t: T): [number, number] => [
-  (wx - t.emin[0]) * t.sc + t.oX,
-  t.oY + (t.wH - (wy - t.emin[1])) * t.sc,
-]
-
-const toW = (cx: number, cy: number, t: T): [number, number] => [
-  (cx - t.oX) / t.sc + t.emin[0],
-  t.emin[1] + t.wH - (cy - t.oY) / t.sc,
-]
 
 function getStageCanvasPointer(stage: Konva.Stage): { x: number; y: number } | null {
   const p = stage.getPointerPosition()
   if (!p) return null
   const inv = stage.getAbsoluteTransform().copy().invert()
   return inv.point(p)
-}
-
-function arcPoints(arc: DxfArc, t: T, steps = 48): number[] {
-  const startRad = arc.start_angle * Math.PI / 180
-  const endDeg = arc.end_angle > arc.start_angle ? arc.end_angle : arc.end_angle + 360
-  const endRad = endDeg * Math.PI / 180
-  const pts: number[] = []
-  for (let i = 0; i <= steps; i++) {
-    const angle = startRad + (endRad - startRad) * i / steps
-    const [cx, cy] = toC(arc.center.x + arc.radius * Math.cos(angle), arc.center.y + arc.radius * Math.sin(angle), t)
-    pts.push(cx, cy)
-  }
-  return pts
-}
-
-function polyArea(pts: Pt[]): number {
-  let a = 0
-  for (let i = 0; i < pts.length; i++) {
-    const j = (i + 1) % pts.length
-    a += pts[i].x * pts[j].y - pts[j].x * pts[i].y
-  }
-  return a / 2
-}
-
-function rotatePoint(px: number, py: number, cx: number, cy: number, angle: number): [number, number] {
-  const cos = Math.cos(angle), sin = Math.sin(angle)
-  const dx = px - cx, dy = py - cy
-  return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos]
 }
 
 function applyRotation(ws: WallSeg[], ids: Set<string>, cx: number, cy: number, angle: number): WallSeg[] {
@@ -930,134 +809,6 @@ function applyRotation(ws: WallSeg[], ids: Set<string>, cx: number, cy: number, 
     const [ex, ey] = rotatePoint(w.end.x, w.end.y, cx, cy, angle)
     return { ...w, start: { x: sx, y: sy }, end: { x: ex, y: ey } }
   })
-}
-
-function scalePoint(px: number, py: number, cx: number, cy: number, sx: number, sy: number): [number, number] {
-  return [cx + (px - cx) * sx, cy + (py - cy) * sy]
-}
-
-function closestPointOnSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): { pt: { x: number; y: number }; t: number; dist: number } {
-  const dx = bx - ax, dy = by - ay
-  const lenSq = dx * dx + dy * dy
-  if (lenSq < 1e-12) return { pt: { x: ax, y: ay }, t: 0, dist: Math.hypot(px - ax, py - ay) }
-  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq))
-  const cx = ax + t * dx, cy = ay + t * dy
-  return { pt: { x: cx, y: cy }, t, dist: Math.hypot(px - cx, py - cy) }
-}
-
-function getGroupWallIds(wallId: string, walls: WallSeg[]): string[] {
-  const target = walls.find(w => w.id === wallId)
-  if (!target?.groupId) return [wallId]
-  const gid = target.groupId
-  return walls.filter(w => w.groupId === gid).map(w => w.id)
-}
-
-function lineIntersectsRect(a: Pt, b: Pt, x1: number, y1: number, x2: number, y2: number): boolean {
-  if (a.x >= x1 && a.x <= x2 && a.y >= y1 && a.y <= y2) return true
-  if (b.x >= x1 && b.x <= x2 && b.y >= y1 && b.y <= y2) return true
-  const intersect = (p1: Pt, p2: Pt, p3: Pt, p4: Pt) => {
-    const den = (p4.y - p3.y) * (p2.x - p1.x) - (p4.x - p3.x) * (p2.y - p1.y)
-    if (den === 0) return false
-    const ua = ((p4.x - p3.x) * (p1.y - p3.y) - (p4.y - p3.y) * (p1.x - p3.x)) / den
-    const ub = ((p2.x - p1.x) * (p1.y - p3.y) - (p2.y - p1.y) * (p1.x - p3.x)) / den
-    return ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1
-  }
-  const rect = [
-    { a: { x: x1, y: y1 }, b: { x: x2, y: y1 } },
-    { a: { x: x2, y: y1 }, b: { x: x2, y: y2 } },
-    { a: { x: x2, y: y2 }, b: { x: x1, y: y2 } },
-    { a: { x: x1, y: y2 }, b: { x: x1, y: y1 } },
-  ]
-  return rect.some(edge => intersect(a, b, edge.a, edge.b))
-}
-
-/* ─── DCEL-based minimal face extraction ────────── */
-function detectRooms(walls: WallSeg[]): Pt[][] {
-  // Exclude arc chord segments (circles/arcs) — arcs form closed curves but are not rooms
-  const segs = walls.filter(w => !w.isDetail && !w.isOuter && !w.id.startsWith('pl-') && !w.fromArc)
-  if (segs.length < 3) return []
-
-  const nodes: Pt[] = []
-  const getN = (x: number, y: number): number => {
-    for (let i = 0; i < nodes.length; i++)
-      if (Math.abs(nodes[i].x - x) < SNAP_TH && Math.abs(nodes[i].y - y) < SNAP_TH) return i
-    return nodes.push({ x, y }) - 1
-  }
-
-  const eKeys = new Set<string>()
-  const eList: [number, number][] = []
-  for (const w of segs) {
-    const u = getN(w.start.x, w.start.y)
-    const v = getN(w.end.x, w.end.y)
-    if (u === v) continue
-    const k = `${Math.min(u, v)},${Math.max(u, v)}`
-    if (!eKeys.has(k)) { eKeys.add(k); eList.push([u, v]) }
-  }
-  if (eList.length < 3) return []
-
-  const adj = new Map<number, number[]>()
-  for (const [u, v] of eList)
-    for (const [a, b] of [[u, v], [v, u]] as const) {
-      if (!adj.has(a)) adj.set(a, [])
-      adj.get(a)!.push(b)
-    }
-  for (const [n, nb] of adj) {
-    const pn = nodes[n]
-    nb.sort((a, b) =>
-      Math.atan2(nodes[a].y - pn.y, nodes[a].x - pn.x) -
-      Math.atan2(nodes[b].y - pn.y, nodes[b].x - pn.x))
-  }
-
-  const nextHE = new Map<string, string>()
-  for (const [u, v] of eList) {
-    for (const [s, e] of [[u, v], [v, u]] as const) {
-      const backA = Math.atan2(nodes[s].y - nodes[e].y, nodes[s].x - nodes[e].x)
-      let bestW = -1, bestCW = Infinity
-      for (const w of adj.get(e) ?? []) {
-        const outA = Math.atan2(nodes[w].y - nodes[e].y, nodes[w].x - nodes[e].x)
-        let cw = backA - outA
-        while (cw <= 0) cw += 2 * Math.PI
-        if (cw < bestCW) { bestCW = cw; bestW = w }
-      }
-      if (bestW !== -1) nextHE.set(`${s},${e}`, `${e},${bestW}`)
-    }
-  }
-
-  const traced = new Set<string>()
-  const rawFaces: Pt[][] = []
-  for (const [u, v] of eList) {
-    for (const [s, e] of [[u, v], [v, u]] as const) {
-      const sk = `${s},${e}`
-      if (traced.has(sk) || !nextHE.has(sk)) continue
-      const ids: number[] = []
-      let cur = sk, guard = 0
-      do {
-        traced.add(cur)
-        ids.push(Number(cur.split(',')[0]))
-        cur = nextHE.get(cur) ?? ''
-        guard++
-      } while (cur !== sk && cur !== '' && guard < 60)
-      if (cur === sk && ids.length >= 3) rawFaces.push(ids.map(i => nodes[i]))
-    }
-  }
-
-  const interiorFaces = rawFaces.filter(f => polyArea(f) > 0.05)
-  if (!interiorFaces.length) return []
-
-  const validFaces: Pt[][] = []
-  for (const face of interiorFaces) {
-    try {
-      const ring = face.map(p => [p.x, p.y] as [number, number])
-      ring.push(ring[0])
-      const result = polygonClipping.union([[ring]])
-      for (const poly of result)
-        for (const contour of poly) {
-          const pts = contour.slice(0, -1).map(([x, y]) => ({ x, y }))
-          if (pts.length >= 3 && Math.abs(polyArea(pts)) > 0.05) validFaces.push(pts)
-        }
-    } catch { validFaces.push(face) }
-  }
-  return validFaces
 }
 
 // Add this function to normalize coordinates
@@ -1115,93 +866,6 @@ function applyResizeToWalls(
   })
 }
 
-function detectRoomsWithWalls(walls: WallSeg[]): Array<{ polygon: Pt[]; wallIds: string[] }> {
-  const segs = walls.filter(w => !w.isDetail && !w.isOuter && !w.id.startsWith('pl-') && !w.fromArc)
-  if (segs.length < 3) return []
-
-  const nodes: Pt[] = []
-  const getN = (x: number, y: number): number => {
-    for (let i = 0; i < nodes.length; i++)
-      if (Math.abs(nodes[i].x - x) < SNAP_TH && Math.abs(nodes[i].y - y) < SNAP_TH) return i
-    return nodes.push({ x, y }) - 1
-  }
-
-  const eKeys = new Set<string>()
-  const eList: [number, number][] = []
-  const eWallIds: string[] = []
-
-  for (const w of segs) {
-    const u = getN(w.start.x, w.start.y)
-    const v = getN(w.end.x, w.end.y)
-    if (u === v) continue
-    const k = `${Math.min(u, v)},${Math.max(u, v)}`
-    if (!eKeys.has(k)) { eKeys.add(k); eList.push([u, v]); eWallIds.push(w.id) }
-  }
-  if (eList.length < 3) return []
-
-  const adj = new Map<number, number[]>()
-  for (const [u, v] of eList)
-    for (const [a, b] of [[u, v], [v, u]] as const) {
-      if (!adj.has(a)) adj.set(a, [])
-      adj.get(a)!.push(b)
-    }
-  for (const [n, nb] of adj) {
-    const pn = nodes[n]
-    nb.sort((a, b) =>
-      Math.atan2(nodes[a].y - pn.y, nodes[a].x - pn.x) -
-      Math.atan2(nodes[b].y - pn.y, nodes[b].x - pn.x))
-  }
-
-  const heWallId = new Map<string, string>()
-  for (let idx = 0; idx < eList.length; idx++) {
-    const [u, v] = eList[idx]
-    const wid = eWallIds[idx]
-    heWallId.set(`${u},${v}`, wid)
-    heWallId.set(`${v},${u}`, wid)
-  }
-
-  const nextHE = new Map<string, string>()
-  for (const [u, v] of eList) {
-    for (const [s, e] of [[u, v], [v, u]] as const) {
-      const backA = Math.atan2(nodes[s].y - nodes[e].y, nodes[s].x - nodes[e].x)
-      let bestW = -1, bestCW = Infinity
-      for (const w of adj.get(e) ?? []) {
-        const outA = Math.atan2(nodes[w].y - nodes[e].y, nodes[w].x - nodes[e].x)
-        let cw = backA - outA
-        while (cw <= 0) cw += 2 * Math.PI
-        if (cw < bestCW) { bestCW = cw; bestW = w }
-      }
-      if (bestW !== -1) nextHE.set(`${s},${e}`, `${e},${bestW}`)
-    }
-  }
-
-  const traced = new Set<string>()
-  const result: Array<{ polygon: Pt[]; wallIds: string[] }> = []
-  for (const [u, v] of eList) {
-    for (const [s, e] of [[u, v], [v, u]] as const) {
-      const sk = `${s},${e}`
-      if (traced.has(sk) || !nextHE.has(sk)) continue
-      const ids: number[] = []
-      const faceWallIds: string[] = []
-      let cur = sk, guard = 0
-      do {
-        traced.add(cur)
-        ids.push(Number(cur.split(',')[0]))
-        const wid = heWallId.get(cur)
-        if (wid && !faceWallIds.includes(wid)) faceWallIds.push(wid)
-        cur = nextHE.get(cur) ?? ''
-        guard++
-      } while (cur !== sk && cur !== '' && guard < 60)
-      if (cur === sk && ids.length >= 3) {
-        const polygon = ids.map(i => nodes[i])
-        if (polyArea(polygon) > 0.05) result.push({ polygon, wallIds: faceWallIds })
-      }
-    }
-  }
-  return result
-}
-
-/* ─── Component ──────────────────────────────────────────────── */
 /** Group id for draggable furniture — lines with the same key move as one object. */
 function furnitureGroupKeyFromHandle(handle: string): string {
   if (!handle.startsWith('furn-')) return handle
@@ -1212,8 +876,15 @@ function furnitureGroupKeyFromHandle(handle: string): string {
   return `furn-${handle.slice('furn-'.length).split('-')[0]}`
 }
 
-/* ─── Component ──────────────────────────────────── */
-export function DxfJsonViewPage() {
+/** Helper to get all wall IDs in a group */
+function getGroupWallIds(wallId: string, walls: WallSeg[]): string[] {
+  const wall = walls.find(w => w.id === wallId)
+  if (!wall?.groupId) return [wallId]
+  return walls.filter(w => w.groupId === wall.groupId).map(w => w.id)
+}
+
+/* ─── Inner Component ──────────────────────────────────── */
+function DxfJsonViewPageInner() {
   const stageRef = useRef<Konva.Stage>(null)
   const canvasHostRef = useRef<HTMLDivElement>(null)
   const [stageSize, setStageSize] = useState({ w: 900, h: 620 })
@@ -1371,32 +1042,10 @@ const layerColorMap = useMemo(() => {
 const didDragRef = useRef(false)
   const draggingEpInfo = useRef<{ wallId: string; ep: 'start' | 'end' } | null>(null)
 
-  interface RotationDrag {
-    centerWX: number
-    centerWY: number
-    startMouseAngle: number
-    wallIds: string[]
-    textHandles: string[]
-    arcHandles: string[]
-    winKey?: string    // window group key if rotating a window
-    furnKey?: string   // furniture group key if rotating furniture
-  }
   const rotationDragRef = useRef<RotationDrag | null>(null)
   const [rotationDrag, setRotationDrag] = useState<RotationDrag | null>(null)
   const rotationAngleDeltaRef = useRef(0)
   const [rotationAngleDelta, setRotationAngleDelta] = useState(0)
-
-  interface ResizeDrag {
-    handle: 'nw'|'n'|'ne'|'e'|'se'|'s'|'sw'|'w'
-    initBBox: { minWX: number; minWY: number; maxWX: number; maxWY: number }
-    initMouseWX: number
-    initMouseWY: number
-    wallIds: string[]
-    textHandles: string[]
-    arcHandles: string[]
-    winKey?: string    // window group key if resizing a window
-    furnKey?: string   // furniture group key if resizing furniture
-  }
   const resizeDragRef = useRef<ResizeDrag | null>(null)
   const [resizeDrag, setResizeDrag] = useState<ResizeDrag | null>(null)
   const resizePreviewRef = useRef<{ minWX: number; minWY: number; maxWX: number; maxWY: number } | null>(null)
@@ -1407,11 +1056,6 @@ const didDragRef = useRef(false)
   const [polyDragDelta, setPolyDragDelta] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
   const polyDragDeltaRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
 
-  interface RoomDrag {
-    wallIds: Set<string>
-    initCX: number
-    initCY: number
-  }
   const roomDragRef = useRef<RoomDrag | null>(null)
   const [roomDrag, setRoomDrag] = useState<RoomDrag | null>(null)
   const [roomDragDelta, setRoomDragDelta] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
@@ -1920,6 +1564,7 @@ const didDragRef = useRef(false)
   }, [activeTool, spaceHeld, t])
 
   const onStageMouseMove = useCallback((_e: Konva.KonvaEventObject<MouseEvent>) => {
+    _e.evt.preventDefault()
     const pos = stageRef.current?.getRelativePointerPosition()
     if (!pos) return
     const [wx, wy] = toW(pos.x, pos.y, t)
@@ -2673,14 +2318,14 @@ setSelectedIds(prev => {
       const el = e.target as HTMLElement
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return
       if (e.key === 'Delete' || e.key === 'Backspace') {
+        const arc = planDoc.arcs.find(a => a.handle === selectedArcHandle)
         if (selectedTextHandle) { snapshot(); setPlanDoc(p => removeTextFromDoc(p, selectedTextHandle)); setSelectedTextHandle(null) }
         else if (selectedArcHandle) {
-          const arc = planDoc.arcs.find(a => a.handle === selectedArcHandle)
           if (arc && !isDoorStyleArc(planDoc, arc)) { snapshot(); const h = selectedArcHandle; setPlanDoc(p => removeArcFromDocByHandle(p, h)); setWalls(w => w.filter(seg => seg.fromArc !== h)); setSelectedArcHandle(null) }
         } else if (selectedId) {
           if (arc && !isDoorStyleArc(planDoc, arc)) {
             snapshot()
-            const h = selectedArcHandle
+            const h = selectedArcHandle ?? ""
             setPlanDoc(p => removeArcFromDocByHandle(p, h))
             setWalls(w => w.filter(seg => seg.fromArc !== h))
             setSelectedArcHandle(null)
@@ -4435,5 +4080,20 @@ setSelectedIds(prev => {
         </aside>
       </div>
     </div>
+  )
+}
+
+/* ─── Wrapper Component with Context Providers ──────────────────────────────────── */
+export function DxfJsonViewPage() {
+  const initialWalls = wallsFromDxfJson(DXF_JSON_DATA)
+
+  return (
+    <EditorStateProvider initialDoc={DXF_JSON_DATA} initialWalls={initialWalls}>
+      <ToolStateProvider>
+        <SelectionStateProvider>
+          <DxfJsonViewPageInner />
+        </SelectionStateProvider>
+      </ToolStateProvider>
+    </EditorStateProvider>
   )
 }
