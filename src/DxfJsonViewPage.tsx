@@ -13,6 +13,8 @@ import {
   type DxfArc,
   type DxfInsert,
   type DxfLine,
+  type DxfPolyline,
+  type DxfPolylineVertex,
 } from '@/constants/dxfJsonData'
 import type { CanvasGroup } from '@/utils/wallsFromDxfJson'
 import { FurnitureLibraryPanel, FURNITURE_DXF_DRAG_MIME } from '@/components/FurnitureLibraryPanel'
@@ -30,6 +32,7 @@ import {
   wallsFromDxfJson,
   renderItemsFromDxfJson,
   canvasGroupsFromDxfJson,
+  sortPolylineVertices,
 } from '@/utils/wallsFromDxfJson'
 import { downloadDxf } from './utils/exportToDxf'
 import {
@@ -136,175 +139,7 @@ function resolveExplicitColor(
   return fallback
 }
 
-/* ─── Types ──────────────────────────────────────────────── */
-interface Pt { x: number; y: number }
 
-interface EditorSnapshot {
-  walls: WallSeg[]
-  planDoc: DxfJsonDocument
-}
-
-function cloneDoc(doc: DxfJsonDocument): DxfJsonDocument {
-  return JSON.parse(JSON.stringify(doc)) as DxfJsonDocument
-}
-
-function appendUserLine(doc: DxfJsonDocument, start: Pt, end: Pt): { next: DxfJsonDocument; handle: string } {
-  const handle = `user-${Date.now()}`
-  const line: DxfLine = {
-    entity_type: 'LINE',
-    handle,
-    layer: '0',
-    start: { x: start.x, y: start.y, z: 0 },
-    end: { x: end.x, y: end.y, z: 0 },
-  }
-  const next = cloneDoc(doc)
-  next.lines = [...next.lines, line]
-  next.stats = {
-    ...next.stats,
-    line_count: next.stats.line_count + 1,
-    entity_counts: {
-      ...next.stats.entity_counts,
-      LINE: (next.stats.entity_counts.LINE ?? 0) + 1,
-    },
-  }
-  return { next, handle }
-}
-
-function appendUserArc(
-  doc: DxfJsonDocument,
-  center: Pt,
-  radius: number,
-  startAngle: number,
-  endAngle: number,
-): { next: DxfJsonDocument; arc: DxfArc } {
-  const handle = `user-ar-${Date.now()}`
-  const arc: DxfArc = {
-    entity_type: 'ARC',
-    handle,
-    layer: '0',
-    center: { x: center.x, y: center.y, z: 0 },
-    radius,
-    start_angle: startAngle,
-    end_angle: endAngle,
-  }
-  const next = cloneDoc(doc)
-  next.arcs = [...next.arcs, arc]
-  next.stats = {
-    ...next.stats,
-    arc_count: (next.stats.arc_count ?? 0) + 1,
-    entity_counts: { ...next.stats.entity_counts, ARC: (next.stats.entity_counts.ARC ?? 0) + 1 },
-  }
-  return { next, arc }
-}
-
-function removeArcFromDocByHandle(doc: DxfJsonDocument, handle: string): DxfJsonDocument {
-  const arcs = doc.arcs.filter(a => a.handle !== handle)
-  if (arcs.length === doc.arcs.length) return doc
-  const next = cloneDoc(doc)
-  next.arcs = arcs
-  next.stats = {
-    ...next.stats,
-    arc_count: Math.max(0, (next.stats.arc_count ?? 0) - 1),
-    entity_counts: {
-      ...next.stats.entity_counts,
-      ARC: Math.max(0, (next.stats.entity_counts.ARC ?? 0) - 1),
-    },
-  }
-  return next
-}
-
-function appendUserPolyline(
-  doc: DxfJsonDocument,
-  vertices: Pt[],
-  closed: boolean,
-): { next: DxfJsonDocument; poly: DxfPolyline } {
-  const handle = `user-pl-${Date.now()}`
-  const vertList: DxfPolylineVertex[] = vertices.map(v => ({ x: v.x, y: v.y, z: 0, bulge: 0 }))
-  const poly: DxfPolyline = {
-    entity_type: 'LWPOLYLINE',
-    handle,
-    layer: '0',
-    closed,
-    vertex_count: vertList.length,
-    vertices: vertList,
-  }
-  const next = cloneDoc(doc)
-  next.polylines = [...next.polylines, poly]
-  next.stats = {
-    ...next.stats,
-    polyline_count: next.stats.polyline_count + 1,
-    total_vertex_count: next.stats.total_vertex_count + vertList.length,
-    entity_counts: {
-      ...next.stats.entity_counts,
-      LWPOLYLINE: (next.stats.entity_counts.LWPOLYLINE ?? 0) + 1,
-    },
-  }
-  return { next, poly }
-}
-
-function polylineHandleFromWallId(wallId: string): string | null {
-  if (!wallId.startsWith('pl-')) return null
-  const rest = wallId.slice(3)
-  const dash = rest.lastIndexOf('-')
-  if (dash <= 0) return null
-  if (!/^\d+$/.test(rest.slice(dash + 1))) return null
-  return rest.slice(0, dash)
-}
-
-function removePolylineFromDocByHandle(doc: DxfJsonDocument, handle: string): DxfJsonDocument {
-  const polylines = doc.polylines.filter(p => p.handle !== handle)
-  if (polylines.length === doc.polylines.length) return doc
-  const removed = doc.polylines.find(p => p.handle === handle)!
-  const next = cloneDoc(doc)
-  next.polylines = polylines
-  next.stats = {
-    ...next.stats,
-    polyline_count: Math.max(0, next.stats.polyline_count - 1),
-    total_vertex_count: Math.max(0, next.stats.total_vertex_count - removed.vertex_count),
-    entity_counts: {
-      ...next.stats.entity_counts,
-      LWPOLYLINE: Math.max(0, (next.stats.entity_counts.LWPOLYLINE ?? 0) - 1),
-    },
-  }
-  return next
-}
-
-/* ─── Furniture category colours ──────────────────────────── */
-const FURNITURE_CATEGORY_COLORS: Record<string, string> = {
-  'Kitchen':      '#f97316',
-  'Bedroom':      '#8b5cf6',
-  'Living Room':  '#3b82f6',
-  'Dining Room':  '#10b981',
-  'Bathroom':     '#06b6d4',
-  'Office':       '#ef4444',
-  'Conference':   '#6366f1',
-  'Break Room':   '#84cc16',
-  'Reception':    '#f59e0b',
-  'Corridor':     '#78716c',
-}
-
-/** Maps block_name / template label → category (built once at module load). */
-const FURNITURE_LABEL_TO_CATEGORY = new Map<string, string>(
-  FURNITURE_DXF_TEMPLATES.map(t => [t.label, t.category as string])
-)
-
-/* ─── Room library templates ───────────────────────────────── */
-export const ROOM_TEMPLATE_MIME = 'application/x-room-template'
-
-export const ROOM_TEMPLATES = [
-  { id: 'bedroom',        label: 'Bedroom',        w: 3.0, h: 3.6, color: '#8b5cf6' },
-  { id: 'master-bedroom', label: 'Master Bedroom',  w: 4.0, h: 4.5, color: '#7c3aed' },
-  { id: 'living-room',    label: 'Living Room',     w: 5.0, h: 4.0, color: '#3b82f6' },
-  { id: 'kitchen',        label: 'Kitchen',         w: 3.0, h: 3.0, color: '#f97316' },
-  { id: 'bathroom',       label: 'Bathroom',        w: 2.0, h: 2.5, color: '#06b6d4' },
-  { id: 'dining-room',    label: 'Dining Room',     w: 4.0, h: 3.5, color: '#10b981' },
-  { id: 'office',         label: 'Office',          w: 3.0, h: 3.0, color: '#ef4444' },
-  { id: 'hallway',        label: 'Hallway',         w: 1.5, h: 4.0, color: '#78716c' },
-] as const
-
-/* ─── DXF Export ─────────────────────────────────────────── */
-/* ─── Build DxfJsonDocument from current canvas walls ── */
-// buildDocFromWalls and docToDxfString removed — use downloadDxf from exportToDxf.ts
 function buildDocFromWalls(doc: DxfJsonDocument, walls: WallSeg[]): DxfJsonDocument {
   const ungrouped = walls.filter(w => !w.groupId)
   const grouped = new Map<string, WallSeg[]>()
@@ -349,19 +184,7 @@ function buildDocFromWalls(doc: DxfJsonDocument, walls: WallSeg[]): DxfJsonDocum
   return { ...doc, lines, polylines }
 }
 
-/* ─── DXF exporter ─────────────────────────────── */
-/**
- * Serialises a DxfJsonDocument to a standards-compliant AutoCAD ASCII DXF.
- *
- * Produces the sections Autodesk Viewer requires:
- *   HEADER → TABLES (VPORT/LTYPE/LAYER/STYLE/VIEW/UCS/APPID/DIMSTYLE/BLOCK_RECORD)
- *   → BLOCKS (*Model_Space + *Paper_Space) → ENTITIES → OBJECTS (root DICTIONARY)
- *
- * Group-code formatting matches AutoCAD output:
- *   • codes right-aligned in 3-char field ("  0", " 10", "100")
- *   • integer values right-aligned in 6-char field ("     1", "   256")
- *   • float / string values written verbatim
- */
+
 function docToDxfString(doc: DxfJsonDocument): string {
   const out: string[] = []
 
@@ -629,121 +452,11 @@ function triggerDownload(href: string, filename: string) {
   document.body.removeChild(a)
 }
 
-/** Returns `room-lbl-{polyHandle}` — used to link a room label to its polyline. */
-function roomLabelHandle(polyHandle: string): string {
-  return `room-lbl-${polyHandle}`
-}
-
-function appendUserText(
-  doc: DxfJsonDocument,
-  position: Pt,
-  text = 'Label',
-  height = 0.2,
-  overrideHandle?: string,
-): { next: DxfJsonDocument; handle: string } {
-  const handle = overrideHandle ?? `user-t-${Date.now()}`
-  const entity: DxfText = {
-    entity_type: 'MTEXT',
-    handle,
-    layer: '0',
-    text,
-    position: { x: position.x, y: position.y, z: 0 },
-    height,
-  }
-  const next = cloneDoc(doc)
-  next.texts = [...next.texts, entity]
-  next.stats = {
-    ...next.stats,
-    text_count: next.stats.text_count + 1,
-    entity_counts: {
-      ...next.stats.entity_counts,
-      MTEXT: (next.stats.entity_counts.MTEXT ?? 0) + 1,
-    },
-  }
-  return { next, handle }
-}
-
-function removeLineFromDocByWallId(doc: DxfJsonDocument, wallId: string): DxfJsonDocument {
-  if (!wallId.startsWith('ln-')) return doc
-  const handle = wallId.slice(3)
-  const lines = doc.lines.filter(l => l.handle !== handle)
-  if (lines.length === doc.lines.length) return doc
-  const next = cloneDoc(doc)
-  next.lines = lines
-  next.stats = {
-    ...next.stats,
-    line_count: Math.max(0, next.stats.line_count - 1),
-    entity_counts: {
-      ...next.stats.entity_counts,
-      LINE: Math.max(0, (next.stats.entity_counts.LINE ?? 0) - 1),
-    },
-  }
-  return next
-}
-
-function removeTextFromDoc(doc: DxfJsonDocument, handle: string): DxfJsonDocument {
-  const texts = doc.texts.filter(t => t.handle !== handle)
-  if (texts.length === doc.texts.length) return doc
-  const next = cloneDoc(doc)
-  next.texts = texts
-  next.stats = {
-    ...next.stats,
-    text_count: Math.max(0, next.stats.text_count - 1),
-    entity_counts: {
-      ...next.stats.entity_counts,
-      MTEXT: Math.max(0, (next.stats.entity_counts.MTEXT ?? 0) - 1),
-    },
-  }
-  return next
-}
-
-/* ─── Constants ──────────────────────────────────────────────── */
-const PAD = 55
-const STAGE_MIN_W = 320
-const STAGE_MIN_H = 280
-const SNAP_TH     = 0.15
-const SNAP_LINE_TH = 0.25
-const HP_SCR  = 5
-const ROOM_COLORS = [
-  'rgba(59,130,246,0.15)',
-  'rgba(16,185,129,0.15)',
-  'rgba(245,158,11,0.15)',
-  'rgba(139,92,246,0.15)',
-  'rgba(236,72,153,0.15)',
-  'rgba(239,68,68,0.15)',
-  'rgba(20,184,166,0.15)',
-  'rgba(234,179,8,0.15)',
-]
-const ROOM_STROKES = ROOM_COLORS.map(c => c.replace('0.15', '0.55'))
 
 function nearSamePt(a: Pt, b: Pt, eps: number) {
   return Math.abs(a.x - b.x) < eps && Math.abs(a.y - b.y) < eps
 }
 
-function wallIdsOnRoomBoundary(room: Pt[], segs: WallSeg[]): string[] {
-  const eps = Math.max(SNAP_TH * 5, 0.12)
-  const n = room.length
-  const found = new Set<string>()
-  for (let i = 0; i < n; i++) {
-    const a = room[i]
-    const b = room[(i + 1) % n]
-    for (const w of segs) {
-      const s = w.start, e = w.end
-      const fwd = nearSamePt(s, a, eps) && nearSamePt(e, b, eps)
-      const rev = nearSamePt(s, b, eps) && nearSamePt(e, a, eps)
-      if (fwd || rev) { found.add(w.id); break }
-    }
-  }
-  return [...found]
-}
-
-function translateWallsByIds(ws: WallSeg[], ids: Set<string>, dx: number, dy: number): WallSeg[] {
-  if (!ids.size || (dx === 0 && dy === 0)) return ws
-  return ws.map(w => {
-    if (!ids.has(w.id)) return w
-    return { ...w, start: { x: w.start.x + dx, y: w.start.y + dy }, end: { x: w.end.x + dx, y: w.end.y + dy } }
-  })
-}
 
 function applyRoomDeltaToDoc(doc: DxfJsonDocument, wallIds: string[], dx: number, dy: number): DxfJsonDocument {
   if (!wallIds.length || (dx === 0 && dy === 0)) return doc

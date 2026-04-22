@@ -259,3 +259,5 @@ export function polylineHandleFromWallId(wallId: string): string | null {
 export function roomLabelHandle(polyHandle: string): string {
   return `room-lbl-${polyHandle}`
 }
+
+
