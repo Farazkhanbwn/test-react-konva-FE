@@ -3635,15 +3635,38 @@ setSelectedIds(prev => {
                     Walls in toMoveSet render inside dragGroupRef which is moved imperatively
                     via Konva x/y during drag — zero React re-renders during drag movement. */}
                 <Layer>{(() => {
-                  const renderWall = (wall: WallSeg) => {
-                    if (wall.fromArc) return null
-                    const [sx, sy] = toC(wall.start.x, wall.start.y, t)
-                    const [ex, ey] = toC(wall.end.x, wall.end.y, t)
-                    const isSel = selectedIds.has(wall.id)
-                    const isDragging = activeDrag?.wallId === wall.id
-                    const wallColor = wall.isDetail ? '#60a5fa' : resolveExplicitColor(wall.color, wall.layer ?? '0', layerColorMap, strokeHex)
-                    // strokeScaleEnabled={false} → widths are screen-pixels, no zoom needed → stable JSX during zoom
-                    const strokeW = (wall.isOuter ? 2.8 : wall.isDetail ? 0.65 : 1.15) * strokeScale
+                const renderWall = (wall: WallSeg) => {
+  if (wall.fromArc) return null
+  const [sx, sy] = toC(wall.start.x, wall.start.y, t)
+  const [ex, ey] = toC(wall.end.x, wall.end.y, t)
+  const isSel = selectedIds.has(wall.id)
+  const isDragging = activeDrag?.wallId === wall.id
+  
+  // ========== ADD THIS BLOCK - same pattern as arcs ==========
+  // Get the group's insert_layer color if this wall belongs to a group
+  const wallGid = wallIdToGroupId.get(wall.id)
+  let wallGroupColor: string | null = null
+  if (wallGid !== undefined) {
+    const grp = canvasGroups.find(g => g.id === wallGid)
+    if (grp && grp.insertLayer && grp.insertLayer !== '0') {
+      wallGroupColor = layerColorMap.get(grp.insertLayer) ?? null
+    }
+  }
+  
+  // Determine final color using same priority as arcs
+  let finalWallColor: string
+  if (isSel || (selectedGroupId !== null && wallGid === selectedGroupId)) {
+    finalWallColor = '#0073cf'  // Selection color
+  } else if (wallGroupColor && wallGroupColor.toUpperCase() !== '#FFFFFF') {
+    finalWallColor = wallGroupColor  // Use group's insert_layer color
+  } else {
+    finalWallColor = wall.isDetail 
+      ? '#60a5fa' 
+      : resolveExplicitColor(wall.color, wall.layer ?? '0', layerColorMap, strokeHex)
+  }
+  // ========== END OF ADDED BLOCK ==========
+  
+  const strokeW = (wall.isOuter ? 2.8 : wall.isDetail ? 0.65 : 1.15) * strokeScale
                     return (
                       <Group key={wall.id}>
                         <Line points={[sx, sy, ex, ey]} stroke="transparent" strokeWidth={16}
@@ -3731,7 +3754,7 @@ setSelectedIds(prev => {
                           const isGroupSelected = isSel && selectedGroupId !== null && wallIdToGroupId.get(wall.id) === selectedGroupId
                           return (
                             <Line points={[sx, sy, ex, ey]}
-                              stroke={(isDragging || isGroupSelected || isSel) ? '#0073cf' : isHoverGroup ? '#60a5fa' : wallColor}
+                              stroke={(isDragging || isGroupSelected || isSel) ? '#0073cf' : isHoverGroup ? '#60a5fa' : finalWallColor}
                               strokeWidth={(isDragging || isSel || isHoverGroup) ? 2.0 : strokeW}
                               strokeScaleEnabled={false}
                               lineCap="round" listening={false} perfectDrawEnabled={false}
