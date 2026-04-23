@@ -549,6 +549,9 @@ function DxfJsonViewPageInner() {
     [planDoc],
   )
 
+const HP_SCR = 7
+  const HR = HP_SCR / zoom
+
   const canvasGroups = useMemo<CanvasGroup[]>(
     () => canvasGroupsFromDxfJson(planDoc, walls),
     [planDoc, walls],
@@ -587,6 +590,7 @@ function DxfJsonViewPageInner() {
   const [liveDragDelta, setLiveDragDelta] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
   const liveDragRafRef = useRef<number>(0)
   const dragGroupRef = useRef<Konva.Group>(null)
+  const arcGroupRefs = useRef<Map<string, Konva.Group>>(new Map())
   const selBeforeMouseDown = useRef<Set<string>>(new Set())
   const didDragRef = useRef(false)
   const draggingEpInfo = useRef<{ wallId: string; ep: 'start' | 'end' } | null>(null)
@@ -676,11 +680,7 @@ function DxfJsonViewPageInner() {
 
   const effectiveArcs = useMemo(() => {
     let arcs = planDoc.arcs
-    if (activeDrag) {
-      const aSet = new Set(activeDrag.toMoveArcHandles)
-      const { dx, dy } = liveDragDelta
-      arcs = arcs.map(a => aSet.has(a.handle) ? { ...a, center: { ...a.center, x: a.center.x + dx, y: a.center.y + dy } } : a)
-    }
+    // During activeDrag, arc Groups are moved imperatively via arcGroupRefs — no state offset needed here
     if (rotationDrag && rotationAngleDelta !== 0) {
       const aSet = new Set(rotationDrag.arcHandles)
       const angleDeltaDeg = rotationAngleDelta * (180 / Math.PI)
@@ -711,14 +711,7 @@ function DxfJsonViewPageInner() {
   const effectiveLines = useMemo(() => {
     const arcKey = (h: string) => h.replace(/^arc-/, '')
     let lines = [...(planDoc.door_lines ?? []), ...(planDoc.window_lines ?? [])]
-    if (activeDrag && activeDrag.toMoveArcHandles.length > 0) {
-      const { dx, dy } = liveDragDelta
-      const dflPrefixes = activeDrag.toMoveArcHandles.map(h => `dfl-${arcKey(h)}`)
-      lines = lines.map(l => {
-        if (!dflPrefixes.some(pfx => l.handle.startsWith(pfx))) return l
-        return { ...l, start: { ...l.start, x: l.start.x + dx, y: l.start.y + dy }, end: { ...l.end, x: l.end.x + dx, y: l.end.y + dy } }
-      })
-    }
+    // During activeDrag, door-frame lines (dfl-*) are inside the arc's Group which is moved imperatively — no state offset needed
     if (rotationDrag && rotationAngleDelta !== 0 && rotationDrag.arcHandles.length > 0) {
       const dflPrefixes = rotationDrag.arcHandles.map(h => `dfl-${arcKey(h)}`)
       lines = lines.map(l => {
@@ -1141,20 +1134,17 @@ function DxfJsonViewPageInner() {
       if (orthoEnabled) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0 }
       dragDeltaRef.current = { dx, dy }
       didDragRef.current = true
-      // Move wall group imperatively (zero React re-renders for wall positions during drag)
+      // Move walls imperatively
       if (dragGroupRef.current) {
         dragGroupRef.current.x(dx * t.sc)
         dragGroupRef.current.y(-dy * t.sc)
-        dragGroupRef.current.getLayer()?.batchDraw()
       }
-      // Pump liveDragDelta once per animation frame so arcs/door-lines follow the drag smoothly
-      if (!liveDragRafRef.current) {
-        liveDragRafRef.current = requestAnimationFrame(() => {
-          const d = dragDeltaRef.current
-          setLiveDragDelta({ dx: d.dx, dy: d.dy })
-          liveDragRafRef.current = 0
-        })
+      // Move arc Groups (door swings + jamb stubs) imperatively — same offset, same frame
+      for (const h of drag.toMoveArcHandles) {
+        const grp = arcGroupRefs.current.get(h)
+        if (grp) { grp.x(dx * t.sc); grp.y(-dy * t.sc) }
       }
+      dragGroupRef.current?.getLayer()?.batchDraw()
     } else if (rotationDragRef.current) {
       const rd = rotationDragRef.current
       const [ccx, ccy] = toC(rd.centerWX, rd.centerWY, t)
@@ -1204,6 +1194,8 @@ function DxfJsonViewPageInner() {
     const { start, current } = selectionBoxRef.current
     selectionBoxRef.current = null
     setIsRubberBanding(false)
+    const rr0 = rubberBandRectRef.current
+    if (rr0) { rr0.width(0); rr0.height(0); rr0.getLayer()?.batchDraw() }
     const x1 = Math.min(start.x, current.x), x2 = Math.max(start.x, current.x)
     const y1 = Math.min(start.y, current.y), y2 = Math.max(start.y, current.y)
     const isWindow = start.x < current.x
@@ -1283,6 +1275,8 @@ function DxfJsonViewPageInner() {
     // Cancel any in-progress rubber-band so the drag can proceed unobstructed.
     selectionBoxRef.current = null
     setIsRubberBanding(false)
+    const rr1 = rubberBandRectRef.current
+    if (rr1) { rr1.width(0); rr1.height(0); rr1.getLayer()?.batchDraw() }
     setLiveDragDelta({ dx: 0, dy: 0 })
     setSelectedRoomIndex(null)
     snapshot()
@@ -1331,8 +1325,12 @@ function DxfJsonViewPageInner() {
     if (Math.abs(_finalDelta.dx) > 0.02 || Math.abs(_finalDelta.dy) > 0.02) {
       didDragRef.current = true
     }
-    // Reset drag group position before unmounting its children so walls don't flash at old offset
+    // Reset all imperatively-moved groups before React state update so nothing flashes at old offset
     if (dragGroupRef.current) { dragGroupRef.current.x(0); dragGroupRef.current.y(0) }
+    for (const h of drag.toMoveArcHandles) {
+      const grp = arcGroupRefs.current.get(h)
+      if (grp) { grp.x(0); grp.y(0) }
+    }
     activeDragRef.current = null; setActiveDrag(null)
     dragDeltaRef.current = { dx: 0, dy: 0 }; setDragDelta({ dx: 0, dy: 0 })
     liveDragRafRef.current = 0; setLiveDragDelta({ dx: 0, dy: 0 })
@@ -1475,8 +1473,8 @@ function DxfJsonViewPageInner() {
     const mpY = (pt.y - stage.y()) / oldScale
     // Smooth zoom: trackpad gives pixel-mode deltaY; mouse wheel gives line-mode.
     const factor = e.evt.deltaMode === 0
-      ? Math.pow(1.003, -e.evt.deltaY)    // trackpad — responsive
-      : e.evt.deltaY < 0 ? 1.18 : 0.85   // mouse wheel — snappier
+      ? Math.pow(1.008, -e.evt.deltaY)    // trackpad — responsive
+      : e.evt.deltaY < 0 ? 1.25 : 0.80   // mouse wheel — snappier
     const nz = Math.min(8, Math.max(0.1, oldScale * factor))
     // Update Konva imperatively — zero React re-renders during scroll
     stage.scaleX(nz); stage.scaleY(nz)
@@ -1609,12 +1607,23 @@ function DxfJsonViewPageInner() {
     }
     for (const tx of effectiveTexts.filter(tx => selectedIds.has(tx.handle))) {
       const [cx, cy] = toC(tx.position.x, tx.position.y, t)
-      const tLines = tx.text.split('\n')
-      const fs = Math.max(8, tx.height * t.sc * 1.8)
-      const estW = Math.max(fs * 3, (tLines[0]?.length ?? 1) * fs * 0.52)
-      const bH = fs * (tLines[1] ? 2.15 : 1) + 8 / zoom
-      minCX = Math.min(minCX, cx - 4 / zoom); maxCX = Math.max(maxCX, cx + estW + 4 / zoom)
-      minCY = Math.min(minCY, cy - fs - 4 / zoom); maxCY = Math.max(maxCY, cy + bH - fs + 4 / zoom)
+      const tLines = tx.text.replace(/\n$/, '').split('\n').filter((l: string) => l.trim() !== '')
+      const fs = Math.max(5, tx.height * t.sc)
+      const lineHeight_sel = fs * 1.35
+      const longestLine_sel = tLines.reduce((a: string, b: string) => a.length > b.length ? a : b, '')
+      const estW = Math.max(fs * 1.5, longestLine_sel.length * fs * 0.52)
+      const estH_sel = lineHeight_sel * Math.max(1, tLines.length)
+      const halign_sel: number = (tx as any).halign ?? 0
+      const valign_sel: number = (tx as any).valign ?? 1
+      let boxOffX = 0
+      if (halign_sel === 1) boxOffX = -estW / 2
+      else if (halign_sel === 2) boxOffX = -estW
+      let boxOffY = 0
+      if (valign_sel === 3) boxOffY = 0
+      else if (valign_sel === 2) boxOffY = -estH_sel / 2
+      else boxOffY = -estH_sel
+      minCX = Math.min(minCX, cx + boxOffX - 4 / zoom); maxCX = Math.max(maxCX, cx + boxOffX + estW + 4 / zoom)
+      minCY = Math.min(minCY, cy + boxOffY - 4 / zoom); maxCY = Math.max(maxCY, cy + boxOffY + estH_sel + 4 / zoom)
       hasAny = true
     }
     for (const a of effectiveArcs.filter(a => selectedIds.has(a.handle))) {
@@ -1656,7 +1665,25 @@ function DxfJsonViewPageInner() {
     for (const w of walls.filter(w => selectedIds.has(w.id))) {
       for (const p of [w.start, w.end]) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); hasAny = true }
     }
-    for (const tx of planDoc.texts.filter(tx => selectedIds.has(tx.handle))) { minX = Math.min(minX, tx.position.x); maxX = Math.max(maxX, tx.position.x); minY = Math.min(minY, tx.position.y); maxY = Math.max(maxY, tx.position.y); hasAny = true }
+    for (const tx of planDoc.texts.filter(tx => selectedIds.has(tx.handle))) {
+      const tLines_w = tx.text.replace(/\n$/, '').split('\n').filter((l: string) => l.trim() !== '')
+      const fs_w = Math.max(0.01, tx.height)
+      const longestLine_w = tLines_w.reduce((a: string, b: string) => a.length > b.length ? a : b, '')
+      const estW_w = Math.max(fs_w * 1.5, longestLine_w.length * fs_w * 0.52) / t.sc
+      const estH_w = (fs_w * 1.35 * Math.max(1, tLines_w.length)) / t.sc
+      const halign_w: number = (tx as any).halign ?? 0
+      const valign_w: number = (tx as any).valign ?? 1
+      let bOX = 0
+      if (halign_w === 1) bOX = -estW_w / 2
+      else if (halign_w === 2) bOX = -estW_w
+      let bOY = 0
+      if (valign_w === 3) bOY = 0
+      else if (valign_w === 2) bOY = -estH_w / 2
+      else bOY = -estH_w
+      minX = Math.min(minX, tx.position.x + bOX); maxX = Math.max(maxX, tx.position.x + bOX + estW_w)
+      minY = Math.min(minY, tx.position.y + bOY); maxY = Math.max(maxY, tx.position.y + bOY + estH_w)
+      hasAny = true
+    }
     for (const a of planDoc.arcs.filter(a => selectedIds.has(a.handle))) { minX = Math.min(minX, a.center.x - a.radius); maxX = Math.max(maxX, a.center.x + a.radius); minY = Math.min(minY, a.center.y - a.radius); maxY = Math.max(maxY, a.center.y + a.radius); hasAny = true }
     if (selectedWinKey) {
       for (const ln of (planDoc.window_lines ?? []).filter(l => l.handle.startsWith(`win-${selectedWinKey}-`))) {
@@ -2731,6 +2758,10 @@ function DxfJsonViewPageInner() {
 
                     return (
                       <Group key={arc.handle}
+                        ref={(node: Konva.Group | null) => {
+                          if (node) arcGroupRefs.current.set(arc.handle, node)
+                          else arcGroupRefs.current.delete(arc.handle)
+                        }}
                         onClick={e => {
                           if (isDrawingTool) return
                           e.cancelBubble = true
@@ -3138,22 +3169,62 @@ function DxfJsonViewPageInner() {
                   />
 
                   {/* Labels — rendered above walls in same layer */}
-                  {showLabels && (<>
+{showLabels && (<>
                     {effectiveTexts.map(tx => {
-                      const textLines = tx.text.split('\n')
-                      const [lx, ly] = toC(tx.position.x, tx.position.y, t)
-                      // Font size scales with world height — smaller than original (1.8× vs 3.5×) to reduce overlap
-                      const fs = Math.max(8, tx.height * t.sc * 1.8)
-                      const isTxtSel = selectedIds.has(tx.handle)
+                      if (!isLayerVisible(tx.layer)) return null
+ 
+                      // Strip trailing newlines, skip blank-only texts
+                      const textLines = tx.text.replace(/\n$/, '').split('\n').filter((l: string) => l.trim() !== '')
+                      if (textLines.length === 0) return null
+ 
+                      // ── Geometry ─────────────────────────────────────────────
+                      const [lxRaw, lyRaw] = toC(tx.position.x, tx.position.y, t)
+ 
+                      // tx.height is in model-space units — scale directly.
+                      // No extra multiplier: v7.4+ converter stores real cap-heights.
+                      const fs         = Math.max(5, tx.height * t.sc)
+                      const lineHeight  = fs * 1.35
+                      const longestLine = textLines.reduce((a: string, b: string) => a.length > b.length ? a : b, '')
+                      const estW        = Math.max(fs * 1.5, longestLine.length * fs * 0.52)
+                      const estH        = lineHeight * textLines.length
+ 
+                      // ── Alignment ────────────────────────────────────────────
+                      // halign: 0=left  1=center  2=right
+                      // valign: 0=baseline  1=bottom  2=middle  3=top
+                      const halign: number = (tx as any).halign ?? 0
+                      const valign: number = (tx as any).valign ?? 1
+                      const rotation: number = tx.rotation ?? 0
+ 
+                      // Offsets are in text-local space (applied by inner Group,
+                      // AFTER the outer Group has already applied the rotation).
+                      // This is the only correct approach — putting offsets on the
+                      // outer Group would shift along canvas axes, not text axes.
+                      let offsetX = 0
+                      if (halign === 1)      offsetX = -estW / 2   // center
+                      else if (halign === 2) offsetX = -estW        // right
+ 
+                      let offsetY = 0
+                      if (valign === 3)      offsetY = 0            // top anchor
+                      else if (valign === 2) offsetY = -estH / 2    // middle anchor
+                      else                   offsetY = -estH         // bottom / baseline
+ 
+                      // ── State ────────────────────────────────────────────────
+                      const isTxtSel  = selectedIds.has(tx.handle)
                       const isEditing = editingTextHandle === tx.handle
-                      const estW = Math.max(fs * 3, (textLines[0]?.length ?? 1) * fs * 0.52)
-                      const boxH = fs * (textLines[1] ? 2.15 : 1) + 8 / zoom
-                      // font-size handle sits at bottom-right corner of the text box
-                      const handleX = estW + 4 / zoom
-                      const handleY = boxH - fs
-
+                      const HR_tx     = HP_SCR / zoom
+                      const selColor  = '#f59e0b'
+                      const textColor = isTxtSel
+                        ? selColor
+                        : resolveExplicitColor(tx.color, tx.layer, layerColorMap, '#1e293b')
+ 
                       return (
-                        <Group key={tx.handle} x={lx} y={ly}
+                        <Group
+                          key={tx.handle}
+                          x={lxRaw}
+                          y={lyRaw}
+                          // Outer Group: sits at DXF insert point, rotates around it.
+                          // Konva rotation = CW degrees; DXF = CCW degrees → negate.
+                          rotation={-rotation}
                           onClick={(e) => {
                             if (isDrawingTool) return
                             e.cancelBubble = true
@@ -3161,11 +3232,16 @@ function DxfJsonViewPageInner() {
                             if (activeTool !== 'select') return
                             setSelectedRoomIndex(null); setSelectedId(null)
                             const isCtrl = e.evt.ctrlKey || e.evt.metaKey
-                            setSelectedIds(prev => { const next = new Set(isCtrl ? prev : []); if (isTxtSel && isCtrl) next.delete(tx.handle); else next.add(tx.handle); return next })
+                            setSelectedIds(prev => {
+                              const next = new Set(isCtrl ? prev : [])
+                              if (isTxtSel && isCtrl) next.delete(tx.handle)
+                              else next.add(tx.handle)
+                              return next
+                            })
                             setSelectedTextHandle(isTxtSel && !e.evt.ctrlKey ? null : tx.handle)
                           }}
                           onMouseDown={e => {
-                            if (isEditing) return  // textarea handles its own events
+                            if (isEditing) return
                             e.cancelBubble = true
                             if (activeTool !== 'select' || spaceHeld) return
                             const isCtrl = e.evt.ctrlKey || e.evt.metaKey
@@ -3179,45 +3255,121 @@ function DxfJsonViewPageInner() {
                             e.cancelBubble = true
                             if (activeTool !== 'select') return
                             setEditingTextHandle(tx.handle)
-                            // Only let user edit the room name (first line).
-                            // The size line (e.g. "3.0 X 3.35") is auto-calculated — not editable.
                             setEditingTextValue(tx.text.split('\n')[0])
                             setSelectedIds(new Set([tx.handle]))
                             setSelectedTextHandle(tx.handle)
                           }}
-                          onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = isEditing ? 'text' : 'move' }}
-                          onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                          onMouseEnter={ev => {
+                            ev.target.getStage()!.container().style.cursor = isEditing ? 'text' : 'move'
+                          }}
+                          onMouseLeave={ev => {
+                            ev.target.getStage()!.container().style.cursor = 'default'
+                          }}
                         >
-                          {/* Hide background rect and text while the HTML textarea overlay is active */}
-                          {isTxtSel && !isEditing && <Rect x={-4 / zoom} y={-fs - 4 / zoom} width={estW + 8 / zoom} height={boxH} fill="rgba(245,158,11,0.12)" stroke="#f59e0b" strokeWidth={1.2 / zoom} cornerRadius={2 / zoom} listening={false} />}
-                          {!isEditing && <Text x={0} y={-fs} text={textLines[0]} fontSize={fs} fontStyle="bold" fill={isTxtSel ? '#f59e0b' : resolveExplicitColor(tx.color, tx.layer, layerColorMap, '#2563eb')} fontFamily="'Inter', system-ui, -apple-system, sans-serif" />}
-                          {!isEditing && textLines[1] && <Text x={0} y={-fs + fs * 1.25} text={textLines[1]} fontSize={fs * 0.78} fill={isTxtSel ? '#f59e0b' : '#64748b'} fontFamily="'Inter', system-ui, -apple-system, sans-serif" />}
-                          {isTxtSel && selectedIds.size === 1 && activeTool === 'select' && (
-                            <Circle x={handleX} y={handleY} radius={HR} fill="#3b82f6" stroke="#fff" strokeWidth={1.2 / zoom} draggable
-                              onDragStart={(e) => {
-                                e.cancelBubble = true; snapshot()
-                                const stage = e.target.getStage()!
-                                const p = stage.getRelativePointerPosition()!
-                                const [wx] = toW(p.x, p.y, t)
-                                textHeightDragRef.current = { handle: tx.handle, startH: tx.height, startPointerWy: wx }
-                              }}
-                              onDragMove={(e) => {
-                                e.cancelBubble = true
-                                const r = textHeightDragRef.current
-                                if (!r || r.handle !== tx.handle) return
-                                const stage = e.target.getStage()!
-                                const p = stage.getRelativePointerPosition()!
-                                const [wx] = toW(p.x, p.y, t)
-                                // Drag right → larger, drag left → smaller
-                                const newH = Math.max(0.05, Math.min(5, r.startH + (wx - r.startPointerWy) * 0.3))
-                                setPlanDoc(prev => ({ ...prev, texts: prev.texts.map(t => t.handle === tx.handle ? { ...t, height: newH } : t) }))
-                                e.target.position({ x: handleX, y: handleY })
-                              }}
-                              onDragEnd={(e) => { e.cancelBubble = true; textHeightDragRef.current = null; e.target.position({ x: handleX, y: handleY }) }}
-                              onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'ew-resize' }}
-                              onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                          {/*
+                            Inner Group: applies alignment offsets in text-local space.
+                            Because this is a child of the rotated outer Group, its x/y
+                            axes are already rotated — so offsetX shifts along the text's
+                            baseline and offsetY shifts perpendicular to it.  This exactly
+                            replicates AutoCAD's anchor-point behaviour for all 9 attachment
+                            points and all halign/valign combinations.
+                          */}
+                          <Group x={offsetX} y={offsetY}>
+
+                            {/* Invisible hit-area — always present so the outer Group is clickable even when not selected */}
+                            <Rect
+                              x={-2 / zoom}
+                              y={-2 / zoom}
+                              width={estW + 4 / zoom}
+                              height={estH + 4 / zoom}
+                              fill="transparent"
+                              perfectDrawEnabled={false}
                             />
-                          )}
+
+                            {/* Selection highlight rectangle */}
+                            {isTxtSel && !isEditing && (
+                              <Rect
+                                x={-2 / zoom}
+                                y={-2 / zoom}
+                                width={estW + 4 / zoom}
+                                height={estH + 4 / zoom}
+                                fill="rgba(245,158,11,0.12)"
+                                stroke={selColor}
+                                strokeWidth={1.2 / zoom}
+                                cornerRadius={2 / zoom}
+                                listening={false}
+                              />
+                            )}
+ 
+                            {/* Render each text line */}
+                            {!isEditing && textLines.map((line: string, li: number) => (
+                              <Text
+                                key={li}
+                                x={0}
+                                y={li * lineHeight}
+                                text={line}
+                                fontSize={fs}
+                                fontStyle="normal"
+                                fill={textColor}
+                                fontFamily="'Arial', system-ui, sans-serif"
+                                listening={false}
+                                perfectDrawEnabled={false}
+                              />
+                            ))}
+ 
+                            {/* Font-size resize grip — drag right to enlarge */}
+                            {isTxtSel && selectedIds.size === 1 && activeTool === 'select' && (
+                              <Circle
+                                x={estW + 4 / zoom}
+                                y={estH / 2}
+                                radius={HR_tx}
+                                fill="#3b82f6"
+                                stroke="#fff"
+                                strokeWidth={1.2 / zoom}
+                                draggable
+                                perfectDrawEnabled={false}
+                                onDragStart={() => {
+                                  snapshot()
+                                  const stage = stageRef.current!
+                                  const p = stage.getRelativePointerPosition()!
+                                  const [wx] = toW(p.x, p.y, t)
+                                  textHeightDragRef.current = {
+                                    handle: tx.handle,
+                                    startH: tx.height,
+                                    startPointerWy: wx,
+                                  }
+                                }}
+                                onDragMove={(e) => {
+                                  e.cancelBubble = true
+                                  const rr = textHeightDragRef.current
+                                  if (!rr || rr.handle !== tx.handle) return
+                                  const stage = e.target.getStage()!
+                                  const p = stage.getRelativePointerPosition()!
+                                  const [wx] = toW(p.x, p.y, t)
+                                  const newH = Math.max(0.05, Math.min(50, rr.startH + (wx - rr.startPointerWy) * 0.5))
+                                  setPlanDoc(prev => ({
+                                    ...prev,
+                                    texts: prev.texts.map(t2 =>
+                                      t2.handle === tx.handle ? { ...t2, height: newH } : t2
+                                    ),
+                                  }))
+                                  e.target.position({ x: estW + 4 / zoom, y: estH / 2 })
+                                }}
+                                onDragEnd={(e) => {
+                                  e.cancelBubble = true
+                                  textHeightDragRef.current = null
+                                  e.target.position({ x: estW + 4 / zoom, y: estH / 2 })
+                                }}
+                                onMouseEnter={ev => {
+                                  ev.target.getStage()!.container().style.cursor = 'ew-resize'
+                                }}
+                                onMouseLeave={ev => {
+                                  ev.target.getStage()!.container().style.cursor = 'default'
+                                }}
+                              />
+                            )}
+ 
+                          </Group>
                         </Group>
                       )
                     })}
@@ -3369,32 +3521,63 @@ function DxfJsonViewPageInner() {
                 )
               })()}
 
-              {editingTextHandle && (() => {
+  {editingTextHandle && (() => {
                 const tx = planDoc.texts.find(t => t.handle === editingTextHandle)
                 if (!tx) return null
-                const [lx, ly] = toC(tx.position.x, tx.position.y, t)
-                const fs = Math.max(8, tx.height * t.sc * 1.8)
-                // Convert canvas-local coords to screen (host-div) coords
-                const screenX = lx * zoom + pos.x
-                const screenY = (ly - fs) * zoom + pos.y
+ 
+                // Mirror the renderer geometry exactly so the textarea
+                // overlays the Konva text at the same position and size.
+                const [lxRaw, lyRaw] = toC(tx.position.x, tx.position.y, t)
+                const fs          = Math.max(5, tx.height * t.sc)
+                const lineHeight  = fs * 1.35
+                const textLines   = tx.text.replace(/\n$/, '').split('\n').filter((l: string) => l.trim() !== '')
+                const longestLine = textLines.reduce((a: string, b: string) => a.length > b.length ? a : b, '')
+                const estW        = Math.max(fs * 1.5, longestLine.length * fs * 0.52)
+                const estH        = lineHeight * Math.max(1, textLines.length)
+ 
+                const halign: number = (tx as any).halign ?? 0
+                const valign: number = (tx as any).valign ?? 1
+ 
+                let offsetX = 0
+                if (halign === 1)      offsetX = -estW / 2
+                else if (halign === 2) offsetX = -estW
+ 
+                let offsetY = 0
+                if (valign === 3)      offsetY = 0
+                else if (valign === 2) offsetY = -estH / 2
+                else                   offsetY = -estH
+ 
+                // Convert canvas-local → screen coordinates.
+                // We ignore rotation here: the textarea is a DOM element and
+                // can't be CSS-rotated without breaking input handling, so we
+                // place it at the unrotated position.  Close enough for editing.
+                const screenX = (lxRaw + offsetX) * zoom + pos.x
+                const screenY = (lyRaw + offsetY) * zoom + pos.y
+ 
                 const commitEdit = () => {
                   const val = editingTextValue.trim()
-                  if (val) setPlanDoc(prev => ({
-                    ...prev, texts: prev.texts.map(t => {
-                      if (t.handle !== editingTextHandle) return t
-                      // Preserve the auto-calculated size line if present
-                      const sizeLine = t.text.includes('\n') ? '\n' + t.text.split('\n').slice(1).join('\n') : ''
-                      return { ...t, text: val + sizeLine }
-                    })
-                  }))
+                  if (val) {
+                    setPlanDoc(prev => ({
+                      ...prev,
+                      texts: prev.texts.map(t => {
+                        if (t.handle !== editingTextHandle) return t
+                        // Preserve any auto-calculated second line (room dimensions etc.)
+                        const sizeLine = t.text.includes('\n')
+                          ? '\n' + t.text.split('\n').slice(1).join('\n')
+                          : ''
+                        return { ...t, text: val + sizeLine }
+                      }),
+                    }))
+                  }
                   setEditingTextHandle(null)
                 }
+ 
                 return (
                   <textarea
                     key={editingTextHandle}
                     autoFocus
                     value={editingTextValue}
-                    rows={editingTextValue.split('\n').length || 1}
+                    rows={Math.max(1, editingTextValue.split('\n').length)}
                     onChange={e => setEditingTextValue(e.target.value)}
                     onBlur={commitEdit}
                     onKeyDown={e => {
@@ -3402,28 +3585,29 @@ function DxfJsonViewPageInner() {
                       if (e.key === 'Escape') { setEditingTextHandle(null) }
                     }}
                     style={{
-                      position: 'absolute',
-                      left: screenX,
-                      top: screenY,
-                      minWidth: Math.max(80, fs * zoom * 4),
-                      fontSize: fs * zoom,
-                      fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
-                      fontWeight: '600',
-                      color: '#f59e0b',
-                      background: 'rgba(255,255,255,0.92)',
-                      border: '1.5px solid #f59e0b',
+                      position:     'absolute',
+                      left:         screenX,
+                      top:          screenY,
+                      minWidth:     Math.max(80, estW * zoom),
+                      fontSize:     fs * zoom,
+                      fontFamily:   "'Arial', system-ui, sans-serif",
+                      fontWeight:   'normal',
+                      color:        '#f59e0b',
+                      background:   'rgba(255,255,255,0.92)',
+                      border:       '1.5px solid #f59e0b',
                       borderRadius: 3,
-                      padding: '1px 4px',
-                      outline: 'none',
-                      resize: 'none',
-                      overflow: 'hidden',
-                      zIndex: 200,
-                      lineHeight: 1.3,
-                      boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+                      padding:      '1px 4px',
+                      outline:      'none',
+                      resize:       'none',
+                      overflow:     'hidden',
+                      zIndex:       200,
+                      lineHeight:   1.35,
+                      boxShadow:    '0 2px 8px rgba(0,0,0,0.15)',
                     }}
                   />
                 )
               })()}
+ 
             </div>
           </div>
         </main>
