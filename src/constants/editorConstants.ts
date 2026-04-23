@@ -128,7 +128,7 @@ export const SNAP_TH = 0.15
 export const SNAP_LINE_TH = 0.25
 
 /* ─── Handle & UI Sizes ────────────────────────────────────────────────────────── */
-export const HP_SCR = 7  // Handle point screen radius
+export const HP_SCR = 5  // Handle point screen radius
 
 /* ─── Room Fill Colors ─────────────────────────────────────────────────────────── */
 export const ROOM_COLORS = [

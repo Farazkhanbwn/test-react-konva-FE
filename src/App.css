@@ -930,8 +930,8 @@
 
 /* Left rail */
 .dxf-left-rail {
-  width: 220px;
-  min-width: 200px;
+  width: 195px;
+  min-width: 175px;
   background: #1a1a1a;
   border-right: 1px solid #2a2a2a;
   padding: 0.75rem;
@@ -1399,7 +1399,7 @@ button.dxf-furn-palette-item.active {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  padding: 12px 12px 16px;
+  padding: 4px 4px 6px;
   overflow: hidden;
   background: #161616;
 }
@@ -1409,6 +1409,7 @@ button.dxf-furn-palette-item.active {
   flex: 1;
   width: 100%;
   min-height: 0;
+  height: calc(100vh - 160px);
   position: relative;
   touch-action: none;
 }
@@ -1417,6 +1418,7 @@ button.dxf-furn-palette-item.active {
   display: block;
   vertical-align: top;
   border-radius: 4px;
+  background: #ffffff;
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.06),
     0 12px 40px rgba(0, 0, 0, 0.55);
@@ -1424,8 +1426,8 @@ button.dxf-furn-palette-item.active {
 
 /* Right rail — properties */
 .dxf-right-rail {
-  width: 260px;
-  min-width: 220px;
+  width: 230px;
+  min-width: 200px;
   background: #1a1a1a;
   border-left: 1px solid #2a2a2a;
   padding: 0.75rem;

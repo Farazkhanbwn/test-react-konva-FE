@@ -69,6 +69,8 @@ export interface WallSeg {
   layer?: string
   /** ACI / true-colour override from the source entity. */
   color?: number | string | null
+  /** Optional bezier curve: the user-dragged midpoint that defines the curve. */
+  curveMidPt?: { x: number; y: number }
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -402,7 +404,7 @@ function renderEllipse(el: DxfEllipse): RenderEllipse {
   const ry = rx * el.ratio
   const rotation = Math.atan2(el.major_axis.y, el.major_axis.x) * (180 / Math.PI)
   return {
-    id: `el-${el.handle}`,
+    id: el.handle,  // handle is already prefixed `el-{li}-{cx}-{cy}` by the compact parser
     kind: 'ellipse',
     layer: el.layer,
     color: el.color,

@@ -810,11 +810,12 @@ function _parseSPEntryV5(
 function _parseELEntryV5(
   entry: number[],
   layers: Array<{ name: string; _hex?: string }>,
+  idx: number,
 ): DxfEllipse {
   const [li, cx, cy, mAx, mAy, ratio, sp, ep] = entry;
   return {
     entity_type: "ELLIPSE",
-    handle: `el-${li}-${Math.round(cx)}-${Math.round(cy)}`,
+    handle: `el-${idx}-${li}-${Math.round(cx)}-${Math.round(cy)}`,
     layer: layers[li]?.name ?? "0",
     center: { x: cx, y: cy, z: 0 },
     major_axis: { x: mAx, y: mAy, z: 0 },
@@ -1076,8 +1077,8 @@ function _convertCompact(raw: any): DxfJsonDocument {
   // ── Ellipses (EL) ─────────────────────────────────────────────────────────
   const ellipses: DxfEllipse[] = [];
   if (Array.isArray(data.EL)) {
-    (data.EL as any[][]).forEach((entry) => {
-      const el = _parseELEntryV5(entry, parsedLayers);
+    (data.EL as any[][]).forEach((entry, idx) => {
+      const el = _parseELEntryV5(entry, parsedLayers, idx);
       if (el) ellipses.push(el); // null = degenerate ellipse, skip
     });
   }
