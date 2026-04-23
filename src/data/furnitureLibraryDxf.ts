@@ -493,7 +493,7 @@ export function deriveFurnitureLinesFromInserts(inserts: DxfInsert[]): DxfLine[]
  * Build furniture lines from a library template id for drag-and-drop placement.
  * Handles use a timestamp-based group id so each drop forms its own group.
  */
-export function buildFurnitureLinesFromLibraryId(id: string, worldX: number, worldY: number): DxfLine[] {
+export function buildFurnitureLinesFromLibraryId(id: string, worldX: number, worldY: number, scale = 1): DxfLine[] {
   const tpl = byId.get(id)
   if (!tpl) return []
   const groupId = Date.now()
@@ -501,8 +501,8 @@ export function buildFurnitureLinesFromLibraryId(id: string, worldX: number, wor
     entity_type: 'LINE' as const,
     handle: `furn-${groupId}-${idx}`,
     layer: tpl.layer,
-    start: { x: worldX + line.start.x, y: worldY + line.start.y, z: 0 },
-    end:   { x: worldX + line.end.x,   y: worldY + line.end.y,   z: 0 },
+    start: { x: worldX + line.start.x * scale, y: worldY + line.start.y * scale, z: 0 },
+    end:   { x: worldX + line.end.x * scale,   y: worldY + line.end.y * scale,   z: 0 },
   }))
 }
 

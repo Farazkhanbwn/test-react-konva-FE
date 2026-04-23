@@ -94,10 +94,10 @@ import type {
 } from '@/types/editorTypes'
 
 function resolveEntityColor(
-  color:         number | string | null | undefined,
-  layer:         string,
+  color: number | string | null | undefined,
+  layer: string,
   layerColorMap: Map<string, string>,
-  fallback:      string,
+  fallback: string,
 ): string {
   if (typeof color === 'string' && color.startsWith('#')) return color
   if (typeof color === 'number' && color !== 256 && color > 0 && color < 256)
@@ -138,7 +138,7 @@ function buildDocFromWalls(doc: DxfJsonDocument, walls: WallSeg[]): DxfJsonDocum
     handle: w.id.replace(/^ln-/, ''),
     layer: '0',
     start: { x: w.start.x, y: w.start.y, z: 0 },
-    end:   { x: w.end.x,   y: w.end.y,   z: 0 },
+    end: { x: w.end.x, y: w.end.y, z: 0 },
   }))
 
   const polylines: DxfPolyline[] = [...grouped.entries()].map(([gid, segs]) => {
@@ -183,42 +183,42 @@ function docToDxfString(doc: DxfJsonDocument): string {
 
   const n = (v: number) => v.toFixed(8)
 
-  const H_BLOCK_REC_TABLE  = '1'
-  const H_LAYER_TABLE      = '2'
-  const H_STYLE_TABLE      = '3'
-  const H_LTYPE_TABLE      = '5'
-  const H_VIEW_TABLE       = '6'
-  const H_UCS_TABLE        = '7'
-  const H_VPORT_TABLE      = '8'
-  const H_APPID_TABLE      = '9'
-  const H_DIMSTYLE_TABLE   = 'A'
-  const H_ROOT_DICT        = 'C'
-  const H_LAYER_0          = '10'
-  const H_LTYPE_BYBLOCK    = '14'
-  const H_LTYPE_BYLAYER    = '15'
+  const H_BLOCK_REC_TABLE = '1'
+  const H_LAYER_TABLE = '2'
+  const H_STYLE_TABLE = '3'
+  const H_LTYPE_TABLE = '5'
+  const H_VIEW_TABLE = '6'
+  const H_UCS_TABLE = '7'
+  const H_VPORT_TABLE = '8'
+  const H_APPID_TABLE = '9'
+  const H_DIMSTYLE_TABLE = 'A'
+  const H_ROOT_DICT = 'C'
+  const H_LAYER_0 = '10'
+  const H_LTYPE_BYBLOCK = '14'
+  const H_LTYPE_BYLAYER = '15'
   const H_LTYPE_CONTINUOUS = '16'
-  const H_DIMSTYLE_STD     = '27'
-  const H_STYLE_STD        = '11'
-  const H_APPID_ACAD       = '12'
-  const H_VPORT_ACTIVE     = '94'
-  const H_MS_BLOCK_REC     = '1F'
-  const H_MS_BLOCK         = '20'
-  const H_MS_ENDBLK        = '21'
-  const H_MS_LAYOUT        = '22'
-  const H_PS_BLOCK_REC     = '58'
-  const H_PS_BLOCK         = '5A'
-  const H_PS_ENDBLK        = '5B'
-  const H_PS_LAYOUT        = '59'
+  const H_DIMSTYLE_STD = '27'
+  const H_STYLE_STD = '11'
+  const H_APPID_ACAD = '12'
+  const H_VPORT_ACTIVE = '94'
+  const H_MS_BLOCK_REC = '1F'
+  const H_MS_BLOCK = '20'
+  const H_MS_ENDBLK = '21'
+  const H_MS_LAYOUT = '22'
+  const H_PS_BLOCK_REC = '58'
+  const H_PS_BLOCK = '5A'
+  const H_PS_ENDBLK = '5B'
+  const H_PS_LAYOUT = '59'
 
   let handleSeed = 0x300
   const nextH = () => (handleSeed++).toString(16).toUpperCase()
 
   const layerSet = new Set<string>()
-  for (const ln of doc.lines ?? [])              layerSet.add(ln.layer || '0')
-  for (const ln of doc.furniture_lines ?? [])    layerSet.add(ln.layer || '0')
+  for (const ln of doc.lines ?? []) layerSet.add(ln.layer || '0')
+  for (const ln of doc.furniture_lines ?? []) layerSet.add(ln.layer || '0')
   for (const pl of doc.polylines ?? []) layerSet.add(pl.layer || '0')
-  for (const tx of doc.texts ?? [])     layerSet.add(tx.layer || '0')
-  for (const ar of doc.arcs ?? [])      layerSet.add(ar.layer || '0')
+  for (const tx of doc.texts ?? []) layerSet.add(tx.layer || '0')
+  for (const ar of doc.arcs ?? []) layerSet.add(ar.layer || '0')
   layerSet.add('0')
   const layers = [...layerSet].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
 
@@ -229,22 +229,22 @@ function docToDxfString(doc: DxfJsonDocument): string {
   const vHeight = Math.max(1, extmax[1] - extmin[1])
 
   push(0, 'SECTION'); push(2, 'HEADER')
-  push(9, '$ACADVER');   push(1, 'AC1015')
-  push(9, '$INSUNITS');  push(70, 6)
-  push(9, '$INSBASE');   push(10, 0); push(20, 0); push(30, 0)
-  push(9, '$EXTMIN');    push(10, n(extmin[0])); push(20, n(extmin[1])); push(30, '0.0')
-  push(9, '$EXTMAX');    push(10, n(extmax[0])); push(20, n(extmax[1])); push(30, '0.0')
-  push(9, '$LIMMIN');    push(10, 0); push(20, 0)
-  push(9, '$LIMMAX');    push(10, 50); push(20, 50)
+  push(9, '$ACADVER'); push(1, 'AC1015')
+  push(9, '$INSUNITS'); push(70, 6)
+  push(9, '$INSBASE'); push(10, 0); push(20, 0); push(30, 0)
+  push(9, '$EXTMIN'); push(10, n(extmin[0])); push(20, n(extmin[1])); push(30, '0.0')
+  push(9, '$EXTMAX'); push(10, n(extmax[0])); push(20, n(extmax[1])); push(30, '0.0')
+  push(9, '$LIMMIN'); push(10, 0); push(20, 0)
+  push(9, '$LIMMAX'); push(10, 50); push(20, 50)
   push(9, '$ORTHOMODE'); push(70, 0)
-  push(9, '$LTSCALE');   push(40, '1.0')
-  push(9, '$TEXTSIZE');  push(40, '0.2')
+  push(9, '$LTSCALE'); push(40, '1.0')
+  push(9, '$TEXTSIZE'); push(40, '0.2')
   push(9, '$TEXTSTYLE'); push(7, 'Standard')
-  push(9, '$CLAYER');    push(8, '0')
-  push(9, '$CELTYPE');   push(6, 'ByLayer')
-  push(9, '$CECOLOR');   push(62, 256)
-  push(9, '$DIMSCALE');  push(40, '1.0')
-  push(9, '$DIMSTYLE');  push(2, 'Standard')
+  push(9, '$CLAYER'); push(8, '0')
+  push(9, '$CELTYPE'); push(6, 'ByLayer')
+  push(9, '$CECOLOR'); push(62, 256)
+  push(9, '$DIMSCALE'); push(40, '1.0')
+  push(9, '$DIMSTYLE'); push(2, 'Standard')
   push(0, 'ENDSEC')
 
   push(0, 'SECTION'); push(2, 'TABLES')
@@ -357,7 +357,7 @@ function docToDxfString(doc: DxfJsonDocument): string {
     push(100, 'AcDbEntity'); push(8, ln.layer || '0')
     push(100, 'AcDbLine')
     push(10, n(ln.start.x)); push(20, n(ln.start.y)); push(30, n(ln.start.z ?? 0))
-    push(11, n(ln.end.x));   push(21, n(ln.end.y));   push(31, n(ln.end.z ?? 0))
+    push(11, n(ln.end.x)); push(21, n(ln.end.y)); push(31, n(ln.end.z ?? 0))
   }
 
   for (const ln of doc.furniture_lines ?? []) {
@@ -366,7 +366,7 @@ function docToDxfString(doc: DxfJsonDocument): string {
     push(100, 'AcDbEntity'); push(8, ln.layer || '0')
     push(100, 'AcDbLine')
     push(10, n(ln.start.x)); push(20, n(ln.start.y)); push(30, n(ln.start.z ?? 0))
-    push(11, n(ln.end.x));   push(21, n(ln.end.y));   push(31, n(ln.end.z ?? 0))
+    push(11, n(ln.end.x)); push(21, n(ln.end.y)); push(31, n(ln.end.z ?? 0))
   }
 
   for (const ar of doc.arcs ?? []) {
@@ -462,16 +462,16 @@ function DxfJsonViewPageInner() {
     return () => ro.disconnect()
   }, [])
 
-  const [walls, setWalls]         = useState<WallSeg[]>(() => wallsFromDxfJson(DXF_JSON_DATA))
+  const [walls, setWalls] = useState<WallSeg[]>(() => wallsFromDxfJson(DXF_JSON_DATA))
 
-const t = useMemo(
-  () => buildTransform(displayDoc.meta.extmin, displayDoc.meta.extmax, stageSize.w, stageSize.h, 1),
-  [displayDoc.meta.extmin, displayDoc.meta.extmax, stageSize.w, stageSize.h],
-)
+  const t = useMemo(
+    () => buildTransform(displayDoc.meta.extmin, displayDoc.meta.extmax, stageSize.w, stageSize.h, 10),
+    [displayDoc.meta.extmin, displayDoc.meta.extmax, stageSize.w, stageSize.h],
+  )
 
-  const [history, setHistory]     = useState<EditorSnapshot[]>([])
-  const [zoom, setZoom]           = useState(1)
-  const [pos, setPos]             = useState({ x: 0, y: 0 })
+  const [history, setHistory] = useState<EditorSnapshot[]>([])
+  const [zoom, setZoom] = useState(1)
+  const [pos, setPos] = useState({ x: 0, y: 0 })
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [isRubberBanding, setIsRubberBanding] = useState(false)
   const selectionBoxRef = useRef<{ start: Pt; current: Pt } | null>(null)
@@ -487,23 +487,23 @@ const t = useMemo(
   const [polylineDraft, setPolylineDraft] = useState<Pt[]>([])
   const [polylineHover, setPolylineHover] = useState<Pt | null>(null)
   const polylineDraftRef = useRef<Pt[]>([])
-  const finishPolylineRef = useRef<() => void>(() => {})
+  const finishPolylineRef = useRef<() => void>(() => { })
   const [polylineClosed, setPolylineClosed] = useState(false)
   const textHeightDragRef = useRef<{ handle: string; startH: number; startPointerWy: number } | null>(null)
   const [snapEnabled, setSnapEnabled] = useState(true)
   const [orthoEnabled, setOrthoEnabled] = useState(false)
-  const [showDetail, setShowDetail]   = useState(true)
-  const [showLabels, setShowLabels]           = useState(true)
+  const [showDetail, setShowDetail] = useState(true)
+  const [showLabels, setShowLabels] = useState(true)
   const [showFurnitureLabels, setShowFurnitureLabels] = useState(true)
   const [selectedArcHandle, setSelectedArcHandle] = useState<string | null>(null)
-  const [selectedWinKey, setSelectedWinKey]       = useState<string | null>(null)
-  const [selectedFurnKey, setSelectedFurnKey]     = useState<string | null>(null)
-  const [selectedGroupId, setSelectedGroupId]     = useState<number | null>(null)
+  const [selectedWinKey, setSelectedWinKey] = useState<string | null>(null)
+  const [selectedFurnKey, setSelectedFurnKey] = useState<string | null>(null)
+  const [selectedGroupId, setSelectedGroupId] = useState<number | null>(null)
 
-  const [arcDraftCenter,     setArcDraftCenter]     = useState<Pt | null>(null)
-  const [arcDraftRadius,     setArcDraftRadius]     = useState<number | null>(null)
+  const [arcDraftCenter, setArcDraftCenter] = useState<Pt | null>(null)
+  const [arcDraftRadius, setArcDraftRadius] = useState<number | null>(null)
   const [arcDraftStartAngle, setArcDraftStartAngle] = useState<number | null>(null)
-  const [circleDraftCenter,  setCircleDraftCenter]  = useState<Pt | null>(null)
+  const [circleDraftCenter, setCircleDraftCenter] = useState<Pt | null>(null)
   const [shapePointer, setShapePointer] = useState<Pt | null>(null)
 
   const [hoveredGroupId, setHoveredGroupId] = useState<string | null>(null)
@@ -516,9 +516,9 @@ const t = useMemo(
   const [strokeHex, setStrokeHex] = useState('#474747')
   const [strokeScale, setStrokeScale] = useState(1)
 
-  const [snapTarget, setSnapTarget]   = useState<Pt | null>(null)
-  const [snapTargetType, setSnapTargetType] = useState<'endpoint'|'midpoint'|'arcCenter'|'arcQuadrant'|null>(null)
-  const [alignGuides, setAlignGuides] = useState<Array<{type:'h'|'v', coord: number}>>([])
+  const [snapTarget, setSnapTarget] = useState<Pt | null>(null)
+  const [snapTargetType, setSnapTargetType] = useState<'endpoint' | 'midpoint' | 'arcCenter' | 'arcQuadrant' | null>(null)
+  const [alignGuides, setAlignGuides] = useState<Array<{ type: 'h' | 'v', coord: number }>>([])
   const snapLineWallRef = useRef<{ wallId: string; t: number } | null>(null)
   const [isDraggingEp, setIsDraggingEp] = useState(false)
   const [spaceHeld, setSpaceHeld] = useState(false)
@@ -564,12 +564,12 @@ const t = useMemo(
   }, [canvasGroups])
 
   interface ActiveDrag {
-    wallId:    string
+    wallId: string
     toMoveWallIds: string[]
     toMoveTextIds: string[]
     toMoveArcHandles: string[]
-    initWX:    number
-    initWY:    number
+    initWX: number
+    initWY: number
   }
   interface ActivePolylineDrag {
     polyHandle: string
@@ -580,15 +580,15 @@ const t = useMemo(
   }
   const activeDragRef = useRef<ActiveDrag | null>(null)
   const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null)
-  const [dragDelta, setDragDelta]   = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
+  const [dragDelta, setDragDelta] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
   const dragDeltaRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
   // liveDragDelta is pumped per RAF frame — drives arc/door-line positions during wall drag
   // without re-triggering wallsBase memoization (walls move imperatively via dragGroupRef)
   const [liveDragDelta, setLiveDragDelta] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 })
   const liveDragRafRef = useRef<number>(0)
   const dragGroupRef = useRef<Konva.Group>(null)
- const selBeforeMouseDown = useRef<Set<string>>(new Set())
-const didDragRef = useRef(false)
+  const selBeforeMouseDown = useRef<Set<string>>(new Set())
+  const didDragRef = useRef(false)
   const draggingEpInfo = useRef<{ wallId: string; ep: 'start' | 'end' } | null>(null)
 
   const rotationDragRef = useRef<RotationDrag | null>(null)
@@ -660,8 +660,8 @@ const didDragRef = useRef(false)
       const { textHandles, initBBox } = resizeDrag
       const origW = initBBox.maxWX - initBBox.minWX || 1e-9
       const origH = initBBox.maxWY - initBBox.minWY || 1e-9
-      const newW  = resizePreview.maxWX - resizePreview.minWX
-      const newH  = resizePreview.maxWY - resizePreview.minWY
+      const newW = resizePreview.maxWX - resizePreview.minWX
+      const newH = resizePreview.maxWY - resizePreview.minWY
       const scaleF = Math.sqrt((newW / origW) * (newH / origH))
       const tSet = new Set(textHandles)
       texts = texts.map(tx => {
@@ -694,8 +694,8 @@ const didDragRef = useRef(false)
       const { arcHandles, initBBox } = resizeDrag
       const origW = initBBox.maxWX - initBBox.minWX || 1e-9
       const origH = initBBox.maxWY - initBBox.minWY || 1e-9
-      const newW  = resizePreview.maxWX - resizePreview.minWX
-      const newH  = resizePreview.maxWY - resizePreview.minWY
+      const newW = resizePreview.maxWX - resizePreview.minWX
+      const newH = resizePreview.maxWY - resizePreview.minWY
       const scaleF = Math.sqrt((newW / origW) * (newH / origH))
       const aSet = new Set(arcHandles)
       arcs = arcs.map(a => {
@@ -732,8 +732,8 @@ const didDragRef = useRef(false)
       const { initBBox } = resizeDrag
       const origW = initBBox.maxWX - initBBox.minWX || 1e-9
       const origH = initBBox.maxWY - initBBox.minWY || 1e-9
-      const newW  = resizePreview.maxWX - resizePreview.minWX
-      const newH  = resizePreview.maxWY - resizePreview.minWY
+      const newW = resizePreview.maxWX - resizePreview.minWX
+      const newH = resizePreview.maxWY - resizePreview.minWY
       const scaleX = (x: number) => resizePreview.minWX + (x - initBBox.minWX) / origW * newW
       const scaleY = (y: number) => resizePreview.minWY + (y - initBBox.minWY) / origH * newH
       const dflPrefixes = resizeDrag.arcHandles.map(h => `dfl-${arcKey(h)}`)
@@ -757,8 +757,8 @@ const didDragRef = useRef(false)
       const { initBBox } = resizeDrag
       const origW2 = initBBox.maxWX - initBBox.minWX || 1e-9
       const origH2 = initBBox.maxWY - initBBox.minWY || 1e-9
-      const newW2  = resizePreview.maxWX - resizePreview.minWX
-      const newH2  = resizePreview.maxWY - resizePreview.minWY
+      const newW2 = resizePreview.maxWX - resizePreview.minWX
+      const newH2 = resizePreview.maxWY - resizePreview.minWY
       const scaleX2 = (x: number) => resizePreview.minWX + (x - initBBox.minWX) / origW2 * newW2
       const scaleY2 = (y: number) => resizePreview.minWY + (y - initBBox.minWY) / origH2 * newH2
       const pfx = `win-${resizeDrag.winKey}-`
@@ -785,8 +785,8 @@ const didDragRef = useRef(false)
       const { initBBox } = resizeDrag
       const origW = initBBox.maxWX - initBBox.minWX || 1e-9
       const origH = initBBox.maxWY - initBBox.minWY || 1e-9
-      const newW  = resizePreview.maxWX - resizePreview.minWX
-      const newH  = resizePreview.maxWY - resizePreview.minWY
+      const newW = resizePreview.maxWX - resizePreview.minWX
+      const newH = resizePreview.maxWY - resizePreview.minWY
       const scaleX = (x: number) => resizePreview.minWX + (x - initBBox.minWX) / origW * newW
       const scaleY = (y: number) => resizePreview.minWY + (y - initBBox.minWY) / origH * newH
       lines = lines.map(l => {
@@ -845,7 +845,7 @@ const didDragRef = useRef(false)
       return { x, y }
     }
 
-    type SP = { x: number; y: number; type: 'endpoint'|'midpoint'|'arcCenter'|'arcQuadrant' }
+    type SP = { x: number; y: number; type: 'endpoint' | 'midpoint' | 'arcCenter' | 'arcQuadrant' }
     const snapPts: SP[] = []
     for (const w of walls) {
       if (excl.includes(w.id)) continue
@@ -886,7 +886,7 @@ const didDragRef = useRef(false)
     snapLineWallRef.current = null
 
     const ALIGN_TH = SNAP_LINE_TH * 1.8
-    const guides: Array<{type:'h'|'v', coord: number}> = []
+    const guides: Array<{ type: 'h' | 'v', coord: number }> = []
     let ax = x, ay = y
     for (const sp of snapPts) {
       if (Math.abs(sp.x - x) < ALIGN_TH && !guides.some(g => g.type === 'v')) {
@@ -941,7 +941,7 @@ const didDragRef = useRef(false)
       }
       const connected = prev.filter(w => w.id !== moved.id && (
         (Math.abs(w.start.x - pt.x) < SNAP_TH && Math.abs(w.start.y - pt.y) < SNAP_TH) ||
-        (Math.abs(w.end.x   - pt.x) < SNAP_TH && Math.abs(w.end.y   - pt.y) < SNAP_TH)
+        (Math.abs(w.end.x - pt.x) < SNAP_TH && Math.abs(w.end.y - pt.y) < SNAP_TH)
       ))
       if (connected.length === 0) return prev
       const existingGroupIds = new Set<string>([moved, ...connected].map(w => w.groupId).filter(Boolean) as string[])
@@ -1016,8 +1016,8 @@ const didDragRef = useRef(false)
     const arcSet = new Set(rd.arcHandles)
     const origW = rd.initBBox.maxWX - rd.initBBox.minWX || 1e-9
     const origH = rd.initBBox.maxWY - rd.initBBox.minWY || 1e-9
-    const newW  = preview.maxWX - preview.minWX
-    const newH  = preview.maxWY - preview.minWY
+    const newW = preview.maxWX - preview.minWX
+    const newH = preview.maxWY - preview.minWY
     const scaleF = Math.sqrt((newW / origW) * (newH / origH))
     const scalePos = (x: number, y: number) => ({
       x: preview.minWX + (x - rd.initBBox.minWX) / origW * newW,
@@ -1260,20 +1260,20 @@ const didDragRef = useRef(false)
     for (const gid of touchedPolyGroups) {
       walls.filter(w => w.groupId === gid).forEach(w => expandedIds.add(w.id))
     }
-// If exactly one group was touched, also set selectedGroupId
-if (touchedGroupIds.size === 1) {
-  const gid = [...touchedGroupIds][0]
-  setSelectedGroupId(gid)
-  setSelectedId(null); setSelectedRoomIndex(null)
-  setSelectedTextHandle(null); setSelectedArcHandle(null)
-  setSelectedWinKey(null); setSelectedFurnKey(null)
-} else if (touchedGroupIds.size > 1) {
-  setSelectedGroupId(null)
-}
-setSelectedIds(prev => {
-  if (e.evt.ctrlKey || e.evt.metaKey) { const next = new Set(prev); expandedIds.forEach(id => next.add(id)); return next }
-  return expandedIds
-})
+    // If exactly one group was touched, also set selectedGroupId
+    if (touchedGroupIds.size === 1) {
+      const gid = [...touchedGroupIds][0]
+      setSelectedGroupId(gid)
+      setSelectedId(null); setSelectedRoomIndex(null)
+      setSelectedTextHandle(null); setSelectedArcHandle(null)
+      setSelectedWinKey(null); setSelectedFurnKey(null)
+    } else if (touchedGroupIds.size > 1) {
+      setSelectedGroupId(null)
+    }
+    setSelectedIds(prev => {
+      if (e.evt.ctrlKey || e.evt.metaKey) { const next = new Set(prev); expandedIds.forEach(id => next.add(id)); return next }
+      return expandedIds
+    })
   }, [walls, commitRotation, commitResize])
 
   const onMidDragStart = useCallback((_e: Konva.KonvaEventObject<MouseEvent>, targetId: string, currentSel: Set<string>) => {
@@ -1327,7 +1327,7 @@ setSelectedIds(prev => {
         return { ...l, start: { ...l.start, x: l.start.x + delta.dx, y: l.start.y + delta.dy }, end: { ...l.end, x: l.end.x + delta.dx, y: l.end.y + delta.dy } }
       }),
     }))
-     const _finalDelta = dragDeltaRef.current
+    const _finalDelta = dragDeltaRef.current
     if (Math.abs(_finalDelta.dx) > 0.02 || Math.abs(_finalDelta.dy) > 0.02) {
       didDragRef.current = true
     }
@@ -1567,10 +1567,10 @@ setSelectedIds(prev => {
     () => activeDrag ? new Set(activeDrag.toMoveWallIds) : new Set<string>(),
     [activeDrag],
   )
-    const visWalls = useMemo(
-     () => showDetail ? walls : walls.filter(w => !w.isDetail || wallIdToGroupId.has(w.id)),
-     [walls, showDetail, wallIdToGroupId]
-   )
+  const visWalls = useMemo(
+    () => showDetail ? walls : walls.filter(w => !w.isDetail || wallIdToGroupId.has(w.id)),
+    [walls, showDetail, wallIdToGroupId]
+  )
 
   const gridLines = useMemo(() => {
     const sw = stageSize.w, sh = stageSize.h
@@ -1581,7 +1581,7 @@ setSelectedIds(prev => {
   }, [stageSize.w, stageSize.h])
 
   const formatArea = useCallback((m2: number) => {
-    if (units === 'm')  return `${Math.abs(m2).toFixed(2)} m²`
+    if (units === 'm') return `${Math.abs(m2).toFixed(2)} m²`
     if (units === 'cm') return `${(Math.abs(m2) * 10000).toFixed(0)} cm²`
     return `${(Math.abs(m2) * 1e6).toFixed(0)} mm²`
   }, [units])
@@ -1683,8 +1683,8 @@ setSelectedIds(prev => {
   }, [worldSelBounds])
 
   const fmtLen = useCallback((m: number) => {
-    if (units === 'cm')  return `${(m * 100).toFixed(2)} cm`
-    if (units === 'mm')  return `${(m * 1000).toFixed(0)} mm`
+    if (units === 'cm') return `${(m * 100).toFixed(2)} cm`
+    if (units === 'mm') return `${(m * 1000).toFixed(0)} mm`
     return `${m.toFixed(2)} m`
   }, [units])
 
@@ -1713,7 +1713,10 @@ setSelectedIds(prev => {
       const roomPayload = e.dataTransfer.getData(ROOM_TEMPLATE_MIME)
       if (roomPayload) {
         const { w, h, label } = JSON.parse(roomPayload) as { id: string; w: number; h: number; label: string }
-        const hw = w / 2, hh = h / 2
+        const docUnitScale = planDoc.meta?.unit_scale ?? 1.0
+        const scaledW = docUnitScale > 0 ? w / docUnitScale : w
+        const scaledH = docUnitScale > 0 ? h / docUnitScale : h
+        const hw = scaledW / 2, hh = scaledH / 2
         snapshot()
         const { next: nextDoc, poly } = appendUserPolyline(
           planDoc,
@@ -1725,7 +1728,6 @@ setSelectedIds(prev => {
           ],
           true,
         )
-        // Add a label text at the centre — handle is linked to the polyline for co-selection/deletion
         const lblHandle = roomLabelHandle(poly.handle)
         const { next: finalDoc } = appendUserText(nextDoc, { x: snapped.x, y: snapped.y }, label, 0.2, lblHandle)
         setPlanDoc(finalDoc)
@@ -1742,7 +1744,22 @@ setSelectedIds(prev => {
       if (!id || !getFurnitureDxfTemplate(id)) return
       snapshot()
       const tmpl = getFurnitureDxfTemplate(id)!
-      const newLines = buildFurnitureLinesFromLibraryId(id, snapped.x, snapped.y)
+
+      // DXF units code → metres-to-world-units scale factor.
+      // Templates are defined in metres; we scale to match the document's native unit.
+      // Codes: 1=inches, 2=feet, 4=mm, 5=cm, 6=metres, 0/unset=unitless (treat as mm).
+      const dxfUnits = planDoc.meta?.units ?? 0
+      const metreToWorldUnit: Record<number, number> = {
+        0: 1000,    // unitless → assume mm
+        1: 39.3701, // inches
+        2: 3.28084, // feet
+        4: 1000,    // mm
+        5: 100,     // cm
+        6: 1,       // metres
+      }
+      const furnitureScale = 1 / (planDoc.meta?.unit_scale ?? 1.0)
+
+      const newLines = buildFurnitureLinesFromLibraryId(id, snapped.x, snapped.y, furnitureScale)
       if (!newLines.length) return
       const groupSuffix = newLines[0]!.handle.slice('furn-'.length).split('-')[0]
       const syntheticInsert: DxfInsert = {
@@ -2106,9 +2123,9 @@ setSelectedIds(prev => {
             <div className="dxf-tool-cluster">
               {([
                 { id: 'select' as const, label: 'Select' },
-                { id: 'hand'   as const, label: 'Pan' },
-                { id: 'frame'  as const, label: 'Frame' },
-                { id: 'text'   as const, label: 'Text' },
+                { id: 'hand' as const, label: 'Pan' },
+                { id: 'frame' as const, label: 'Frame' },
+                { id: 'text' as const, label: 'Text' },
               ]).map(({ id, label }) => (
                 <button key={id} type="button" title={label} className={`dxf-tool-icon${activeTool === id ? ' active' : ''}`} onClick={() => activateTool(id)}>
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
@@ -2123,10 +2140,10 @@ setSelectedIds(prev => {
             <div className="dxf-tool-sep" aria-hidden />
             <div className="dxf-tool-cluster dxf-draw-tool-cluster">
               {([
-                { id: 'drawLine'     as const, label: 'Line' },
+                { id: 'drawLine' as const, label: 'Line' },
                 { id: 'drawPolyline' as const, label: 'Polyline' },
-                { id: 'drawCircle'   as const, label: 'Circle' },
-                { id: 'drawArc'      as const, label: 'Arc' },
+                { id: 'drawCircle' as const, label: 'Circle' },
+                { id: 'drawArc' as const, label: 'Arc' },
               ]).map(({ id, label }) => (
                 <button key={id} type="button" title={label} className={`dxf-tool-icon dxf-tool-labeled${activeTool === id ? ' active' : ''}`} onClick={() => activateTool(id)}>
                   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
@@ -2194,10 +2211,10 @@ setSelectedIds(prev => {
                   display: 'block',
                   cursor: resizeDrag ? `${resizeDrag.handle}-resize`
                     : (isDraggingEp || rotationDrag) ? 'crosshair'
-                    : (activeTool === 'hand' || spaceHeld) ? 'grab'
-                    : isRubberBanding ? 'default'
-                    : activeTool === 'draw' || activeTool === 'text' ? 'crosshair'
-                    : 'default',
+                      : (activeTool === 'hand' || spaceHeld) ? 'grab'
+                        : isRubberBanding ? 'default'
+                          : activeTool === 'draw' || activeTool === 'text' ? 'crosshair'
+                            : 'default',
                 }}
               >
                 <Layer listening={false}>
@@ -2680,32 +2697,32 @@ setSelectedIds(prev => {
                   {/* Door arcs */}
                   {effectiveArcs.map((arc) => {
                     const isFullCircle = arc.end_angle - arc.start_angle >= 360
-  const isSelArc  = selectedIds.has(arc.handle)
-  const arcKey    = arc.handle.replace(/^arc-/, '')
-  const frameLines = effectiveLines.filter(ln => ln.handle.startsWith(`dfl-${arcKey}`))
-  const arcGid = wallIdToGroupId.get(arc.handle)
-  const arcIsGroupSel = arcGid !== undefined && arcGid === selectedGroupId
-  
-  // ========== ADD THIS BLOCK HERE ==========
-  // Get the group's insert_layer color if available
-  let groupColor: string | null = null
-  if (arcGid !== undefined) {
-    const grp = canvasGroups.find(g => g.id === arcGid)
-    if (grp && grp.insertLayer && grp.insertLayer !== '0') {
-      groupColor = layerColorMap.get(grp.insertLayer) ?? null
-    }
-  }
-  
-  // Determine the final color
-  let finalColor: string
-  if (isSelArc || arcIsGroupSel) {
-    finalColor = '#0073cf'  // Selection color
-  } else if (groupColor && groupColor.toUpperCase() !== '#FFFFFF') {
-    finalColor = groupColor  // Use group's insert_layer color
-  } else {
-    finalColor = resolveExplicitColor(arc.color, arc.layer, layerColorMap, strokeHex)
-  }
-                    const arcColor  = finalColor
+                    const isSelArc = selectedIds.has(arc.handle)
+                    const arcKey = arc.handle.replace(/^arc-/, '')
+                    const frameLines = effectiveLines.filter(ln => ln.handle.startsWith(`dfl-${arcKey}`))
+                    const arcGid = wallIdToGroupId.get(arc.handle)
+                    const arcIsGroupSel = arcGid !== undefined && arcGid === selectedGroupId
+
+                    // ========== ADD THIS BLOCK HERE ==========
+                    // Get the group's insert_layer color if available
+                    let groupColor: string | null = null
+                    if (arcGid !== undefined) {
+                      const grp = canvasGroups.find(g => g.id === arcGid)
+                      if (grp && grp.insertLayer && grp.insertLayer !== '0') {
+                        groupColor = layerColorMap.get(grp.insertLayer) ?? null
+                      }
+                    }
+
+                    // Determine the final color
+                    let finalColor: string
+                    if (isSelArc || arcIsGroupSel) {
+                      finalColor = '#0073cf'  // Selection color
+                    } else if (groupColor && groupColor.toUpperCase() !== '#FFFFFF') {
+                      finalColor = groupColor  // Use group's insert_layer color
+                    } else {
+                      finalColor = resolveExplicitColor(arc.color, arc.layer, layerColorMap, strokeHex)
+                    }
+                    const arcColor = finalColor
                     const sw = 1.5 * strokeScale
                     const [arcCx, arcCy] = toC(arc.center.x, arc.center.y, t)
                     const rCanvas = arc.radius * t.sc
@@ -2729,7 +2746,7 @@ setSelectedIds(prev => {
                           }
                           setSelectedIds(prev => { const next = new Set(isCtrl ? prev : []); if (isSelArc && isCtrl) next.delete(arc.handle); else next.add(arc.handle); return next })
                         }}
-                       onMouseDown={e => {
+                        onMouseDown={e => {
                           if (isDrawingTool) return
                           e.cancelBubble = true
                           if (activeTool !== 'select' || spaceHeld) return
@@ -2784,7 +2801,7 @@ setSelectedIds(prev => {
                               for (const ln of frameLines) {
                                 for (const pt of [ln.start, ln.end]) {
                                   dStart = Math.min(dStart, Math.hypot(sWX - pt.x, sWY - pt.y))
-                                  dEnd   = Math.min(dEnd,   Math.hypot(eWX - pt.x, eWY - pt.y))
+                                  dEnd = Math.min(dEnd, Math.hypot(eWX - pt.x, eWY - pt.y))
                                 }
                               }
                               const panelRad = dEnd < dStart ? eRad : sRad
@@ -2799,24 +2816,24 @@ setSelectedIds(prev => {
                           </>
                         )}
                         {/* Jamb stubs (wall thickness at door opening) */}
-                      {/* Jamb stubs (wall thickness at door opening) */}
-{frameLines.map(ln => {
-  const [x1, y1] = toC(ln.start.x, ln.start.y, t)
-  const [x2, y2] = toC(ln.end.x, ln.end.y, t)
-  
-  // Use the same finalColor for frame lines
-  const frameColor = (isSelArc || arcIsGroupSel)
-    ? '#0073cf'
-    : (groupColor && groupColor.toUpperCase() !== '#FFFFFF'
-        ? groupColor
-        : resolveExplicitColor(ln.color, ln.layer, layerColorMap, strokeHex))
-  
-  return <Line key={ln.handle} points={[x1, y1, x2, y2]} 
-    stroke={frameColor}
-    strokeWidth={sw} lineCap="round"
-    strokeScaleEnabled={false} perfectDrawEnabled={false} listening={false}
-  />
-})}
+                        {/* Jamb stubs (wall thickness at door opening) */}
+                        {frameLines.map(ln => {
+                          const [x1, y1] = toC(ln.start.x, ln.start.y, t)
+                          const [x2, y2] = toC(ln.end.x, ln.end.y, t)
+
+                          // Use the same finalColor for frame lines
+                          const frameColor = (isSelArc || arcIsGroupSel)
+                            ? '#0073cf'
+                            : (groupColor && groupColor.toUpperCase() !== '#FFFFFF'
+                              ? groupColor
+                              : resolveExplicitColor(ln.color, ln.layer, layerColorMap, strokeHex))
+
+                          return <Line key={ln.handle} points={[x1, y1, x2, y2]}
+                            stroke={frameColor}
+                            strokeWidth={sw} lineCap="round"
+                            strokeScaleEnabled={false} perfectDrawEnabled={false} listening={false}
+                          />
+                        })}
                       </Group>
                     )
                   })}
@@ -2827,51 +2844,51 @@ setSelectedIds(prev => {
                     Walls in toMoveSet render inside dragGroupRef which is moved imperatively
                     via Konva x/y during drag — zero React re-renders during drag movement. */}
                 <Layer>{(() => {
-                const renderWall = (wall: WallSeg) => {
-  if (wall.fromArc) return null
-  const [sx, sy] = toC(wall.start.x, wall.start.y, t)
-  const [ex, ey] = toC(wall.end.x, wall.end.y, t)
-  const isSel = selectedIds.has(wall.id)
-  const isDragging = activeDrag?.wallId === wall.id
-  
-  // ========== ADD THIS BLOCK - same pattern as arcs ==========
-  // Get the group's insert_layer color if this wall belongs to a group
-  const wallGid = wallIdToGroupId.get(wall.id)
-  let wallGroupColor: string | null = null
-  if (wallGid !== undefined) {
-    const grp = canvasGroups.find(g => g.id === wallGid)
-    if (grp && grp.insertLayer && grp.insertLayer !== '0') {
-      wallGroupColor = layerColorMap.get(grp.insertLayer) ?? null
-    }
-  }
-  
-  // Determine final color using same priority as arcs
-  let finalWallColor: string
-  if (isSel || (selectedGroupId !== null && wallGid === selectedGroupId)) {
-    finalWallColor = '#0073cf'  // Selection color
-  } else if (wallGroupColor && wallGroupColor.toUpperCase() !== '#FFFFFF') {
-    finalWallColor = wallGroupColor  // Use group's insert_layer color
-  } else {
-    finalWallColor = wall.isDetail 
-      ? '#60a5fa' 
-      : resolveExplicitColor(wall.color, wall.layer ?? '0', layerColorMap, strokeHex)
-  }
-  // ========== END OF ADDED BLOCK ==========
-  
-  const strokeW = (wall.isOuter ? 2.8 : wall.isDetail ? 0.65 : 1.15) * strokeScale
-                  // Bezier control points (canvas coords) for curved walls
-                  const curvePts: number[] | null = wall.curveMidPt ? (() => {
-                    const mx = wall.curveMidPt.x, my = wall.curveMidPt.y
-                    const cpWX = 2 * mx - (wall.start.x + wall.end.x) / 2
-                    const cpWY = 2 * my - (wall.start.y + wall.end.y) / 2
-                    const [cpX, cpY] = toC(cpWX, cpWY, t)
-                    return [sx, sy, cpX, cpY, cpX, cpY, ex, ey]
-                  })() : null
+                  const renderWall = (wall: WallSeg) => {
+                    if (wall.fromArc) return null
+                    const [sx, sy] = toC(wall.start.x, wall.start.y, t)
+                    const [ex, ey] = toC(wall.end.x, wall.end.y, t)
+                    const isSel = selectedIds.has(wall.id)
+                    const isDragging = activeDrag?.wallId === wall.id
+
+                    // ========== ADD THIS BLOCK - same pattern as arcs ==========
+                    // Get the group's insert_layer color if this wall belongs to a group
+                    const wallGid = wallIdToGroupId.get(wall.id)
+                    let wallGroupColor: string | null = null
+                    if (wallGid !== undefined) {
+                      const grp = canvasGroups.find(g => g.id === wallGid)
+                      if (grp && grp.insertLayer && grp.insertLayer !== '0') {
+                        wallGroupColor = layerColorMap.get(grp.insertLayer) ?? null
+                      }
+                    }
+
+                    // Determine final color using same priority as arcs
+                    let finalWallColor: string
+                    if (isSel || (selectedGroupId !== null && wallGid === selectedGroupId)) {
+                      finalWallColor = '#0073cf'  // Selection color
+                    } else if (wallGroupColor && wallGroupColor.toUpperCase() !== '#FFFFFF') {
+                      finalWallColor = wallGroupColor  // Use group's insert_layer color
+                    } else {
+                      finalWallColor = wall.isDetail
+                        ? '#60a5fa'
+                        : resolveExplicitColor(wall.color, wall.layer ?? '0', layerColorMap, strokeHex)
+                    }
+                    // ========== END OF ADDED BLOCK ==========
+
+                    const strokeW = (wall.isOuter ? 2.8 : wall.isDetail ? 0.65 : 1.15) * strokeScale
+                    // Bezier control points (canvas coords) for curved walls
+                    const curvePts: number[] | null = wall.curveMidPt ? (() => {
+                      const mx = wall.curveMidPt.x, my = wall.curveMidPt.y
+                      const cpWX = 2 * mx - (wall.start.x + wall.end.x) / 2
+                      const cpWY = 2 * my - (wall.start.y + wall.end.y) / 2
+                      const [cpX, cpY] = toC(cpWX, cpWY, t)
+                      return [sx, sy, cpX, cpY, cpX, cpY, ex, ey]
+                    })() : null
                     return (
                       <Group key={wall.id}>
                         <Line points={curvePts ?? [sx, sy, ex, ey]} bezier={!!curvePts} stroke="transparent" strokeWidth={16}
                           strokeScaleEnabled={false}
-                         onMouseDown={e => {
+                          onMouseDown={e => {
                             if (isDrawingTool) return
                             e.cancelBubble = true
                             didDragRef.current = false
@@ -3005,7 +3022,7 @@ setSelectedIds(prev => {
                                     const [wx2, wy2] = toW(node.x(), node.y(), t)
                                     setWalls(prev => prev.map(w => w.id === wall.id ? { ...w, curveMidPt: { x: wx2, y: wy2 } } : w))
                                   }}
-                                  onDragEnd={() => {}}
+                                  onDragEnd={() => { }}
                                   onDblClick={() => {
                                     snapshot()
                                     setWalls(prev => prev.map(w => w.id === wall.id ? { ...w, curveMidPt: undefined } : w))
@@ -3320,7 +3337,7 @@ setSelectedIds(prev => {
                   dimW = Math.abs(mxX - mnX); dimH = Math.abs(mxY - mnY)
                 }
                 const DIM_OFFSET = 22 / zoom, TICK = 5 / zoom, ARROW_SZ = 6 / zoom, FS = 11 / zoom, SW = 1 / zoom
-                const DASH = `${5/zoom},${3/zoom}`
+                const DASH = `${5 / zoom},${3 / zoom}`
                 const wDimY = rY + rH + DIM_OFFSET, wMidX = rX + rW / 2
                 const hDimX = rX + rW + DIM_OFFSET, hMidY = rY + rH / 2
                 const arrowPath = (tipX: number, tipY: number, fromX: number, fromY: number) => {
@@ -3362,12 +3379,14 @@ setSelectedIds(prev => {
                 const screenY = (ly - fs) * zoom + pos.y
                 const commitEdit = () => {
                   const val = editingTextValue.trim()
-                  if (val) setPlanDoc(prev => ({ ...prev, texts: prev.texts.map(t => {
-                    if (t.handle !== editingTextHandle) return t
-                    // Preserve the auto-calculated size line if present
-                    const sizeLine = t.text.includes('\n') ? '\n' + t.text.split('\n').slice(1).join('\n') : ''
-                    return { ...t, text: val + sizeLine }
-                  })}))
+                  if (val) setPlanDoc(prev => ({
+                    ...prev, texts: prev.texts.map(t => {
+                      if (t.handle !== editingTextHandle) return t
+                      // Preserve the auto-calculated size line if present
+                      const sizeLine = t.text.includes('\n') ? '\n' + t.text.split('\n').slice(1).join('\n') : ''
+                      return { ...t, text: val + sizeLine }
+                    })
+                  }))
                   setEditingTextHandle(null)
                 }
                 return (
@@ -3414,7 +3433,7 @@ setSelectedIds(prev => {
             <div className="dxf-prop-label">Add walls</div>
             <p className="dxf-prop-hint">Add LINE, LWPOLYLINE, ARC, or CIRCLE — same entities as the top toolbar.</p>
             <div className="dxf-add-wall-btns">
-              {(['drawLine','drawPolyline','drawCircle','drawArc'] as const).map(id => (
+              {(['drawLine', 'drawPolyline', 'drawCircle', 'drawArc'] as const).map(id => (
                 <button key={id} type="button" className={`dxf-action-btn${activeTool === id ? ' dxf-action-btn-active' : ''}`} onClick={() => activateTool(id)}>
                   {id === 'drawLine' ? 'Line' : id === 'drawPolyline' ? 'Polyline' : id === 'drawCircle' ? 'Circle' : 'Arc'}
                 </button>
@@ -3531,13 +3550,13 @@ setSelectedIds(prev => {
             <div className="dxf-export-btns">
               <button type="button" className="dxf-action-btn dxf-export-btn" onClick={exportPng}>
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                  <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>
+                  <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
                 </svg>
                 PNG
               </button>
               <button type="button" className="dxf-action-btn dxf-export-btn" onClick={exportDxf}>
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="12" y1="18" x2="12" y2="12" /><line x1="9" y1="15" x2="15" y2="15" />
                 </svg>
                 DXF
               </button>
