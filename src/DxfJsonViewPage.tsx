@@ -3,7 +3,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent as ReactDragEvent } from 'react'
-import { Stage, Layer, Line, Text, Group, Rect, Circle } from 'react-konva'
+import { Stage, Layer, Line, Text, Group, Rect, Circle, Shape } from 'react-konva'
 import { Arc as KonvaArc } from 'react-konva'
 import type Konva from 'konva'
 import { Link } from 'react-router-dom'
@@ -438,6 +438,40 @@ function getStageCanvasPointer(stage: Konva.Stage): { x: number; y: number } | n
 
 type T = ReturnType<typeof buildT>
 
+/* ─── Polar Tracking ─────────────────────────────────────────────────────────── */
+const POLAR_ANGLES_DEG = [0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240, 255, 270, 285, 300, 315, 330, 345]
+const POLAR_TH_DEG = 8
+
+function applyPolar(wx: number, wy: number, ax: number, ay: number): { x: number; y: number; angle: number | null } {
+  const dx = wx - ax, dy = wy - ay
+  const dist = Math.hypot(dx, dy)
+  if (dist < 0.001) return { x: wx, y: wy, angle: null }
+  let angDeg = Math.atan2(dy, dx) * 180 / Math.PI
+  if (angDeg < 0) angDeg += 360
+  let nearest: number | null = null, minDiff = POLAR_TH_DEG
+  for (const a of POLAR_ANGLES_DEG) {
+    const diff = Math.min(Math.abs(angDeg - a), 360 - Math.abs(angDeg - a))
+    if (diff < minDiff) { minDiff = diff; nearest = a }
+  }
+  if (nearest !== null) {
+    const rad = nearest * Math.PI / 180
+    return { x: ax + dist * Math.cos(rad), y: ay + dist * Math.sin(rad), angle: nearest }
+  }
+  return { x: wx, y: wy, angle: null }
+}
+
+function segIntersect(p1x: number, p1y: number, p2x: number, p2y: number, p3x: number, p3y: number, p4x: number, p4y: number): { x: number; y: number } | null {
+  const d1x = p2x - p1x, d1y = p2y - p1y
+  const d2x = p4x - p3x, d2y = p4y - p3y
+  const cross = d1x * d2y - d1y * d2x
+  if (Math.abs(cross) < 1e-10) return null
+  const dx = p3x - p1x, dy = p3y - p1y
+  const s = (dx * d2y - dy * d2x) / cross
+  const u = (dx * d1y - dy * d1x) / cross
+  if (s < 0 || s > 1 || u < 0 || u > 1) return null
+  return { x: p1x + s * d1x, y: p1y + s * d1y }
+}
+
 function DxfJsonViewPageInner() {
   const stageRef = useRef<Konva.Stage>(null)
   const canvasHostRef = useRef<HTMLDivElement>(null)
@@ -470,8 +504,10 @@ function DxfJsonViewPageInner() {
   )
 
   const [history, setHistory] = useState<EditorSnapshot[]>([])
-  const [zoom, setZoom] = useState(1)
-  const [pos, setPos] = useState({ x: 0, y: 0 })
+  // zoom and pos are refs, NOT state — pan/zoom never triggers a React re-render.
+  // Konva stage is updated imperatively; React only reads zoomRef.current during other renders.
+  const zoomRef = useRef(1)
+  const posRef = useRef({ x: 0, y: 0 })
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [isRubberBanding, setIsRubberBanding] = useState(false)
   const selectionBoxRef = useRef<{ start: Pt; current: Pt } | null>(null)
@@ -482,10 +518,10 @@ function DxfJsonViewPageInner() {
   const [editingTextHandle, setEditingTextHandle] = useState<string | null>(null)
   const [editingTextValue, setEditingTextValue] = useState<string>('')
   const [drawLineAnchor, setDrawLineAnchor] = useState<Pt | null>(null)
-  const [drawLinePointer, setDrawLinePointer] = useState<Pt | null>(null)
+  const drawLinePointerRef = useRef<Pt | null>(null)
   const drawLineAnchorRef = useRef<Pt | null>(null)
   const [polylineDraft, setPolylineDraft] = useState<Pt[]>([])
-  const [polylineHover, setPolylineHover] = useState<Pt | null>(null)
+  const polylineHoverRef = useRef<Pt | null>(null)
   const polylineDraftRef = useRef<Pt[]>([])
   const finishPolylineRef = useRef<() => void>(() => { })
   const [polylineClosed, setPolylineClosed] = useState(false)
@@ -499,6 +535,7 @@ function DxfJsonViewPageInner() {
   const [selectedWinKey, setSelectedWinKey] = useState<string | null>(null)
   const [selectedFurnKey, setSelectedFurnKey] = useState<string | null>(null)
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(null)
+  const [selectedDimKey, setSelectedDimKey] = useState<string | null>(null)
 
   const [arcDraftCenter, setArcDraftCenter] = useState<Pt | null>(null)
   const [arcDraftRadius, setArcDraftRadius] = useState<number | null>(null)
@@ -516,19 +553,45 @@ function DxfJsonViewPageInner() {
   const [strokeHex, setStrokeHex] = useState('#474747')
   const [strokeScale, setStrokeScale] = useState(1)
 
-  const [snapTarget, setSnapTarget] = useState<Pt | null>(null)
-  const [snapTargetType, setSnapTargetType] = useState<'endpoint' | 'midpoint' | 'arcCenter' | 'arcQuadrant' | null>(null)
-  const [alignGuides, setAlignGuides] = useState<Array<{ type: 'h' | 'v', coord: number }>>([])
+  const snapTargetRef = useRef<Pt | null>(null)
+  const alignGuidesRef = useRef<Array<{ type: 'h' | 'v', coord: number }>>([])
+  const snapLayerRef = useRef<Konva.Layer>(null)
   const snapLineWallRef = useRef<{ wallId: string; t: number } | null>(null)
   const [isDraggingEp, setIsDraggingEp] = useState(false)
   const [spaceHeld, setSpaceHeld] = useState(false)
+  const [polarTrackingEnabled, setPolarTrackingEnabled] = useState(true)
+  const tRef = useRef(t)
+  const stageSizeRef = useRef(stageSize)
+  const activeToolRef = useRef<string>(activeTool)
 
   const [hiddenLayers, setHiddenLayers] = useState<Set<string>>(new Set())
+  const [lockedLayers, setLockedLayers] = useState<Set<string>>(new Set())
 
   const isLayerVisible = useCallback(
     (layer: string) => !hiddenLayers.has(layer),
     [hiddenLayers],
   )
+ 
+  const isLayerLocked = useCallback(
+    (layer: string) => lockedLayers.has(layer),
+    [lockedLayers],
+  )
+ 
+  const ANNOTATION_LAYER_PATTERNS = ['A-Anno', 'A-Flor-LVL', 'A-Flor-Levl', 'Defpoints', 'A-Anno-Text', 'A-Anno-Dims', 'A-Anno-Iden']
+ 
+  const toggleAnnotationLayers = useCallback(() => {
+    const annotationLayers = (planDoc.layers ?? [])
+      .filter(l => ANNOTATION_LAYER_PATTERNS.some(p => l.name.includes(p)))
+      .map(l => l.name)
+    if (annotationLayers.length === 0) return
+    const allLocked = annotationLayers.every(l => lockedLayers.has(l))
+    setLockedLayers(prev => {
+      const next = new Set(prev)
+      if (allLocked) annotationLayers.forEach(l => next.delete(l))
+      else annotationLayers.forEach(l => next.add(l))
+      return next
+    })
+  }, [planDoc.layers, lockedLayers])
 
   const layerColorMap = useMemo(() => {
     const m = new Map<string, string>()
@@ -549,8 +612,8 @@ function DxfJsonViewPageInner() {
     [planDoc],
   )
 
-const HP_SCR = 7
-  const HR = HP_SCR / zoom
+  const HP_SCR = 4
+  const HR = HP_SCR / zoomRef.current
 
   const canvasGroups = useMemo<CanvasGroup[]>(
     () => canvasGroupsFromDxfJson(planDoc, walls),
@@ -594,6 +657,7 @@ const HP_SCR = 7
   const selBeforeMouseDown = useRef<Set<string>>(new Set())
   const didDragRef = useRef(false)
   const draggingEpInfo = useRef<{ wallId: string; ep: 'start' | 'end' } | null>(null)
+  const lastSnapTypeRef = useRef<string | null>(null)
 
   const rotationDragRef = useRef<RotationDrag | null>(null)
   const [rotationDrag, setRotationDrag] = useState<RotationDrag | null>(null)
@@ -790,10 +854,10 @@ const HP_SCR = 7
     return lines
   }, [planDoc.furniture_lines, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
 
-  const roomDetectionWalls = useMemo(
-    () => walls.filter(w => !wallIdToGroupId.has(w.id)),
-    [walls, wallIdToGroupId],
-  )
+const roomDetectionWalls = useMemo(
+  () => walls.filter(w => !wallIdToGroupId.has(w.id) && !w.isHatchLine && !w.isDimLine),
+  [walls, wallIdToGroupId],
+)
 
   const roomsWithWalls = useMemo(() => {
     // Skip expensive DCEL during drag — stale result is fine, rooms update on drag-end
@@ -830,11 +894,12 @@ const HP_SCR = 7
     })
   }, [])
 
-  const getSnap = useCallback((x: number, y: number, excludeIds: string[] | string): Pt => {
+  const getSnap = useCallback((x: number, y: number, excludeIds: string[] | string, anchor?: Pt, skipIntersection = false): Pt => {
     const excl = Array.isArray(excludeIds) ? excludeIds : (excludeIds ? [excludeIds] : [])
     if (!snapEnabled) {
+      lastSnapTypeRef.current = null
       snapLineWallRef.current = null
-      setSnapTargetType(null); setAlignGuides([])
+      alignGuidesRef.current = []
       return { x, y }
     }
 
@@ -854,17 +919,69 @@ const HP_SCR = 7
       }
     }
 
+    // 1. Point snaps: endpoint / midpoint / arcCenter / arcQuadrant
     let best: SP | null = null, bestD = SNAP_TH
     for (const sp of snapPts) {
       const d = Math.hypot(sp.x - x, sp.y - y)
       if (d < bestD) { bestD = d; best = sp }
     }
     if (best) {
+      lastSnapTypeRef.current = best.type
       snapLineWallRef.current = null
-      setSnapTargetType(best.type); setAlignGuides([])
+      alignGuidesRef.current = []
       return { x: best.x, y: best.y }
     }
 
+    // 2. Intersection snap: only when not skipped (e.g. during endpoint drag) and spatially filtered
+    if (!skipIntersection) {
+      let bestIntPt: Pt | null = null, bestIntD = SNAP_TH
+      // Only consider walls whose bounding box is within SNAP_TH of the cursor — avoids O(n²) on whole drawing
+      const near = walls.filter(w => {
+        if (excl.includes(w.id)) return false
+        return (
+          Math.min(w.start.x, w.end.x) - SNAP_TH <= x && x <= Math.max(w.start.x, w.end.x) + SNAP_TH &&
+          Math.min(w.start.y, w.end.y) - SNAP_TH <= y && y <= Math.max(w.start.y, w.end.y) + SNAP_TH
+        )
+      })
+      for (let i = 0; i < near.length; i++) {
+        for (let j = i + 1; j < near.length; j++) {
+          const ip = segIntersect(near[i].start.x, near[i].start.y, near[i].end.x, near[i].end.y, near[j].start.x, near[j].start.y, near[j].end.x, near[j].end.y)
+          if (!ip) continue
+          const d = Math.hypot(ip.x - x, ip.y - y)
+          if (d < bestIntD) { bestIntD = d; bestIntPt = ip }
+        }
+      }
+      if (bestIntPt) {
+        lastSnapTypeRef.current = 'intersection'
+        snapLineWallRef.current = null
+        alignGuidesRef.current = []
+        return bestIntPt
+      }
+    }
+
+    // 3. Perpendicular snap (requires anchor): foot of perpendicular from anchor onto wall
+    if (anchor) {
+      let bestPerpPt: Pt | null = null, bestPerpD = SNAP_TH * 1.5
+      for (const w of walls) {
+        if (excl.includes(w.id)) continue
+        const wdx = w.end.x - w.start.x, wdy = w.end.y - w.start.y
+        const wlen2 = wdx * wdx + wdy * wdy
+        if (wlen2 < 1e-10) continue
+        const tp = ((anchor.x - w.start.x) * wdx + (anchor.y - w.start.y) * wdy) / wlen2
+        if (tp < 0 || tp > 1) continue
+        const pp = { x: w.start.x + tp * wdx, y: w.start.y + tp * wdy }
+        const d = Math.hypot(pp.x - x, pp.y - y)
+        if (d < bestPerpD) { bestPerpD = d; bestPerpPt = pp }
+      }
+      if (bestPerpPt) {
+        lastSnapTypeRef.current = 'perpendicular'
+        snapLineWallRef.current = null
+        alignGuidesRef.current = []
+        return bestPerpPt
+      }
+    }
+
+    // 4. On-segment (nearest point) snap
     let bestSeg: { wallId: string; t: number; pt: Pt } | null = null, bestSegD = SNAP_LINE_TH
     for (const w of walls) {
       if (excl.includes(w.id)) continue
@@ -872,44 +989,54 @@ const HP_SCR = 7
       if (t > 0.01 && t < 0.99 && dist < bestSegD) { bestSegD = dist; bestSeg = { wallId: w.id, t, pt } }
     }
     if (bestSeg) {
+      lastSnapTypeRef.current = 'midpoint'
       snapLineWallRef.current = { wallId: bestSeg.wallId, t: bestSeg.t }
-      setSnapTargetType('midpoint'); setAlignGuides([])
+      alignGuidesRef.current = []
       return bestSeg.pt
     }
     snapLineWallRef.current = null
 
+    // 5. Alignment guides (object snap tracking)
     const ALIGN_TH = SNAP_LINE_TH * 1.8
     const guides: Array<{ type: 'h' | 'v', coord: number }> = []
-    let ax = x, ay = y
+    let agx = x, agy = y
     for (const sp of snapPts) {
       if (Math.abs(sp.x - x) < ALIGN_TH && !guides.some(g => g.type === 'v')) {
-        guides.push({ type: 'v', coord: sp.x }); ax = sp.x
+        guides.push({ type: 'v', coord: sp.x }); agx = sp.x
       }
       if (Math.abs(sp.y - y) < ALIGN_TH && !guides.some(g => g.type === 'h')) {
-        guides.push({ type: 'h', coord: sp.y }); ay = sp.y
+        guides.push({ type: 'h', coord: sp.y }); agy = sp.y
       }
     }
     if (guides.length > 0) {
-      setSnapTargetType(null); setAlignGuides(guides)
-      return { x: ax, y: ay }
+      lastSnapTypeRef.current = null
+      alignGuidesRef.current = guides
+      return { x: agx, y: agy }
     }
 
-    setSnapTargetType(null); setAlignGuides([])
+    lastSnapTypeRef.current = null
+    alignGuidesRef.current = []
     return { x, y }
   }, [walls, planDoc.arcs, snapEnabled])
+
+  useEffect(() => { tRef.current = t }, [t])
+  useEffect(() => { stageSizeRef.current = stageSize }, [stageSize])
+  useEffect(() => { activeToolRef.current = activeTool }, [activeTool])
 
   const onEpDragMove = useCallback((e: Konva.KonvaEventObject<DragEvent>, wallId: string, ep: 'start' | 'end') => {
     const node = e.target
     const [rawX, rawY] = toW(node.x(), node.y(), t)
-    const snapped = getSnap(rawX, rawY, [wallId])
+    const snapped = getSnap(rawX, rawY, [wallId], undefined, true)
     const [scx, scy] = toC(snapped.x, snapped.y, t)
     node.x(scx); node.y(scy)
-    setSnapTarget(snapped.x !== rawX || snapped.y !== rawY ? snapped : null)
+    snapTargetRef.current = (snapped.x !== rawX || snapped.y !== rawY) ? snapped : null
+    snapLayerRef.current?.batchDraw()
     setWalls(prev => prev.map(w => w.id !== wallId ? w : { ...w, [ep]: snapped }))
   }, [t, getSnap])
 
   const onEpDragEnd = useCallback(() => {
-    setSnapTarget(null); setSnapTargetType(null); setAlignGuides([])
+    snapTargetRef.current = null; alignGuidesRef.current = []; lastSnapTypeRef.current = null
+    snapLayerRef.current?.batchDraw()
     setIsDraggingEp(false)
     const info = draggingEpInfo.current
     const lineSnap = snapLineWallRef.current
@@ -1084,7 +1211,7 @@ const HP_SCR = 7
     setSelectedGroupId(groupId)
     setSelectedId(null); setSelectedRoomIndex(null)
     setSelectedTextHandle(null); setSelectedArcHandle(null)
-    setSelectedWinKey(null); setSelectedFurnKey(null)
+    setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
     setSelectedIds(prev => {
       const next = addToExisting ? new Set(prev) : new Set<string>()
       grp.wallIds.forEach(id => next.add(id))
@@ -1133,7 +1260,12 @@ const HP_SCR = 7
       let dy = wy - drag.initWY
       if (orthoEnabled) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0 }
       dragDeltaRef.current = { dx, dy }
-      didDragRef.current = true
+      // Only mark as drag if movement exceeds 4 screen pixels — prevents tiny mouse
+      // tremor from suppressing the onClick selection handler.
+      const screenScale = t.sc * (stageRef.current?.scaleX() ?? 1)
+      if (Math.hypot(dx * screenScale, dy * screenScale) > 4) {
+        didDragRef.current = true
+      }
       // Move walls imperatively
       if (dragGroupRef.current) {
         dragGroupRef.current.x(dx * t.sc)
@@ -1165,27 +1297,46 @@ const HP_SCR = 7
       resizePreviewRef.current = nb
       setResizePreview(nb)
     } else if (activeTool === 'drawLine') {
-      const snapped = getSnap(wx, wy, '')
-      if (drawLineAnchorRef.current) setDrawLinePointer(snapped)
-      setSnapTarget(snapped)
-    } else if (activeTool === 'drawPolyline') {
-      const snapped = getSnap(wx, wy, '')
-      if (polylineDraftRef.current.length > 0) {
-        setPolylineHover(snapped)
-      } else {
-        setPolylineHover(null)
+      const anchor = drawLineAnchorRef.current
+      let fx = wx, fy = wy
+      if (anchor && polarTrackingEnabled && !orthoEnabled) {
+        const p = applyPolar(wx, wy, anchor.x, anchor.y)
+        if (p.angle !== null) { fx = p.x; fy = p.y }
       }
-      setSnapTarget(snapped)
+      const snapped = getSnap(fx, fy, '', anchor ?? undefined)
+      if (anchor) drawLinePointerRef.current = snapped
+      snapTargetRef.current = snapped
+      snapLayerRef.current?.batchDraw()
+    } else if (activeTool === 'drawPolyline') {
+      const draft = polylineDraftRef.current
+      const anchor = draft.length > 0 ? draft[draft.length - 1] : null
+      let fx = wx, fy = wy
+      if (anchor && polarTrackingEnabled && !orthoEnabled) {
+        const p = applyPolar(wx, wy, anchor.x, anchor.y)
+        if (p.angle !== null) { fx = p.x; fy = p.y }
+      }
+      const snapped = getSnap(fx, fy, '', anchor ?? undefined)
+      polylineHoverRef.current = draft.length > 0 ? snapped : null
+      snapTargetRef.current = snapped
+      snapLayerRef.current?.batchDraw()
     } else if (activeTool === 'drawArc' || activeTool === 'drawCircle') {
-      const snapped = getSnap(wx, wy, '')
+      const anchor = activeTool === 'drawArc' ? arcDraftCenter : circleDraftCenter
+      let fx = wx, fy = wy
+      if (anchor && polarTrackingEnabled && !orthoEnabled) {
+        const p = applyPolar(wx, wy, anchor.x, anchor.y)
+        if (p.angle !== null) { fx = p.x; fy = p.y }
+      }
+      const snapped = getSnap(fx, fy, '', anchor ?? undefined)
       setShapePointer(snapped)
-      setSnapTarget(snapped)
+      snapTargetRef.current = snapped
+      snapLayerRef.current?.batchDraw()
     } else {
-      // Not in any drawing mode — clear snap indicator
-      if (snapTarget !== null) setSnapTarget(null)
-      if (alignGuides.length > 0) setAlignGuides([])
+      snapTargetRef.current = null
+      alignGuidesRef.current = []
+      lastSnapTypeRef.current = null
+      snapLayerRef.current?.batchDraw()
     }
-  }, [t, orthoEnabled, activeTool, getSnap])
+  }, [t, orthoEnabled, activeTool, getSnap, polarTrackingEnabled, arcDraftCenter, circleDraftCenter])
 
   const onStageMouseUp = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     if (rotationDragRef.current) { commitRotation(); return }
@@ -1208,7 +1359,7 @@ const HP_SCR = 7
         setSelectedIds(new Set())
         setSelectedGroupId(null)
         setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
-        setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null)
+        setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
       }
       return
     }
@@ -1223,12 +1374,42 @@ const HP_SCR = 7
         if (lineIntersectsRect(w.start, w.end, x1, y1, x2, y2)) newlySelected.add(w.id)
       }
     }
+    
+    // For text annotations - only select if fully inside for window selection
     for (const tx of planDoc.texts) {
-      if (tx.position.x >= x1 && tx.position.x <= x2 && tx.position.y >= y1 && tx.position.y <= y2) newlySelected.add(tx.handle)
+      if (!isLayerVisible(tx.layer)) continue
+      const fs = Math.max(5, tx.height * t.sc)
+      const estW = tx.text.length * fs * 0.55
+      const estH = fs * 1.35
+      if (isWindow) {
+        // Window selection: must be fully inside
+        const fullyInside = 
+          tx.position.x >= x1 && tx.position.x <= x2 &&
+          tx.position.y >= y1 && tx.position.y <= y2
+        if (fullyInside) newlySelected.add(tx.handle)
+      } else {
+        // Crossing selection: any intersection
+        const intersects = 
+          (tx.position.x + estW/2) >= x1 && (tx.position.x - estW/2) <= x2 &&
+          (tx.position.y + estH/2) >= y1 && (tx.position.y - estH/2) <= y2
+        if (intersects) newlySelected.add(tx.handle)
+      }
     }
+    
+    // For arcs - if crossing selection, select if center is in box
     for (const a of planDoc.arcs) {
-      if (a.center.x >= x1 && a.center.x <= x2 && a.center.y >= y1 && a.center.y <= y2) newlySelected.add(a.handle)
+      if (isWindow) {
+        if (a.center.x >= x1 && a.center.x <= x2 && a.center.y >= y1 && a.center.y <= y2) {
+          newlySelected.add(a.handle)
+        }
+      } else {
+        if (a.center.x >= x1 - a.radius && a.center.x <= x2 + a.radius &&
+            a.center.y >= y1 - a.radius && a.center.y <= y2 + a.radius) {
+          newlySelected.add(a.handle)
+        }
+      }
     }
+    
     const expandedIds = new Set(newlySelected)
     const touchedGroupIds = new Set<number>()
 
@@ -1258,7 +1439,7 @@ const HP_SCR = 7
       setSelectedGroupId(gid)
       setSelectedId(null); setSelectedRoomIndex(null)
       setSelectedTextHandle(null); setSelectedArcHandle(null)
-      setSelectedWinKey(null); setSelectedFurnKey(null)
+      setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
     } else if (touchedGroupIds.size > 1) {
       setSelectedGroupId(null)
     }
@@ -1308,28 +1489,27 @@ const HP_SCR = 7
     const drag = activeDragRef.current
     if (!drag) return
     const delta = dragDeltaRef.current
-    const aSet = new Set(drag.toMoveArcHandles)
-    const arcKey = (h: string) => h.replace(/^arc-/, '')
-    setWalls(prev => applyDrag(prev, drag, delta))
-    setPlanDoc(prev => ({
-      ...prev,
-      texts: prev.texts.map(tx => new Set(drag.toMoveTextIds).has(tx.handle) ? { ...tx, position: { x: tx.position.x + delta.dx, y: tx.position.y + delta.dy, z: 0 } } : tx),
-      arcs: prev.arcs.map(a => aSet.has(a.handle) ? { ...a, center: { ...a.center, x: a.center.x + delta.dx, y: a.center.y + delta.dy } } : a),
-      door_lines: (prev.door_lines ?? []).map(l => {
-        const belongsToMovedArc = drag.toMoveArcHandles.some(h => l.handle.startsWith(`dfl-${arcKey(h)}`))
-        if (!belongsToMovedArc) return l
-        return { ...l, start: { ...l.start, x: l.start.x + delta.dx, y: l.start.y + delta.dy }, end: { ...l.end, x: l.end.x + delta.dx, y: l.end.y + delta.dy } }
-      }),
-    }))
-    const _finalDelta = dragDeltaRef.current
-    if (Math.abs(_finalDelta.dx) > 0.02 || Math.abs(_finalDelta.dy) > 0.02) {
-      didDragRef.current = true
-    }
-    // Reset all imperatively-moved groups before React state update so nothing flashes at old offset
+    // Always reset imperative group offsets so they snap back to canvas-coord position
     if (dragGroupRef.current) { dragGroupRef.current.x(0); dragGroupRef.current.y(0) }
     for (const h of drag.toMoveArcHandles) {
       const grp = arcGroupRefs.current.get(h)
       if (grp) { grp.x(0); grp.y(0) }
+    }
+    // Skip state updates for pure clicks (zero delta) — avoids an unnecessary re-render
+    if (Math.abs(delta.dx) > 0.001 || Math.abs(delta.dy) > 0.001) {
+      const aSet = new Set(drag.toMoveArcHandles)
+      const arcKey = (h: string) => h.replace(/^arc-/, '')
+      setWalls(prev => applyDrag(prev, drag, delta))
+      setPlanDoc(prev => ({
+        ...prev,
+        texts: prev.texts.map(tx => new Set(drag.toMoveTextIds).has(tx.handle) ? { ...tx, position: { x: tx.position.x + delta.dx, y: tx.position.y + delta.dy, z: 0 } } : tx),
+        arcs: prev.arcs.map(a => aSet.has(a.handle) ? { ...a, center: { ...a.center, x: a.center.x + delta.dx, y: a.center.y + delta.dy } } : a),
+        door_lines: (prev.door_lines ?? []).map(l => {
+          const belongsToMovedArc = drag.toMoveArcHandles.some(h => l.handle.startsWith(`dfl-${arcKey(h)}`))
+          if (!belongsToMovedArc) return l
+          return { ...l, start: { ...l.start, x: l.start.x + delta.dx, y: l.start.y + delta.dy }, end: { ...l.end, x: l.end.x + delta.dx, y: l.end.y + delta.dy } }
+        }),
+      }))
     }
     activeDragRef.current = null; setActiveDrag(null)
     dragDeltaRef.current = { dx: 0, dy: 0 }; setDragDelta({ dx: 0, dy: 0 })
@@ -1467,27 +1647,30 @@ const HP_SCR = 7
   const handleWheel = useCallback((e: Konva.KonvaEventObject<WheelEvent>) => {
     e.evt.preventDefault()
     const stage = stageRef.current; if (!stage) return
+
+    // Trackpad two-finger scroll (pixel deltaMode, no Ctrl) → PAN
+    if (e.evt.deltaMode === 0 && !e.evt.ctrlKey) {
+      stage.x(stage.x() - e.evt.deltaX)
+      stage.y(stage.y() - e.evt.deltaY)
+      stage.batchDraw()
+      posRef.current = { x: stage.x(), y: stage.y() }
+      return
+    }
+
+    // Ctrl+trackpad pinch OR mouse wheel → ZOOM
     const oldScale = stage.scaleX()
     const pt = stage.getPointerPosition() ?? { x: 0, y: 0 }
     const mpX = (pt.x - stage.x()) / oldScale
     const mpY = (pt.y - stage.y()) / oldScale
-    // Smooth zoom: trackpad gives pixel-mode deltaY; mouse wheel gives line-mode.
-    const factor = e.evt.deltaMode === 0
-      ? Math.pow(1.008, -e.evt.deltaY)    // trackpad — responsive
-      : e.evt.deltaY < 0 ? 1.25 : 0.80   // mouse wheel — snappier
+    const factor = (e.evt.deltaMode === 0 && e.evt.ctrlKey)
+      ? Math.pow(1.008, -e.evt.deltaY)   // trackpad pinch
+      : e.evt.deltaY < 0 ? 1.25 : 0.80  // mouse wheel
     const nz = Math.min(8, Math.max(0.1, oldScale * factor))
-    // Update Konva imperatively — zero React re-renders during scroll
     stage.scaleX(nz); stage.scaleY(nz)
     stage.x(pt.x - mpX * nz); stage.y(pt.y - mpY * nz)
     stage.batchDraw()
-    // Sync React state at most once per animation frame (for HR, strokeWidths, memos)
-    if (!zoomRafRef.current) {
-      zoomRafRef.current = requestAnimationFrame(() => {
-        const s = stageRef.current
-        if (s) { setZoom(s.scaleX()); setPos({ x: s.x(), y: s.y() }) }
-        zoomRafRef.current = 0
-      })
-    }
+    zoomRef.current = nz
+    posRef.current = { x: stage.x(), y: stage.y() }
   }, [])
 
   useEffect(() => {
@@ -1550,6 +1733,53 @@ const HP_SCR = 7
     return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp) }
   }, [selectedIds, selectedGroupId, canvasGroups, snapshot, undo, joinSelected, ungroupSelected])
 
+  // Middle-mouse-button pan — attach to the Konva container so it works regardless of active tool
+  useEffect(() => {
+    const container = stageRef.current?.container()
+    if (!container) return
+    // Track pan start: stage origin + cursor start
+    const panRef: { startX: number; startY: number; stageX: number; stageY: number } | { active: false } = { active: false } as any
+    let panActive = false
+    let panStart = { startX: 0, startY: 0, stageX: 0, stageY: 0 }
+
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button !== 1) return
+      e.preventDefault()
+      const stage = stageRef.current; if (!stage) return
+      panActive = true
+      panStart = { startX: e.clientX, startY: e.clientY, stageX: stage.x(), stageY: stage.y() }
+      container.style.cursor = 'grabbing'
+    }
+    const onMouseMove = (e: MouseEvent) => {
+      if (!panActive) return
+      const stage = stageRef.current; if (!stage) return
+      stage.x(panStart.stageX + e.clientX - panStart.startX)
+      stage.y(panStart.stageY + e.clientY - panStart.startY)
+      stage.batchDraw()
+    }
+    const onMouseUp = (e: MouseEvent) => {
+      if (e.button !== 1 || !panActive) return
+      panActive = false
+      container.style.cursor = ''
+      const stage = stageRef.current
+      if (stage) { posRef.current = { x: stage.x(), y: stage.y() } }
+    }
+    // Prevent browser autoscroll icon on middle click
+    const onAuxClick = (e: MouseEvent) => { if (e.button === 1) e.preventDefault() }
+
+    container.addEventListener('mousedown', onMouseDown)
+    container.addEventListener('auxclick', onAuxClick)
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return () => {
+      container.removeEventListener('mousedown', onMouseDown)
+      container.removeEventListener('auxclick', onAuxClick)
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   useEffect(() => {
     const onGlobalMouseUp = () => {
       if (activeDragRef.current) onMidDragEnd()
@@ -1565,10 +1795,12 @@ const HP_SCR = 7
     () => activeDrag ? new Set(activeDrag.toMoveWallIds) : new Set<string>(),
     [activeDrag],
   )
-  const visWalls = useMemo(
-    () => showDetail ? walls : walls.filter(w => !w.isDetail || wallIdToGroupId.has(w.id)),
-    [walls, showDetail, wallIdToGroupId]
-  )
+const visWalls = useMemo(
+  () => showDetail
+    ? walls
+    : walls.filter(w => !w.isDetail || w.isHatchLine || w.isDimLine || wallIdToGroupId.has(w.id)),
+  [walls, showDetail, wallIdToGroupId]
+)
 
   const gridLines = useMemo(() => {
     const sw = stageSize.w, sh = stageSize.h
@@ -1622,8 +1854,8 @@ const HP_SCR = 7
       if (valign_sel === 3) boxOffY = 0
       else if (valign_sel === 2) boxOffY = -estH_sel / 2
       else boxOffY = -estH_sel
-      minCX = Math.min(minCX, cx + boxOffX - 4 / zoom); maxCX = Math.max(maxCX, cx + boxOffX + estW + 4 / zoom)
-      minCY = Math.min(minCY, cy + boxOffY - 4 / zoom); maxCY = Math.max(maxCY, cy + boxOffY + estH_sel + 4 / zoom)
+      minCX = Math.min(minCX, cx + boxOffX - 4 / zoomRef.current); maxCX = Math.max(maxCX, cx + boxOffX + estW + 4 / zoomRef.current)
+      minCY = Math.min(minCY, cy + boxOffY - 4 / zoomRef.current); maxCY = Math.max(maxCY, cy + boxOffY + estH_sel + 4 / zoomRef.current)
       hasAny = true
     }
     for (const a of effectiveArcs.filter(a => selectedIds.has(a.handle))) {
@@ -1657,7 +1889,7 @@ const HP_SCR = 7
     }
     if (!hasAny) return null
     return { minCX, minCY, maxCX, maxCY }
-  }, [effectiveWalls, effectiveTexts, effectiveArcs, effectiveLines, effectiveFurnitureLines, selectedIds, selectedWinKey, selectedFurnKey, t, zoom])
+  }, [effectiveWalls, effectiveTexts, effectiveArcs, effectiveLines, effectiveFurnitureLines, selectedIds, selectedWinKey, selectedFurnKey, t])
 
   const worldSelBounds = useMemo(() => {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -1708,6 +1940,7 @@ const HP_SCR = 7
     if (!worldSelBounds) return null
     return { minWX: worldSelBounds.minX, minWY: worldSelBounds.minY, maxWX: worldSelBounds.maxX, maxWY: worldSelBounds.maxY }
   }, [worldSelBounds])
+
 
   const fmtLen = useCallback((m: number) => {
     if (units === 'cm') return `${(m * 100).toFixed(2)} cm`
@@ -1762,7 +1995,7 @@ const HP_SCR = 7
         setWalls(prev => [...prev, ...newSegs])
         const allIds = new Set([...newSegs.map(s => s.id), lblHandle])
         setSelectedIds(allIds); setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
-        setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null)
+        setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
         return
       }
 
@@ -1838,6 +2071,7 @@ const HP_SCR = 7
   const stageDraggable = (activeTool === 'hand' || spaceHeld) && !isDraggingEp && !isDraggingRoom
   const isDrawingTool = ['drawPolyline', 'drawLine', 'drawArc', 'drawCircle', 'text'].includes(activeTool)
 
+
   const handleStageClick = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     if (!isDrawingTool && e.target !== stageRef.current) return
     const stage = stageRef.current
@@ -1849,7 +2083,7 @@ const HP_SCR = 7
     if (activeTool === 'drawLine') {
       const snapped = getSnap(wx, wy, [])
       if (!drawLineAnchorRef.current) {
-        drawLineAnchorRef.current = snapped; setDrawLineAnchor(snapped); setDrawLinePointer(snapped); return
+        drawLineAnchorRef.current = snapped; setDrawLineAnchor(snapped); drawLinePointerRef.current = snapped; snapLayerRef.current?.batchDraw(); return
       }
       const start = drawLineAnchorRef.current, end = snapped
       if (Math.hypot(end.x - start.x, end.y - start.y) < 0.02) return
@@ -1861,7 +2095,7 @@ const HP_SCR = 7
       setSelectedIds(new Set([newId])); setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
       // Keep drawing mode — new anchor is last end point so user can chain segments.
       // Press Esc or switch tool to stop.
-      drawLineAnchorRef.current = end; setDrawLineAnchor(end); setDrawLinePointer(end)
+      drawLineAnchorRef.current = end; setDrawLineAnchor(end); drawLinePointerRef.current = end
       return
     }
 
@@ -1918,7 +2152,7 @@ const HP_SCR = 7
     }
 
     setSelectedGroupId(null)
-    setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null)
+    setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
   }, [activeTool, t, getSnap, planDoc, snapshot, setActiveTool, arcDraftCenter, arcDraftRadius, arcDraftStartAngle, circleDraftCenter, canvasGroups, selectDxfGroup])
 
   const finishPolyline = useCallback(() => {
@@ -1929,7 +2163,7 @@ const HP_SCR = 7
     const { next, poly } = appendUserPolyline(planDoc, pts, closed)
     const newSegs = wallSegsFromPolyline(poly, false)
     setPlanDoc(next); setWalls(w => [...w, ...newSegs])
-    polylineDraftRef.current = []; setPolylineDraft([]); setPolylineHover(null)
+    polylineDraftRef.current = []; setPolylineDraft([]); polylineHoverRef.current = null
     if (newSegs.length > 0) { setSelectedIds(new Set(newSegs.map(s => s.id))); setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null); setActiveTool('select') }
   }, [planDoc, snapshot, polylineClosed, setActiveTool])
 
@@ -2002,39 +2236,17 @@ const HP_SCR = 7
       if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); undo() }
       if (e.key === 'Enter' && activeTool === 'drawPolyline' && polylineDraftRef.current.length >= 2) { e.preventDefault(); finishPolylineRef.current() }
       if (e.key === 'Escape') {
-        setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedGroupId(null)
-        drawLineAnchorRef.current = null; setDrawLineAnchor(null); setDrawLinePointer(null)
-        polylineDraftRef.current = []; setPolylineDraft([]); setPolylineHover(null)
+        setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedGroupId(null); setSelectedDimKey(null)
+        drawLineAnchorRef.current = null; setDrawLineAnchor(null); drawLinePointerRef.current = null
+        polylineDraftRef.current = []; setPolylineDraft([]); polylineHoverRef.current = null
         setArcDraftCenter(null); setArcDraftRadius(null); setArcDraftStartAngle(null); setCircleDraftCenter(null); setShapePointer(null)
         activeDragRef.current = null; setActiveDrag(null); dragDeltaRef.current = { dx: 0, dy: 0 }; setDragDelta({ dx: 0, dy: 0 })
         activePolyDragRef.current = null; setActivePolyDrag(null); polyDragDeltaRef.current = { dx: 0, dy: 0 }; setPolyDragDelta({ dx: 0, dy: 0 })
-        setSelectedId(null)
-        setSelectedRoomIndex(null)
-        setSelectedTextHandle(null)
-        setSelectedArcHandle(null)
-        setSelectedWinKey(null)
-        setSelectedFurnKey(null)
-        drawLineAnchorRef.current = null
-        setDrawLineAnchor(null)
-        setDrawLinePointer(null)
-        polylineDraftRef.current = []
-        setPolylineDraft([])
-        setPolylineHover(null)
-        setArcDraftCenter(null)
-        setArcDraftRadius(null)
-        setArcDraftStartAngle(null)
-        setCircleDraftCenter(null)
-        setShapePointer(null)
-        activeDragRef.current = null
-        setActiveDrag(null)
-        dragDeltaRef.current = { dx: 0, dy: 0 }
-        setDragDelta({ dx: 0, dy: 0 })
-        activePolyDragRef.current = null
-        setActivePolyDrag(null)
-        polyDragDeltaRef.current = { dx: 0, dy: 0 }
-        setPolyDragDelta({ dx: 0, dy: 0 })
+        snapTargetRef.current = null; alignGuidesRef.current = []; lastSnapTypeRef.current = null
+        snapLayerRef.current?.batchDraw()
       }
       if (e.code === 'Space' && !e.repeat) { e.preventDefault(); setSpaceHeld(true) }
+      if (e.key === 'F10') { e.preventDefault(); setPolarTrackingEnabled(v => !v) }
     }
     const onKeyUp = (e: KeyboardEvent) => { if (e.code === 'Space') setSpaceHeld(false) }
     window.addEventListener('keydown', onKeyDown)
@@ -2048,13 +2260,141 @@ const HP_SCR = 7
   const doc = planDoc
   const selectedTextEntity = selectedTextHandle ? doc.texts.find(tx => tx.handle === selectedTextHandle) : undefined
 
+  const snapSceneFunc = useCallback((ctx: Konva.Context, _shape: Konva.Shape) => {
+    const tt = tRef.current
+    const z = zoomRef.current
+    const sw = stageSizeRef.current
+    const tool = activeToolRef.current
+    const c2d = (ctx as any)._context as CanvasRenderingContext2D
+    c2d.save()
+
+    // Alignment guides
+    const guides = alignGuidesRef.current
+    if (guides.length > 0) {
+      c2d.strokeStyle = '#06b6d4'
+      c2d.lineWidth = 0.8 / z
+      c2d.globalAlpha = 0.85
+      c2d.setLineDash([6 / z, 4 / z])
+      for (const g of guides) {
+        c2d.beginPath()
+        if (g.type === 'h') {
+          const [, cy] = toC(0, g.coord, tt)
+          c2d.moveTo(0, cy); c2d.lineTo(sw.w / z, cy)
+        } else {
+          const [cx] = toC(g.coord, 0, tt)
+          c2d.moveTo(cx, 0); c2d.lineTo(cx, sw.h / z)
+        }
+        c2d.stroke()
+      }
+      c2d.setLineDash([])
+    }
+
+    // Draw line preview (anchor → cursor)
+    const dlAnchor = drawLineAnchorRef.current
+    const dlPointer = drawLinePointerRef.current
+    if (tool === 'drawLine' && dlAnchor && dlPointer) {
+      const [ax, ay] = toC(dlAnchor.x, dlAnchor.y, tt)
+      const [px, py] = toC(dlPointer.x, dlPointer.y, tt)
+      c2d.strokeStyle = '#3b82f6'; c2d.lineWidth = 1.5 / z
+      c2d.lineCap = 'round'; c2d.globalAlpha = 1
+      c2d.setLineDash([8 / z, 6 / z])
+      c2d.beginPath(); c2d.moveTo(ax, ay); c2d.lineTo(px, py); c2d.stroke()
+      c2d.setLineDash([])
+    }
+
+    // Draw polyline preview
+    const plDraft = polylineDraftRef.current
+    const plHover = polylineHoverRef.current
+    if (tool === 'drawPolyline' && plDraft.length >= 1 && plHover) {
+      c2d.strokeStyle = '#3b82f6'; c2d.lineWidth = 1.5 / z
+      c2d.lineCap = 'round'; c2d.lineJoin = 'round'; c2d.globalAlpha = 1
+      if (plDraft.length >= 2) {
+        c2d.setLineDash([])
+        c2d.beginPath()
+        const [fx, fy] = toC(plDraft[0].x, plDraft[0].y, tt)
+        c2d.moveTo(fx, fy)
+        for (let i = 1; i < plDraft.length; i++) {
+          const [lx, ly] = toC(plDraft[i].x, plDraft[i].y, tt)
+          c2d.lineTo(lx, ly)
+        }
+        c2d.stroke()
+      }
+      const last = plDraft[plDraft.length - 1]
+      const [lx, ly] = toC(last.x, last.y, tt)
+      const [hx, hy] = toC(plHover.x, plHover.y, tt)
+      c2d.setLineDash([8 / z, 6 / z])
+      c2d.beginPath(); c2d.moveTo(lx, ly); c2d.lineTo(hx, hy); c2d.stroke()
+      c2d.setLineDash([])
+    }
+
+    // Snap indicator
+    const snap = snapTargetRef.current
+    if (snap) {
+      const [scx, scy] = toC(snap.x, snap.y, tt)
+      const r = 4 / z, sw2 = 1.2 / z
+      const col = '#f59e0b', fill = 'rgba(245,158,11,0.12)'
+      const type = lastSnapTypeRef.current
+      c2d.strokeStyle = col; c2d.lineWidth = sw2; c2d.globalAlpha = 1; c2d.setLineDash([])
+      if (type === 'endpoint') {
+        c2d.fillStyle = fill; c2d.beginPath(); c2d.rect(scx - r, scy - r, r * 2, r * 2); c2d.fill(); c2d.stroke()
+      } else if (type === 'midpoint') {
+        c2d.fillStyle = fill; c2d.beginPath()
+        c2d.moveTo(scx, scy - r * 1.3); c2d.lineTo(scx + r * 1.15, scy + r * 0.75); c2d.lineTo(scx - r * 1.15, scy + r * 0.75)
+        c2d.closePath(); c2d.fill(); c2d.stroke()
+      } else if (type === 'arcCenter') {
+        c2d.fillStyle = fill; c2d.beginPath(); c2d.arc(scx, scy, r, 0, Math.PI * 2); c2d.fill(); c2d.stroke()
+        c2d.lineWidth = sw2 * 0.7
+        c2d.beginPath(); c2d.moveTo(scx - r * 1.6, scy); c2d.lineTo(scx + r * 1.6, scy); c2d.stroke()
+        c2d.beginPath(); c2d.moveTo(scx, scy - r * 1.6); c2d.lineTo(scx, scy + r * 1.6); c2d.stroke()
+      } else if (type === 'arcQuadrant') {
+        c2d.fillStyle = fill; c2d.beginPath()
+        c2d.moveTo(scx, scy - r * 1.3); c2d.lineTo(scx + r * 1.3, scy); c2d.lineTo(scx, scy + r * 1.3); c2d.lineTo(scx - r * 1.3, scy)
+        c2d.closePath(); c2d.fill(); c2d.stroke()
+      } else if (type === 'perpendicular') {
+        c2d.beginPath(); c2d.moveTo(scx - r * 1.2, scy + r); c2d.lineTo(scx + r * 1.2, scy + r); c2d.stroke()
+        c2d.beginPath(); c2d.moveTo(scx, scy + r); c2d.lineTo(scx, scy - r); c2d.stroke()
+        c2d.lineWidth = sw2 * 0.7; c2d.beginPath(); c2d.moveTo(scx - r * 0.5, scy); c2d.lineTo(scx + r * 0.5, scy); c2d.stroke()
+      } else if (type === 'intersection') {
+        c2d.beginPath(); c2d.moveTo(scx - r * 1.1, scy - r * 1.1); c2d.lineTo(scx + r * 1.1, scy + r * 1.1); c2d.stroke()
+        c2d.beginPath(); c2d.moveTo(scx + r * 1.1, scy - r * 1.1); c2d.lineTo(scx - r * 1.1, scy + r * 1.1); c2d.stroke()
+      } else {
+        c2d.fillStyle = fill; c2d.beginPath(); c2d.arc(scx, scy, r, 0, Math.PI * 2); c2d.fill(); c2d.stroke()
+        c2d.lineWidth = sw2 * 0.7
+        c2d.beginPath(); c2d.moveTo(scx - r * 1.5, scy); c2d.lineTo(scx + r * 1.5, scy); c2d.stroke()
+        c2d.beginPath(); c2d.moveTo(scx, scy - r * 1.5); c2d.lineTo(scx, scy + r * 1.5); c2d.stroke()
+      }
+    }
+
+    c2d.restore()
+  }, [])
+
+  // After loading the JSON, add this debug code
+useEffect(() => {
+  console.log('=== RENDER DEBUG ===');
+  console.log('BBox:', planDoc.meta.extmin, '→', planDoc.meta.extmax);
+  console.log('BBox width:', planDoc.meta.extmax[0] - planDoc.meta.extmin[0]);
+  console.log('BBox height:', planDoc.meta.extmax[1] - planDoc.meta.extmin[1]);
+  console.log('Walls count:', walls.length);
+  console.log('First wall:', walls[0]);
+  console.log('Transform scale:', t.sc);
+  console.log('Stage size:', stageSize);
+  
+  // Check if any wall is visible on screen
+  if (walls.length > 0) {
+    const [sx, sy] = toC(walls[0].start.x, walls[0].start.y, t);
+    const [ex, ey] = toC(walls[0].end.x, walls[0].end.y, t);
+    console.log('First wall canvas coords:', sx, sy, '→', ex, ey);
+  }
+}, [planDoc, walls, t, stageSize]);
+
   const activateTool = (id: 'select' | 'hand' | 'frame' | 'drawLine' | 'drawPolyline' | 'text' | 'drawArc' | 'drawCircle') => {
-    if (id !== 'drawLine') { drawLineAnchorRef.current = null; setDrawLineAnchor(null); setDrawLinePointer(null) }
-    if (id !== 'drawPolyline') { polylineDraftRef.current = []; setPolylineDraft([]); setPolylineHover(null) }
+    if (id !== 'drawLine') { drawLineAnchorRef.current = null; setDrawLineAnchor(null); drawLinePointerRef.current = null }
+    if (id !== 'drawPolyline') { polylineDraftRef.current = []; setPolylineDraft([]); polylineHoverRef.current = null }
     if (id !== 'drawArc') { setArcDraftCenter(null); setArcDraftRadius(null); setArcDraftStartAngle(null) }
     if (id !== 'drawCircle') setCircleDraftCenter(null)
     if (id !== 'drawArc' && id !== 'drawCircle') setShapePointer(null)
-    setSnapTarget(null); setSnapTargetType(null); setAlignGuides([])
+    snapTargetRef.current = null; alignGuidesRef.current = []; lastSnapTypeRef.current = null
+    snapLayerRef.current?.batchDraw()
     setActiveTool(id)
   }
 
@@ -2207,12 +2547,12 @@ const HP_SCR = 7
                 ref={stageRef}
                 width={stageSize.w}
                 height={stageSize.h}
-                scaleX={zoom}
-                scaleY={zoom}
-                x={pos.x}
-                y={pos.y}
+                scaleX={zoomRef.current}
+                scaleY={zoomRef.current}
+                x={posRef.current.x}
+                y={posRef.current.y}
                 draggable={stageDraggable}
-                onDragEnd={e => { if (e.target === stageRef.current) setPos({ x: e.target.x(), y: e.target.y() }) }}
+                onDragEnd={e => { if (e.target === stageRef.current) { posRef.current = { x: e.target.x(), y: e.target.y() } } }}
                 onWheel={handleWheel}
                 onMouseDown={onStageMouseDown}
                 onMouseMove={onStageMouseMove}
@@ -2224,8 +2564,9 @@ const HP_SCR = 7
                 onDblClick={() => {
                   if (activeTool === 'drawLine' && drawLineAnchorRef.current) {
                     // Double-click finishes the line chain
-                    drawLineAnchorRef.current = null; setDrawLineAnchor(null); setDrawLinePointer(null)
-                    setSnapTarget(null); setSnapTargetType(null); setAlignGuides([])
+                    drawLineAnchorRef.current = null; setDrawLineAnchor(null); drawLinePointerRef.current = null
+                    snapTargetRef.current = null; alignGuidesRef.current = []; lastSnapTypeRef.current = null
+                    snapLayerRef.current?.batchDraw()
                     setActiveTool('select')
                   }
                   if (activeTool === 'drawPolyline' && polylineDraftRef.current.length >= 2) {
@@ -2433,14 +2774,36 @@ const HP_SCR = 7
                     // ── LEADER ────────────────────────────────────────────
                     if (item.kind === 'leader') {
                       const pts = item.vertices.flatMap(v => toC(v.x, v.y, t))
+
+                      // Compute filled-triangle arrowhead at the tip (first vertex)
+                      let arrowTriPts: number[] = []
+                      if (item.hasArrowhead && pts.length >= 4) {
+                        const tipX = pts[0], tipY = pts[1]
+                        const nextX = pts[2], nextY = pts[3]
+                        const angle = Math.atan2(tipY - nextY, tipX - nextX)
+                        const arrowLen = 8 / zoomRef.current
+                        const halfAngle = 0.38   // ~22°
+                        arrowTriPts = [
+                          tipX, tipY,
+                          tipX - arrowLen * Math.cos(angle - halfAngle),
+                          tipY - arrowLen * Math.sin(angle - halfAngle),
+                          tipX - arrowLen * Math.cos(angle + halfAngle),
+                          tipY - arrowLen * Math.sin(angle + halfAngle),
+                        ]
+                      }
+
                       return (
                         <Group key={item.id}>
                           <Line points={pts} stroke={col} strokeWidth={sw}
                             strokeScaleEnabled={false} perfectDrawEnabled={false} />
-                          {item.hasArrowhead && pts.length >= 4 && (
-                            <Circle x={pts[0]} y={pts[1]}
-                              radius={3} fill={col}
+                          {arrowTriPts.length > 0 && (
+                            <Line
+                              points={arrowTriPts}
+                              closed
+                              fill={col}
+                              stroke="transparent"
                               strokeScaleEnabled={false}
+                              listening={false}
                             />
                           )}
                           {item.annotationText && pts.length >= 2 && (
@@ -2496,45 +2859,160 @@ const HP_SCR = 7
                     }
 
                     // ── DIMENSION ─────────────────────────────────────────
-                    // Dimension geometry was inlined by the backend (dim_lines,
-                    // dim_arcs, dim_texts).  We render those directly.
+                    // Dimension geometry with arrowheads
                     if (item.kind === 'dimension') {
+                      const dimColor = resolveEntityColor(item.color, item.layer, layerColorMap, '#00BFFF')
+                      const isSelected = selectedIds.has(item.id) || selectedDimKey === item.id
+                      
+                      // Group dimension lines by type
+                      const mainLines: Array<{ x1: number; y1: number; x2: number; y2: number }> = []
+                      const witnessLines: Array<{ x1: number; y1: number; x2: number; y2: number }> = []
+                      
+                      for (const l of item.lines) {
+                        const [x1, y1] = toC(l.start.x, l.start.y, t)
+                        const [x2, y2] = toC(l.end.x, l.end.y, t)
+                        const dx = x2 - x1
+                        const dy = y2 - y1
+                        const length = Math.hypot(dx, dy)
+                        
+                        // Long horizontal lines are main dimension lines
+                        if (length > 20 && Math.abs(dy) < Math.abs(dx) * 0.15) {
+                          mainLines.push({ x1, y1, x2, y2 })
+                        } else {
+                          witnessLines.push({ x1, y1, x2, y2 })
+                        }
+                      }
+                      
+                      // Calculate bounds for selection highlight
+                      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+                      for (const l of [...witnessLines, ...mainLines]) {
+                        minX = Math.min(minX, l.x1, l.x2)
+                        maxX = Math.max(maxX, l.x1, l.x2)
+                        minY = Math.min(minY, l.y1, l.y2)
+                        maxY = Math.max(maxY, l.y1, l.y2)
+                      }
+                      if (item.text) {
+                        const [tx, ty] = toC(item.textPos.x, item.textPos.y, t)
+                        minX = Math.min(minX, tx - 50)
+                        maxX = Math.max(maxX, tx + 50)
+                        minY = Math.min(minY, ty - 20)
+                        maxY = Math.max(maxY, ty + 20)
+                      }
+                      
                       return (
-                        <Group key={item.id}>
-                          {item.lines.map((l, i) => {
-                            const [x1, y1] = toC(l.start.x, l.start.y, t)
-                            const [x2, y2] = toC(l.end.x, l.end.y, t)
-                            return <Line key={`dl${i}`} points={[x1, y1, x2, y2]}
-                              stroke={col} strokeWidth={0.6}
-                              strokeScaleEnabled={false} perfectDrawEnabled={false} />
-                          })}
-                          {item.arcs.map((a, i) => {
-                            // KonvaArc: angle measured CW from +X, in degrees.
-                            // DXF arcs are CCW from +X.  Flip by negating.
-                            const spanDeg = a.endAngle > a.startAngle
-                              ? a.endAngle - a.startAngle
-                              : a.endAngle + 360 - a.startAngle
-                            const [acx, acy] = toC(a.cx, a.cy, t)
+                        <Group 
+                          key={item.id}
+                          onClick={e => {
+                            e.cancelBubble = true
+                            if (isDrawingTool || activeTool !== 'select') return
+                            const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                            setSelectedIds(prev => {
+                              const next = new Set(isCtrl ? prev : [])
+                              if (isSelected && isCtrl) next.delete(item.id)
+                              else next.add(item.id)
+                              return next
+                            })
+                            setSelectedDimKey(isSelected && !e.evt.ctrlKey ? null : item.id)
+                          }}
+                          onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'pointer' }}
+                          onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                        >
+                          {/* Selection highlight */}
+                          {isSelected && (
+                            <Rect
+                              x={minX - 5}
+                              y={minY - 5}
+                              width={maxX - minX + 10}
+                              height={maxY - minY + 10}
+                              fill="rgba(0,115,207,0.1)"
+                              stroke="#0073cf"
+                              strokeWidth={1.2 / zoomRef.current}
+                              dash={[4 / zoomRef.current, 4 / zoomRef.current]}
+                              listening={false}
+                            />
+                          )}
+                          
+                          {/* Witness lines */}
+                          {witnessLines.map((l, i) => (
+                            <Line key={`wl${i}`}
+                              points={[l.x1, l.y1, l.x2, l.y2]}
+                              stroke={dimColor}
+                              strokeWidth={0.8}
+                              strokeScaleEnabled={false}
+                              perfectDrawEnabled={false}
+                              listening={false}
+                            />
+                          ))}
+                          
+                          {/* Main dimension lines with arrowheads */}
+                          {mainLines.map((l, i) => {
+                            const angle = Math.atan2(l.y2 - l.y1, l.x2 - l.x1)
+                            const perp = angle + Math.PI / 2
+                            const ARROW_LEN = 8 / zoomRef.current
+                            const ARROW_WIDTH = 2.5 / zoomRef.current
+                            
+                            // Left arrow (at start) - points right
+                            const lTipX = l.x1 + ARROW_LEN * Math.cos(angle)
+                            const lTipY = l.y1 + ARROW_LEN * Math.sin(angle)
+                            const lWing1X = l.x1 + ARROW_WIDTH * Math.cos(perp)
+                            const lWing1Y = l.y1 + ARROW_WIDTH * Math.sin(perp)
+                            const lWing2X = l.x1 - ARROW_WIDTH * Math.cos(perp)
+                            const lWing2Y = l.y1 - ARROW_WIDTH * Math.sin(perp)
+                            
+                            // Right arrow (at end) - points left
+                            const rTipX = l.x2 - ARROW_LEN * Math.cos(angle)
+                            const rTipY = l.y2 - ARROW_LEN * Math.sin(angle)
+                            const rWing1X = l.x2 + ARROW_WIDTH * Math.cos(perp)
+                            const rWing1Y = l.y2 + ARROW_WIDTH * Math.sin(perp)
+                            const rWing2X = l.x2 - ARROW_WIDTH * Math.cos(perp)
+                            const rWing2Y = l.y2 - ARROW_WIDTH * Math.sin(perp)
+                            
                             return (
-                              <KonvaArc key={`da${i}`}
-                                x={acx} y={acy}
-                                innerRadius={Math.max(0, a.r * t.sc)}
-                                outerRadius={Math.max(0, a.r * t.sc)}
-                                angle={spanDeg}
-                                rotation={-(a.startAngle + spanDeg)}
-                                stroke={col} strokeWidth={0.6}
-                                strokeScaleEnabled={false}
-                                fill="transparent"
-                              />
+                              <Group key={`dl${i}`}>
+                                {/* Dimension line */}
+                                <Line
+                                  points={[l.x1, l.y1, l.x2, l.y2]}
+                                  stroke={dimColor}
+                                  strokeWidth={0.8}
+                                  strokeScaleEnabled={false}
+                                  perfectDrawEnabled={false}
+                                  listening={false}
+                                />
+                                
+                                {/* Left arrowhead */}
+                                <Line
+                                  points={[lTipX, lTipY, lWing1X, lWing1Y, lWing2X, lWing2Y]}
+                                  closed
+                                  fill={dimColor}
+                                  stroke="transparent"
+                                  strokeScaleEnabled={false}
+                                  listening={false}
+                                />
+                                
+                                {/* Right arrowhead */}
+                                <Line
+                                  points={[rTipX, rTipY, rWing1X, rWing1Y, rWing2X, rWing2Y]}
+                                  closed
+                                  fill={dimColor}
+                                  stroke="transparent"
+                                  strokeScaleEnabled={false}
+                                  listening={false}
+                                />
+                              </Group>
                             )
                           })}
+                          
+                          {/* Dimension text */}
                           {item.text && (() => {
                             const [dtx, dty] = toC(item.textPos.x, item.textPos.y, t)
                             return (
-                              <Text key="dt" x={dtx} y={dty}
+                              <Text key="dt"
+                                x={dtx} y={dty}
                                 text={item.text}
-                                fontSize={11} fill={col}
+                                fontSize={11}
+                                fill={dimColor}
                                 offsetX={(item.text.length * 11 * 0.55) / 2}
+                                listening={false}
                               />
                             )
                           })()}
@@ -2609,7 +3087,7 @@ const HP_SCR = 7
                           closed
                           fill={ROOM_COLORS[i % ROOM_COLORS.length]}
                           stroke={ROOM_STROKES[i % ROOM_STROKES.length]}
-                          strokeWidth={isHovered ? 2.5 / zoom : 1 / zoom}
+                          strokeWidth={isHovered ? 2.5 / zoomRef.current : 1 / zoomRef.current}
                           listening={true}
                           onClick={e => {
                             e.cancelBubble = true
@@ -2642,7 +3120,7 @@ const HP_SCR = 7
                                   grp.arcHandles.forEach(h => selForDrag.add(h))
                                   setSelectedGroupId(grp.id)
                                   setSelectedId(null); setSelectedRoomIndex(null)
-                                  setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null)
+                                  setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
                                   setSelectedIds(persistedSel)
                                   onMidDragStart(e as any, [...grp.wallIds][0] ?? '', selForDrag)
                                   return
@@ -2667,9 +3145,9 @@ const HP_SCR = 7
                     const sw = 1.5 * strokeScale
                     return (
                       <Group key={`wingrp-${key}`} draggable
-                        onDragStart={e => { e.cancelBubble = true; snapshot(); setSelectedWinKey(key); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null) }}
+                         onDragStart={e => { if (isLayerLocked(lines[0]?.layer ?? '0')) return; e.cancelBubble = true; snapshot(); setSelectedWinKey(key); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null); setSelectedDimKey(null) }}
                         onDragEnd={e => { const dcx = e.target.x(), dcy = e.target.y(); e.target.position({ x: 0, y: 0 }); moveWindowLines(key, dcx / t.sc, -dcy / t.sc) }}
-                        onClick={e => { e.cancelBubble = true; setSelectedId(null); setSelectedArcHandle(null); setSelectedTextHandle(null); setSelectedRoomIndex(null); setSelectedWinKey(isSelWin ? null : key) }}
+                        onClick={e => { if (isLayerLocked(lines[0]?.layer ?? '0')) return; e.cancelBubble = true; setSelectedId(null); setSelectedArcHandle(null); setSelectedTextHandle(null); setSelectedRoomIndex(null); setSelectedWinKey(isSelWin ? null : key); setSelectedDimKey(null) }}
                         onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
                         onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                       >
@@ -2701,10 +3179,8 @@ const HP_SCR = 7
                     }
                     return (
                       <Group key={`furngrp-${key}`} draggable
-                        onDragStart={e => { e.cancelBubble = true; snapshot(); setSelectedFurnKey(key); setSelectedIds(new Set()); setSelectedWinKey(null); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null) }}
-                        onDragEnd={e => { const dcx = e.target.x(), dcy = e.target.y(); e.target.position({ x: 0, y: 0 }); moveFurnitureGroupByKey(key, dcx / t.sc, -dcy / t.sc) }}
-                        onClick={e => { e.cancelBubble = true; setSelectedFurnKey(isSel ? null : key); setSelectedIds(new Set()); setSelectedWinKey(null); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null) }}
-                        onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
+onDragStart={e => { if (isLayerLocked(lines[0]?.layer ?? '0')) return; e.cancelBubble = true; snapshot(); setSelectedFurnKey(key); setSelectedIds(new Set()); setSelectedWinKey(null); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null); setSelectedDimKey(null) }}                        onDragEnd={e => { const dcx = e.target.x(), dcy = e.target.y(); e.target.position({ x: 0, y: 0 }); moveFurnitureGroupByKey(key, dcx / t.sc, -dcy / t.sc) }}
+onClick={e => { if (isLayerLocked(lines[0]?.layer ?? '0')) return; e.cancelBubble = true; setSelectedFurnKey(isSel ? null : key); setSelectedIds(new Set()); setSelectedWinKey(null); setSelectedArcHandle(null); setSelectedId(null); setSelectedTextHandle(null); setSelectedRoomIndex(null); setSelectedDimKey(null) }}                        onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move' }}
                         onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                       >
                         {lines.map(ln => {
@@ -2764,10 +3240,11 @@ const HP_SCR = 7
                         }}
                         onClick={e => {
                           if (isDrawingTool) return
+                          if (isLayerLocked(arc.layer)) return
                           e.cancelBubble = true
                           if (activeTool === 'hand' || spaceHeld) return
                           if (didDragRef.current) { didDragRef.current = false; return }
-                          setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedId(null)
+                          setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedId(null); setSelectedDimKey(null)
                           const isCtrl = e.evt.ctrlKey || e.evt.metaKey
                           // Check DXF group membership (e.g. door arc belongs to door group)
                           const arcDxfGid = wallIdToGroupId.get(arc.handle)
@@ -2777,8 +3254,9 @@ const HP_SCR = 7
                           }
                           setSelectedIds(prev => { const next = new Set(isCtrl ? prev : []); if (isSelArc && isCtrl) next.delete(arc.handle); else next.add(arc.handle); return next })
                         }}
-                        onMouseDown={e => {
+                       onMouseDown={e => {
                           if (isDrawingTool) return
+                          if (isLayerLocked(arc.layer)) return
                           e.cancelBubble = true
                           if (activeTool !== 'select' || spaceHeld) return
                           didDragRef.current = false
@@ -2789,7 +3267,7 @@ const HP_SCR = 7
                             if (grp) {
                               setSelectedGroupId(arcDxfGid)
                               setSelectedId(null); setSelectedRoomIndex(null)
-                              setSelectedTextHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null)
+                              setSelectedTextHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
                               const persistedSel = new Set<string>(grp.wallIds)
                               setSelectedIds(persistedSel)
                               const selForDrag = new Set(persistedSel)
@@ -2810,12 +3288,12 @@ const HP_SCR = 7
                       >
                         {isFullCircle ? (
                           <Circle x={arcCx} y={arcCy} radius={Math.max(0, rCanvas)} stroke={arcColor} strokeWidth={sw} fill="transparent"
-                            strokeScaleEnabled={false} perfectDrawEnabled={false} hitStrokeWidth={10} />
+                            strokeScaleEnabled={false} perfectDrawEnabled={false} hitStrokeWidth={Math.max(10, 14 / zoomRef.current)} />
                         ) : (
                           <>
                             {/* Arc sweep */}
                             <Line points={arcPoints(arc, t)} stroke={arcColor} strokeWidth={sw} lineCap="round" lineJoin="round"
-                              strokeScaleEnabled={false} perfectDrawEnabled={false} hitStrokeWidth={10} />
+                              strokeScaleEnabled={false} perfectDrawEnabled={false} hitStrokeWidth={Math.max(10, 14 / zoomRef.current)} />
                             {/* Door panel line: from hinge to closed position.
                                 Closed position = whichever arc endpoint (start or end angle)
                                 is closest to a jamb (dfl-*) line endpoint. */}
@@ -2846,7 +3324,6 @@ const HP_SCR = 7
                             })()}
                           </>
                         )}
-                        {/* Jamb stubs (wall thickness at door opening) */}
                         {/* Jamb stubs (wall thickness at door opening) */}
                         {frameLines.map(ln => {
                           const [x1, y1] = toC(ln.start.x, ln.start.y, t)
@@ -2899,14 +3376,21 @@ const HP_SCR = 7
                       finalWallColor = '#0073cf'  // Selection color
                     } else if (wallGroupColor && wallGroupColor.toUpperCase() !== '#FFFFFF') {
                       finalWallColor = wallGroupColor  // Use group's insert_layer color
-                    } else {
-                      finalWallColor = wall.isDetail
-                        ? '#60a5fa'
-                        : resolveExplicitColor(wall.color, wall.layer ?? '0', layerColorMap, strokeHex)
-                    }
-                    // ========== END OF ADDED BLOCK ==========
+                     } else if (wall.isHatchLine) {
+      finalWallColor = resolveExplicitColor(wall.color, wall.layer ?? '0', layerColorMap, '#808080')
+    } else if (wall.isDimLine) {
+      finalWallColor = '#00BFFF'
+    } else {
+      finalWallColor = wall.isDetail
+        ? '#60a5fa'
+        : resolveExplicitColor(wall.color, wall.layer ?? '0', layerColorMap, strokeHex)
+    }
 
-                    const strokeW = (wall.isOuter ? 2.8 : wall.isDetail ? 0.65 : 1.15) * strokeScale
+    const strokeW = wall.isHatchLine
+      ? 0.5 * strokeScale
+      : wall.isDimLine
+        ? 0.8 * strokeScale
+        : (wall.isOuter ? 2.8 : wall.isDetail ? 0.65 : 1.15) * strokeScale
                     // Bezier control points (canvas coords) for curved walls
                     const curvePts: number[] | null = wall.curveMidPt ? (() => {
                       const mx = wall.curveMidPt.x, my = wall.curveMidPt.y
@@ -2921,6 +3405,7 @@ const HP_SCR = 7
                           strokeScaleEnabled={false}
                           onMouseDown={e => {
                             if (isDrawingTool) return
+                            if (isLayerLocked(wall.layer ?? '0')) return
                             e.cancelBubble = true
                             didDragRef.current = false
                             selBeforeMouseDown.current = new Set(selectedIds)
@@ -2931,7 +3416,7 @@ const HP_SCR = 7
                               if (grp) {
                                 setSelectedGroupId(dxfGid)
                                 setSelectedId(null); setSelectedRoomIndex(null)
-                                setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null)
+                                setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
                                 const persistedSel = new Set<string>(isCtrl ? selectedIds : [])
                                 grp.wallIds.forEach(id => persistedSel.add(id))
                                 setSelectedIds(persistedSel)
@@ -2966,6 +3451,7 @@ const HP_SCR = 7
                           onMouseUp={e => { e.cancelBubble = true; onMidDragEnd() }}
                           onClick={e => {
                             if (isDrawingTool) return
+                            if (isLayerLocked(wall.layer ?? '0')) return
                             e.cancelBubble = true
                             if (didDragRef.current) { didDragRef.current = false; return }
                             const isCtrl = e.evt.ctrlKey || e.evt.metaKey
@@ -3013,7 +3499,7 @@ const HP_SCR = 7
                           <>
                             <Circle x={sx} y={sy} radius={HP_SCR} fill="#3b82f6" stroke="#fff"
                               strokeWidth={1.2} strokeScaleEnabled={false}
-                              scale={{ x: 1 / zoom, y: 1 / zoom }}
+                              scale={{ x: 1 / zoomRef.current, y: 1 / zoomRef.current }}
                               draggable perfectDrawEnabled={false}
                               onDragStart={() => { snapshot(); setIsDraggingEp(true); draggingEpInfo.current = { wallId: wall.id, ep: 'start' } }}
                               onDragMove={e => onEpDragMove(e, wall.id, 'start')}
@@ -3023,7 +3509,7 @@ const HP_SCR = 7
                             />
                             <Circle x={ex} y={ey} radius={HP_SCR} fill="#3b82f6" stroke="#fff"
                               strokeWidth={1.2} strokeScaleEnabled={false}
-                              scale={{ x: 1 / zoom, y: 1 / zoom }}
+                              scale={{ x: 1 / zoomRef.current, y: 1 / zoomRef.current }}
                               draggable perfectDrawEnabled={false}
                               onDragStart={() => { snapshot(); setIsDraggingEp(true); draggingEpInfo.current = { wallId: wall.id, ep: 'end' } }}
                               onDragMove={e => onEpDragMove(e, wall.id, 'end')}
@@ -3045,7 +3531,7 @@ const HP_SCR = 7
                                   fill={wall.curveMidPt ? '#3b82f6' : 'white'}
                                   stroke="#3b82f6" strokeWidth={1.2}
                                   strokeScaleEnabled={false}
-                                  scale={{ x: 1 / zoom, y: 1 / zoom }}
+                                  scale={{ x: 1 / zoomRef.current, y: 1 / zoomRef.current }}
                                   draggable perfectDrawEnabled={false}
                                   onDragStart={() => { snapshot() }}
                                   onDragMove={e => {
@@ -3079,38 +3565,6 @@ const HP_SCR = 7
                   )
                 })()}
 
-                  {alignGuides.map((g, i) => {
-                    if (g.type === 'h') {
-                      const [, cy] = toC(0, g.coord, t)
-                      return <Line key={`ag-h-${i}`} points={[0, cy, stageSize.w / zoom, cy]} stroke="#06b6d4" strokeWidth={0.8 / zoom} dash={[6 / zoom, 4 / zoom]} listening={false} opacity={0.85} />
-                    } else {
-                      const [cx] = toC(g.coord, 0, t)
-                      return <Line key={`ag-v-${i}`} points={[cx, 0, cx, stageSize.h / zoom]} stroke="#06b6d4" strokeWidth={0.8 / zoom} dash={[6 / zoom, 4 / zoom]} listening={false} opacity={0.85} />
-                    }
-                  })}
-
-                  {snapTarget && (() => {
-                    const [scx, scy] = toC(snapTarget.x, snapTarget.y, t)
-                    const r = 7 / zoom, sw = 1.5 / zoom
-                    return (
-                      <Group listening={false}>
-                        <Circle x={scx} y={scy} radius={r} stroke="#f59e0b" strokeWidth={sw} fill="rgba(245,158,11,0.10)" />
-                        <Line points={[scx - r * 1.6, scy, scx + r * 1.6, scy]} stroke="#f59e0b" strokeWidth={sw * 0.7} />
-                        <Line points={[scx, scy - r * 1.6, scx, scy + r * 1.6]} stroke="#f59e0b" strokeWidth={sw * 0.7} />
-                      </Group>
-                    )
-                  })()}
-
-                  {activeTool === 'drawLine' && drawLineAnchor && drawLinePointer && (
-                    <Line points={[...toC(drawLineAnchor.x, drawLineAnchor.y, t), ...toC(drawLinePointer.x, drawLinePointer.y, t)]} stroke="#3b82f6" strokeWidth={1.5 / zoom} lineCap="round" dash={[8 / zoom, 6 / zoom]} listening={false} />
-                  )}
-
-                  {activeTool === 'drawPolyline' && polylineDraft.length >= 1 && polylineHover && (
-                    <Group listening={false}>
-                      {polylineDraft.length >= 2 && <Line points={polylineDraft.flatMap(p => toC(p.x, p.y, t))} stroke="#3b82f6" strokeWidth={1.5 / zoom} lineCap="round" lineJoin="round" />}
-                      <Line points={[...toC(polylineDraft[polylineDraft.length - 1].x, polylineDraft[polylineDraft.length - 1].y, t), ...toC(polylineHover.x, polylineHover.y, t)]} stroke="#3b82f6" strokeWidth={1.5 / zoom} lineCap="round" dash={[8 / zoom, 6 / zoom]} />
-                    </Group>
-                  )}
 
                   {/* Arc draw preview */}
                   {activeTool === 'drawArc' && shapePointer && arcDraftCenter && (() => {
@@ -3122,9 +3576,9 @@ const HP_SCR = 7
                     if (arcDraftRadius === null) {
                       return (
                         <Group listening={false}>
-                          <Circle x={cx} y={cy} radius={5 / zoom} fill="#3b82f6" />
-                          <Line points={[cx, cy, px, py]} stroke="#3b82f6" strokeWidth={1.5 / zoom} dash={[6 / zoom, 4 / zoom]} />
-                          <Text x={px + 6 / zoom} y={py - 10 / zoom} text={fmtLen(pRadius)} fill="#3b82f6" fontSize={11 / zoom} listening={false} />
+                          <Circle x={cx} y={cy} radius={3 / zoomRef.current} fill="#3b82f6" />
+                          <Line points={[cx, cy, px, py]} stroke="#3b82f6" strokeWidth={1.5 / zoomRef.current} dash={[6 / zoomRef.current, 4 / zoomRef.current]} />
+                          <Text x={px + 6 / zoomRef.current} y={py - 10 / zoomRef.current} text={fmtLen(pRadius)} fill="#3b82f6" fontSize={11 / zoomRef.current} listening={false} />
                         </Group>
                       )
                     }
@@ -3133,30 +3587,30 @@ const HP_SCR = 7
                     const previewArc: DxfArc = { entity_type: 'ARC', handle: '__preview__', layer: '0', center: { x: arcDraftCenter.x, y: arcDraftCenter.y, z: 0 }, radius: arcDraftRadius, start_angle: arcDraftStartAngle!, end_angle: endAngle }
                     return (
                       <Group listening={false}>
-                        <Circle x={cx} y={cy} radius={5 / zoom} fill="#3b82f6" />
-                        <Line points={arcPoints(previewArc, t, 64)} stroke="#3b82f6" strokeWidth={1.5 / zoom} lineCap="round" lineJoin="round" dash={[6 / zoom, 4 / zoom]} />
+                        <Circle x={cx} y={cy} radius={3 / zoomRef.current} fill="#3b82f6" />
+                        <Line points={arcPoints(previewArc, t, 64)} stroke="#3b82f6" strokeWidth={1.5 / zoomRef.current} lineCap="round" lineJoin="round" dash={[6 / zoomRef.current, 4 / zoomRef.current]} />
                       </Group>
                     )
                   })()}
                   {activeTool === 'drawArc' && !arcDraftCenter && shapePointer && (() => {
                     const [px, py] = toC(shapePointer.x, shapePointer.y, t)
-                    return <Circle x={px} y={py} radius={5 / zoom} fill="#3b82f6" listening={false} />
+                    return <Circle x={px} y={py} radius={3 / zoomRef.current} fill="#3b82f6" listening={false} />
                   })()}
 
                   {/* Circle draw preview */}
                   {activeTool === 'drawCircle' && shapePointer && (() => {
                     if (!circleDraftCenter) {
                       const [px, py] = toC(shapePointer.x, shapePointer.y, t)
-                      return <Circle x={px} y={py} radius={5 / zoom} fill="#3b82f6" listening={false} />
+                      return <Circle x={px} y={py} radius={3 / zoomRef.current} fill="#3b82f6" listening={false} />
                     }
                     const [cx, cy] = toC(circleDraftCenter.x, circleDraftCenter.y, t)
                     const radius = Math.hypot(shapePointer.x - circleDraftCenter.x, shapePointer.y - circleDraftCenter.y)
                     if (radius < 0.01) return null
                     return (
                       <Group listening={false}>
-                        <Circle x={cx} y={cy} radius={5 / zoom} fill="#3b82f6" />
-                        <Circle x={cx} y={cy} radius={radius * t.sc} stroke="#3b82f6" strokeWidth={1.5 / zoom} fill="transparent" dash={[6 / zoom, 4 / zoom]} />
-                        <Text x={cx + radius * t.sc / Math.SQRT2 + 4 / zoom} y={cy - radius * t.sc / Math.SQRT2 - 14 / zoom} text={`r = ${fmtLen(radius)}`} fill="#3b82f6" fontSize={11 / zoom} listening={false} />
+                        <Circle x={cx} y={cy} radius={3 / zoomRef.current} fill="#3b82f6" />
+                        <Circle x={cx} y={cy} radius={radius * t.sc} stroke="#3b82f6" strokeWidth={1.5 / zoomRef.current} fill="transparent" dash={[6 / zoomRef.current, 4 / zoomRef.current]} />
+                        <Text x={cx + radius * t.sc / Math.SQRT2 + 4 / zoomRef.current} y={cy - radius * t.sc / Math.SQRT2 - 14 / zoomRef.current} text={`r = ${fmtLen(radius)}`} fill="#3b82f6" fontSize={11 / zoomRef.current} listening={false} />
                       </Group>
                     )
                   })()}
@@ -3169,54 +3623,77 @@ const HP_SCR = 7
                   />
 
                   {/* Labels — rendered above walls in same layer */}
-{showLabels && (<>
+                  {showLabels && (<>
                     {effectiveTexts.map(tx => {
                       if (!isLayerVisible(tx.layer)) return null
- 
+
                       // Strip trailing newlines, skip blank-only texts
-                      const textLines = tx.text.replace(/\n$/, '').split('\n').filter((l: string) => l.trim() !== '')
-                      if (textLines.length === 0) return null
- 
-                      // ── Geometry ─────────────────────────────────────────────
+                      // Split on explicit newlines first
+                      const rawTextLines = tx.text.replace(/\n$/, '').split('\n').filter((l: string) => l.trim() !== '')
+                      if (rawTextLines.length === 0) return null
+
+                      const fs = Math.max(5, tx.height * t.sc)
+                      const lineHeight = fs * 1.35
+                      const charW = fs * 0.55   // proportional-font char width estimate
+
+                      // Honour MTEXT ref_width: sub-split lines that exceed the text box width
+                      const refWidthPx = (tx as any).ref_width ? (tx as any).ref_width * t.sc : 0
+
+                      function _wrapLine(line: string, maxW: number): string[] {
+                        if (maxW <= 0 || line.length * charW <= maxW) return [line]
+                        const charsPerLine = Math.max(1, Math.floor(maxW / charW))
+                        const words = line.split(' ')
+                        const result: string[] = []
+                        let cur = ''
+                        for (const word of words) {
+                          const test = cur ? `${cur} ${word}` : word
+                          if (cur && test.length * charW > maxW) { result.push(cur); cur = word }
+                          else cur = test
+                        }
+                        if (cur) result.push(cur)
+                        return result.length > 0 ? result : [line]
+                      }
+
+                      const textLines = rawTextLines.flatMap(line =>
+                        refWidthPx > 0 ? _wrapLine(line, refWidthPx) : [line]
+                      )
+
                       const [lxRaw, lyRaw] = toC(tx.position.x, tx.position.y, t)
- 
-                      // tx.height is in model-space units — scale directly.
-                      // No extra multiplier: v7.4+ converter stores real cap-heights.
-                      const fs         = Math.max(5, tx.height * t.sc)
-                      const lineHeight  = fs * 1.35
                       const longestLine = textLines.reduce((a: string, b: string) => a.length > b.length ? a : b, '')
-                      const estW        = Math.max(fs * 1.5, longestLine.length * fs * 0.52)
-                      const estH        = lineHeight * textLines.length
- 
+                      const estW = refWidthPx > 0
+                        ? refWidthPx
+                        : Math.max(fs * 1.5, longestLine.length * charW)
+                      const estH = lineHeight * textLines.length
+
                       // ── Alignment ────────────────────────────────────────────
                       // halign: 0=left  1=center  2=right
                       // valign: 0=baseline  1=bottom  2=middle  3=top
                       const halign: number = (tx as any).halign ?? 0
                       const valign: number = (tx as any).valign ?? 1
                       const rotation: number = tx.rotation ?? 0
- 
+
                       // Offsets are in text-local space (applied by inner Group,
                       // AFTER the outer Group has already applied the rotation).
                       // This is the only correct approach — putting offsets on the
                       // outer Group would shift along canvas axes, not text axes.
                       let offsetX = 0
-                      if (halign === 1)      offsetX = -estW / 2   // center
+                      if (halign === 1) offsetX = -estW / 2   // center
                       else if (halign === 2) offsetX = -estW        // right
- 
+
                       let offsetY = 0
-                      if (valign === 3)      offsetY = 0            // top anchor
+                      if (valign === 3) offsetY = 0            // top anchor
                       else if (valign === 2) offsetY = -estH / 2    // middle anchor
-                      else                   offsetY = -estH         // bottom / baseline
- 
+                      else offsetY = -estH         // bottom / baseline
+
                       // ── State ────────────────────────────────────────────────
-                      const isTxtSel  = selectedIds.has(tx.handle)
+                      const isTxtSel = selectedIds.has(tx.handle)
                       const isEditing = editingTextHandle === tx.handle
-                      const HR_tx     = HP_SCR / zoom
-                      const selColor  = '#f59e0b'
+                      const HR_tx = HP_SCR / zoomRef.current
+                      const selColor = '#f59e0b'
                       const textColor = isTxtSel
                         ? selColor
                         : resolveExplicitColor(tx.color, tx.layer, layerColorMap, '#1e293b')
- 
+
                       return (
                         <Group
                           key={tx.handle}
@@ -3225,12 +3702,13 @@ const HP_SCR = 7
                           // Outer Group: sits at DXF insert point, rotates around it.
                           // Konva rotation = CW degrees; DXF = CCW degrees → negate.
                           rotation={-rotation}
-                          onClick={(e) => {
+                            onClick={(e) => {
                             if (isDrawingTool) return
+                            if (isLayerLocked(tx.layer)) return
                             e.cancelBubble = true
                             if (activeTool === 'hand' || spaceHeld) return
                             if (activeTool !== 'select') return
-                            setSelectedRoomIndex(null); setSelectedId(null)
+                            setSelectedRoomIndex(null); setSelectedId(null); setSelectedDimKey(null)
                             const isCtrl = e.evt.ctrlKey || e.evt.metaKey
                             setSelectedIds(prev => {
                               const next = new Set(isCtrl ? prev : [])
@@ -3240,8 +3718,9 @@ const HP_SCR = 7
                             })
                             setSelectedTextHandle(isTxtSel && !e.evt.ctrlKey ? null : tx.handle)
                           }}
-                          onMouseDown={e => {
+                         onMouseDown={e => {
                             if (isEditing) return
+                            if (isLayerLocked(tx.layer)) return
                             e.cancelBubble = true
                             if (activeTool !== 'select' || spaceHeld) return
                             const isCtrl = e.evt.ctrlKey || e.evt.metaKey
@@ -3253,6 +3732,7 @@ const HP_SCR = 7
                           onMouseUp={e => { e.cancelBubble = true; onMidDragEnd() }}
                           onDblClick={e => {
                             e.cancelBubble = true
+                            if (isLayerLocked(tx.layer)) return
                             if (activeTool !== 'select') return
                             setEditingTextHandle(tx.handle)
                             setEditingTextValue(tx.text.split('\n')[0])
@@ -3278,10 +3758,10 @@ const HP_SCR = 7
 
                             {/* Invisible hit-area — always present so the outer Group is clickable even when not selected */}
                             <Rect
-                              x={-2 / zoom}
-                              y={-2 / zoom}
-                              width={estW + 4 / zoom}
-                              height={estH + 4 / zoom}
+                              x={-2 / zoomRef.current}
+                              y={-2 / zoomRef.current}
+                              width={estW + 4 / zoomRef.current}
+                              height={estH + 4 / zoomRef.current}
                               fill="transparent"
                               perfectDrawEnabled={false}
                             />
@@ -3289,18 +3769,18 @@ const HP_SCR = 7
                             {/* Selection highlight rectangle */}
                             {isTxtSel && !isEditing && (
                               <Rect
-                                x={-2 / zoom}
-                                y={-2 / zoom}
-                                width={estW + 4 / zoom}
-                                height={estH + 4 / zoom}
+                                x={-2 / zoomRef.current}
+                                y={-2 / zoomRef.current}
+                                width={estW + 4 / zoomRef.current}
+                                height={estH + 4 / zoomRef.current}
                                 fill="rgba(245,158,11,0.12)"
                                 stroke={selColor}
-                                strokeWidth={1.2 / zoom}
-                                cornerRadius={2 / zoom}
+                                strokeWidth={1.2 / zoomRef.current}
+                                cornerRadius={2 / zoomRef.current}
                                 listening={false}
                               />
                             )}
- 
+
                             {/* Render each text line */}
                             {!isEditing && textLines.map((line: string, li: number) => (
                               <Text
@@ -3316,16 +3796,16 @@ const HP_SCR = 7
                                 perfectDrawEnabled={false}
                               />
                             ))}
- 
+
                             {/* Font-size resize grip — drag right to enlarge */}
                             {isTxtSel && selectedIds.size === 1 && activeTool === 'select' && (
                               <Circle
-                                x={estW + 4 / zoom}
+                                x={estW + 4 / zoomRef.current}
                                 y={estH / 2}
                                 radius={HR_tx}
                                 fill="#3b82f6"
                                 stroke="#fff"
-                                strokeWidth={1.2 / zoom}
+                                strokeWidth={1.2 / zoomRef.current}
                                 draggable
                                 perfectDrawEnabled={false}
                                 onDragStart={() => {
@@ -3353,12 +3833,12 @@ const HP_SCR = 7
                                       t2.handle === tx.handle ? { ...t2, height: newH } : t2
                                     ),
                                   }))
-                                  e.target.position({ x: estW + 4 / zoom, y: estH / 2 })
+                                  e.target.position({ x: estW + 4 / zoomRef.current, y: estH / 2 })
                                 }}
                                 onDragEnd={(e) => {
                                   e.cancelBubble = true
                                   textHeightDragRef.current = null
-                                  e.target.position({ x: estW + 4 / zoom, y: estH / 2 })
+                                  e.target.position({ x: estW + 4 / zoomRef.current, y: estH / 2 })
                                 }}
                                 onMouseEnter={ev => {
                                   ev.target.getStage()!.container().style.cursor = 'ew-resize'
@@ -3368,7 +3848,7 @@ const HP_SCR = 7
                                 }}
                               />
                             )}
- 
+
                           </Group>
                         </Group>
                       )
@@ -3378,11 +3858,11 @@ const HP_SCR = 7
 
                 {effectiveSelBBox && (selectedIds.size > 0 || selectedWinKey !== null || selectedFurnKey !== null) && activeTool === 'select' && !activeDrag && (() => {
                   const { minCX, minCY, maxCX, maxCY } = effectiveSelBBox
-                  const pad = 18 / zoom
+                  const pad = 18 / zoomRef.current
                   const w = maxCX - minCX, h = maxCY - minCY
                   // For text-only selection, show only a selection outline + rotation — no resize squares
                   const onlyTexts = (selectedWinKey || selectedFurnKey) ? false : [...selectedIds].every(id => planDoc.texts.some(tx => tx.handle === id))
-                  const handleSize = 8 / zoom, halfHandle = handleSize / 2
+                  const handleSize = 8 / zoomRef.current, halfHandle = handleSize / 2
                   const corners = {
                     nw: { x: minCX - pad, y: minCY - pad }, ne: { x: maxCX + pad, y: minCY - pad },
                     sw: { x: minCX - pad, y: maxCY + pad }, se: { x: maxCX + pad, y: maxCY + pad },
@@ -3390,12 +3870,12 @@ const HP_SCR = 7
                     e: { x: maxCX + pad, y: minCY + h / 2 }, w: { x: minCX - pad, y: minCY + h / 2 },
                   }
                   const cx = (minCX + maxCX) / 2
-                  const topY = minCY - pad, stemLen = 28 / zoom, handleY = topY - stemLen, rotHandleR = 7 / zoom
+                  const topY = minCY - pad, stemLen = 28 / zoomRef.current, handleY = topY - stemLen, rotHandleR = 7 / zoomRef.current
                   return (
                     <Layer>
                       {!onlyTexts && Object.entries(corners).map(([pos, pt]) => (
                         <Rect key={pos} x={pt.x - halfHandle} y={pt.y - halfHandle} width={handleSize} height={handleSize}
-                          fill="white" stroke="#3b82f6" strokeWidth={1.5 / zoom}
+                          fill="white" stroke="#3b82f6" strokeWidth={1.5 / zoomRef.current}
                           onMouseDown={e => {
                             e.cancelBubble = true
                             if (!baseSelWBox) return
@@ -3423,8 +3903,8 @@ const HP_SCR = 7
                           onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
                         />
                       ))}
-                      <Line points={[cx, topY, cx, handleY]} stroke="#3b82f6" strokeWidth={1 / zoom} listening={false} />
-                      <Circle x={cx} y={handleY} radius={rotHandleR} fill={rotationDrag ? '#3b82f6' : 'white'} stroke="#3b82f6" strokeWidth={1.5 / zoom}
+                      <Line points={[cx, topY, cx, handleY]} stroke="#3b82f6" strokeWidth={1 / zoomRef.current} listening={false} />
+                      <Circle x={cx} y={handleY} radius={rotHandleR} fill={rotationDrag ? '#3b82f6' : 'white'} stroke="#3b82f6" strokeWidth={1.5 / zoomRef.current}
                         onMouseDown={e => {
                           e.cancelBubble = true
                           if (!baseSelCenter) return
@@ -3462,8 +3942,8 @@ const HP_SCR = 7
                     ax /= room.length; ay /= room.length
                     const [rcx, rcy] = toC(ax, ay, t)
                     return (
-                      <Circle x={rcx} y={rcy} radius={Math.max(HR * 1.15, 8 / zoom)}
-                        fill="#f59e0b" stroke="#fff" strokeWidth={1.2 / zoom}
+                      <Circle x={rcx} y={rcy} radius={Math.max(HR * 1.15, 8 / zoomRef.current)}
+                        fill="#f59e0b" stroke="#fff" strokeWidth={1.2 / zoomRef.current}
                         draggable={!activeDrag}
                         onDragStart={e => { e.cancelBubble = true; onRoomMoveDragStart(e) }}
                         onDragMove={e => { e.cancelBubble = true; onRoomMoveDragMove(e) }}
@@ -3474,11 +3954,14 @@ const HP_SCR = 7
                     )
                   })()}
                 </Layer>
+                <Layer ref={snapLayerRef} listening={false}>
+                  <Shape sceneFunc={snapSceneFunc} listening={false} />
+                </Layer>
               </Stage>
 
               {effectiveSelBBox && selectedIds.size > 0 && activeTool === 'select' && !activeDrag && (() => {
                 const { minCX, minCY, maxCX, maxCY } = effectiveSelBBox
-                const pad = 6 / zoom
+                const pad = 6 / zoomRef.current
                 const rX = minCX - pad, rY = minCY - pad
                 const rW = (maxCX - minCX) + pad * 2, rH = (maxCY - minCY) + pad * 2
                 const selWalls = effectiveWalls.filter(ww => selectedIds.has(ww.id))
@@ -3488,8 +3971,8 @@ const HP_SCR = 7
                   for (const ww of selWalls) for (const p of [ww.start, ww.end]) { mnX = Math.min(mnX, p.x); mxX = Math.max(mxX, p.x); mnY = Math.min(mnY, p.y); mxY = Math.max(mxY, p.y) }
                   dimW = Math.abs(mxX - mnX); dimH = Math.abs(mxY - mnY)
                 }
-                const DIM_OFFSET = 22 / zoom, TICK = 5 / zoom, ARROW_SZ = 6 / zoom, FS = 11 / zoom, SW = 1 / zoom
-                const DASH = `${5 / zoom},${3 / zoom}`
+                const DIM_OFFSET = 22 / zoomRef.current, TICK = 5 / zoomRef.current, ARROW_SZ = 6 / zoomRef.current, FS = 11 / zoomRef.current, SW = 1 / zoomRef.current
+                const DASH = `${5 / zoomRef.current},${3 / zoomRef.current}`
                 const wDimY = rY + rH + DIM_OFFSET, wMidX = rX + rW / 2
                 const hDimX = rX + rW + DIM_OFFSET, hMidY = rY + rH / 2
                 const arrowPath = (tipX: number, tipY: number, fromX: number, fromY: number) => {
@@ -3498,7 +3981,7 @@ const HP_SCR = 7
                 }
                 return (
                   <svg style={{ position: 'absolute', top: 0, left: 0, width: stageSize.w, height: stageSize.h, pointerEvents: 'none', overflow: 'visible' }}>
-                    <g transform={`translate(${pos.x},${pos.y}) scale(${zoom})`}>
+                    <g transform={`translate(${posRef.current.x},${posRef.current.y}) scale(${zoomRef.current})`}>
                       <rect x={rX} y={rY} width={rW} height={rH} fill="none" stroke="#3b82f6" strokeWidth={SW} strokeDasharray={DASH} />
                       {dimW > 0.01 && <>
                         <line x1={rX} y1={rY + rH} x2={rX} y2={wDimY + TICK} stroke="#64748b" strokeWidth={SW * 0.8} />
@@ -3521,39 +4004,39 @@ const HP_SCR = 7
                 )
               })()}
 
-  {editingTextHandle && (() => {
+              {editingTextHandle && (() => {
                 const tx = planDoc.texts.find(t => t.handle === editingTextHandle)
                 if (!tx) return null
- 
+
                 // Mirror the renderer geometry exactly so the textarea
                 // overlays the Konva text at the same position and size.
                 const [lxRaw, lyRaw] = toC(tx.position.x, tx.position.y, t)
-                const fs          = Math.max(5, tx.height * t.sc)
-                const lineHeight  = fs * 1.35
-                const textLines   = tx.text.replace(/\n$/, '').split('\n').filter((l: string) => l.trim() !== '')
+                const fs = Math.max(5, tx.height * t.sc)
+                const lineHeight = fs * 1.35
+                const textLines = tx.text.replace(/\n$/, '').split('\n').filter((l: string) => l.trim() !== '')
                 const longestLine = textLines.reduce((a: string, b: string) => a.length > b.length ? a : b, '')
-                const estW        = Math.max(fs * 1.5, longestLine.length * fs * 0.52)
-                const estH        = lineHeight * Math.max(1, textLines.length)
- 
+                const estW = Math.max(fs * 1.5, longestLine.length * fs * 0.52)
+                const estH = lineHeight * Math.max(1, textLines.length)
+
                 const halign: number = (tx as any).halign ?? 0
                 const valign: number = (tx as any).valign ?? 1
- 
+
                 let offsetX = 0
-                if (halign === 1)      offsetX = -estW / 2
+                if (halign === 1) offsetX = -estW / 2
                 else if (halign === 2) offsetX = -estW
- 
+
                 let offsetY = 0
-                if (valign === 3)      offsetY = 0
+                if (valign === 3) offsetY = 0
                 else if (valign === 2) offsetY = -estH / 2
-                else                   offsetY = -estH
- 
+                else offsetY = -estH
+
                 // Convert canvas-local → screen coordinates.
                 // We ignore rotation here: the textarea is a DOM element and
                 // can't be CSS-rotated without breaking input handling, so we
                 // place it at the unrotated position.  Close enough for editing.
-                const screenX = (lxRaw + offsetX) * zoom + pos.x
-                const screenY = (lyRaw + offsetY) * zoom + pos.y
- 
+                const screenX = (lxRaw + offsetX) * zoomRef.current + posRef.current.x
+                const screenY = (lyRaw + offsetY) * zoomRef.current + posRef.current.y
+
                 const commitEdit = () => {
                   const val = editingTextValue.trim()
                   if (val) {
@@ -3571,7 +4054,7 @@ const HP_SCR = 7
                   }
                   setEditingTextHandle(null)
                 }
- 
+
                 return (
                   <textarea
                     key={editingTextHandle}
@@ -3585,29 +4068,29 @@ const HP_SCR = 7
                       if (e.key === 'Escape') { setEditingTextHandle(null) }
                     }}
                     style={{
-                      position:     'absolute',
-                      left:         screenX,
-                      top:          screenY,
-                      minWidth:     Math.max(80, estW * zoom),
-                      fontSize:     fs * zoom,
-                      fontFamily:   "'Arial', system-ui, sans-serif",
-                      fontWeight:   'normal',
-                      color:        '#f59e0b',
-                      background:   'rgba(255,255,255,0.92)',
-                      border:       '1.5px solid #f59e0b',
+                      position: 'absolute',
+                      left: screenX,
+                      top: screenY,
+                      minWidth: Math.max(80, estW * zoomRef.current),
+                      fontSize: fs * zoomRef.current,
+                      fontFamily: "'Arial', system-ui, sans-serif",
+                      fontWeight: 'normal',
+                      color: '#f59e0b',
+                      background: 'rgba(255,255,255,0.92)',
+                      border: '1.5px solid #f59e0b',
                       borderRadius: 3,
-                      padding:      '1px 4px',
-                      outline:      'none',
-                      resize:       'none',
-                      overflow:     'hidden',
-                      zIndex:       200,
-                      lineHeight:   1.35,
-                      boxShadow:    '0 2px 8px rgba(0,0,0,0.15)',
+                      padding: '1px 4px',
+                      outline: 'none',
+                      resize: 'none',
+                      overflow: 'hidden',
+                      zIndex: 200,
+                      lineHeight: 1.35,
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
                     }}
                   />
                 )
               })()}
- 
+
             </div>
           </div>
         </main>
@@ -3665,9 +4148,60 @@ const HP_SCR = 7
 
           <div className="dxf-prop-panel">
             <div className="dxf-prop-label">Editing</div>
-            <label className="dxf-toggle"><input type="checkbox" checked={snapEnabled} onChange={e => setSnapEnabled(e.target.checked)} /> Snap endpoints</label>
-            <label className="dxf-toggle"><input type="checkbox" checked={showDetail} onChange={e => setShowDetail(e.target.checked)} /> Detail lines (stairs)</label>
+            <label className="dxf-toggle"><input type="checkbox" checked={snapEnabled} onChange={e => setSnapEnabled(e.target.checked)} /> Snap (endpoint, midpoint, center)</label>
+            <label className="dxf-toggle"><input type="checkbox" checked={polarTrackingEnabled} onChange={e => setPolarTrackingEnabled(e.target.checked)} /> Polar Tracking (F10)</label>
             <label className="dxf-toggle"><input type="checkbox" checked={orthoEnabled} onChange={e => setOrthoEnabled(e.target.checked)} /> Ortho Mode (O)</label>
+            <label className="dxf-toggle"><input type="checkbox" checked={showDetail} onChange={e => setShowDetail(e.target.checked)} /> Detail lines (stairs)</label>
+            
+            {/* New annotation management buttons */}
+            <div className="dxf-export-btns" style={{ gap: '4px', marginTop: '8px' }}>
+              <button 
+                className="dxf-action-btn" 
+                onClick={() => {
+                  const annoLayers = (planDoc.layers ?? [])
+                    .filter(l => ANNOTATION_LAYER_PATTERNS.some(p => l.name.includes(p)))
+                    .map(l => l.name)
+                  if (annoLayers.length === 0) return
+                  const allHidden = annoLayers.every(l => hiddenLayers.has(l))
+                  setHiddenLayers(prev => {
+                    const next = new Set(prev)
+                    if (allHidden) annoLayers.forEach(l => next.delete(l))
+                    else annoLayers.forEach(l => next.add(l))
+                    return next
+                  })
+                }}
+                style={{ fontSize: '11px', flex: 1 }}
+              >
+                {(planDoc.layers ?? [])
+                  .filter(l => ANNOTATION_LAYER_PATTERNS.some(p => l.name.includes(p)))
+                  .every(l => hiddenLayers.has(l)) ? '👁️ Show Annotations' : '👁️‍🗨️ Hide Annotations'}
+              </button>
+              <button 
+                className="dxf-action-btn" 
+                onClick={() => {
+                  const dimLayers = (planDoc.layers ?? [])
+                    .filter(l => l.name.includes('Dim') || l.name.includes('A-Anno-Dims'))
+                    .map(l => l.name)
+                  if (dimLayers.length === 0) return
+                  const allLocked = dimLayers.every(l => lockedLayers.has(l))
+                  setLockedLayers(prev => {
+                    const next = new Set(prev)
+                    if (allLocked) dimLayers.forEach(l => next.delete(l))
+                    else dimLayers.forEach(l => next.add(l))
+                    return next
+                  })
+                }}
+                style={{ fontSize: '11px', flex: 1 }}
+              >
+                {(planDoc.layers ?? [])
+                  .filter(l => l.name.includes('Dim'))
+                  .every(l => lockedLayers.has(l)) ? '🔓 Unlock Dims' : '🔒 Lock Dims'}
+              </button>
+            </div>
+            <p className="dxf-prop-hint" style={{ fontSize: '11px', marginTop: '6px' }}>
+              💡 Lock annotation layers before editing walls to prevent accidental selection.
+            </p>
+            
             <button className="dxf-action-btn" onClick={undo} disabled={!history.length}>Undo</button>
             <button
               type="button"
@@ -3683,12 +4217,15 @@ const HP_SCR = 7
                 setSelectedArcHandle(null)
                 setSelectedWinKey(null)
                 setSelectedFurnKey(null)
+                setSelectedDimKey(null)
                 drawLineAnchorRef.current = null
                 setDrawLineAnchor(null)
-                setDrawLinePointer(null)
+                drawLinePointerRef.current = null
                 polylineDraftRef.current = []
                 setPolylineDraft([])
-                setPolylineHover(null)
+                polylineHoverRef.current = null
+                snapTargetRef.current = null; alignGuidesRef.current = []; lastSnapTypeRef.current = null
+                snapLayerRef.current?.batchDraw()
                 setArcDraftCenter(null)
                 setArcDraftRadius(null)
                 setArcDraftStartAngle(null)
@@ -3774,19 +4311,34 @@ const HP_SCR = 7
           )}
 
           {/* ════════════════════════════════════════════════════════════════
-              NEW PANEL: Layer visibility
+              Layer visibility and locking panel
               ════════════════════════════════════════════════════════════════ */}
           {(planDoc.layers ?? []).length > 0 && (
             <div className="dxf-prop-panel">
               <div className="dxf-prop-label">Layers</div>
-              <p className="dxf-prop-hint">Toggle visibility per layer.</p>
+              <p className="dxf-prop-hint">Toggle visibility (checkbox) or lock (🔒) to prevent editing.</p>
+              <button
+                type="button"
+                className="dxf-action-btn"
+                style={{ marginBottom: 8, width: '100%' }}
+                onClick={toggleAnnotationLayers}
+              >
+                {(() => {
+                  const annoLayers = (planDoc.layers ?? [])
+                    .filter(l => ANNOTATION_LAYER_PATTERNS.some(p => l.name.includes(p)))
+                    .map(l => l.name)
+                  const allLocked = annoLayers.length > 0 && annoLayers.every(l => lockedLayers.has(l))
+                  return allLocked ? '🔓 Unlock Annotation Layers' : '🔒 Lock Annotation Layers'
+                })()}
+              </button>
               {(planDoc.layers ?? []).map(lyr => {
                 const isHidden = hiddenLayers.has(lyr.name)
+                const isLocked = lockedLayers.has(lyr.name)
                 const swatchColor = lyr.true_color
                   ?? ACI_PALETTE[lyr.color > 0 ? lyr.color : 7]
                   ?? '#888888'
                 return (
-                  <label key={lyr.name} className="dxf-toggle" style={{ alignItems: 'center', gap: 6 }}>
+                  <div key={lyr.name} style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3 }}>
                     <input
                       type="checkbox"
                       checked={!isHidden}
@@ -3798,8 +4350,8 @@ const HP_SCR = 7
                           return next
                         })
                       }}
+                      style={{ flexShrink: 0 }}
                     />
-                    {/* Colour swatch */}
                     <span style={{
                       display: 'inline-block',
                       width: 10, height: 10,
@@ -3815,33 +4367,60 @@ const HP_SCR = 7
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
-                      maxWidth: 120,
+                      flex: 1,
+                      textDecoration: isLocked ? 'line-through' : 'none',
+                      color: isLocked ? '#94a3b8' : undefined,
                     }}>
                       {lyr.name}
                     </span>
-                    {lyr.is_frozen && (
-                      <span style={{ fontSize: 10, opacity: 0.5 }}>(frozen)</span>
-                    )}
-                    {lyr.is_locked && (
-                      <span style={{ fontSize: 10, opacity: 0.5 }}>(locked)</span>
-                    )}
-                  </label>
+                    {lyr.is_frozen && <span style={{ fontSize: 10, opacity: 0.5 }}>❄</span>}
+                    <button
+                      type="button"
+                      title={isLocked ? 'Unlock layer' : 'Lock layer'}
+                      onClick={() => {
+                        setLockedLayers(prev => {
+                          const next = new Set(prev)
+                          if (isLocked) next.delete(lyr.name)
+                          else next.add(lyr.name)
+                          return next
+                        })
+                      }}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        padding: '0 2px',
+                        fontSize: 12,
+                        opacity: isLocked ? 1 : 0.25,
+                        color: isLocked ? '#f59e0b' : 'inherit',
+                        flexShrink: 0,
+                      }}
+                    >
+                      {isLocked ? '🔒' : '🔓'}
+                    </button>
+                  </div>
                 )
               })}
-              {hiddenLayers.size > 0 && (
-                <button
-                  type="button"
-                  className="dxf-action-btn"
-                  style={{ marginTop: 8 }}
-                  onClick={() => setHiddenLayers(new Set())}
-                >
-                  Show all layers
-                </button>
+              {(hiddenLayers.size > 0 || lockedLayers.size > 0) && (
+                <div style={{ display: 'flex', gap: 4, marginTop: 8 }}>
+                  {hiddenLayers.size > 0 && (
+                    <button type="button" className="dxf-action-btn" style={{ flex: 1 }}
+                      onClick={() => setHiddenLayers(new Set())}>
+                      Show all
+                    </button>
+                  )}
+                  {lockedLayers.size > 0 && (
+                    <button type="button" className="dxf-action-btn" style={{ flex: 1 }}
+                      onClick={() => setLockedLayers(new Set())}>
+                      Unlock all
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           )}
           {/* ════════════════════════════════════════════════════════════════
-              END NEW PANEL
+              END LAYER PANEL
               ════════════════════════════════════════════════════════════════ */}
 
           <div className="dxf-prop-panel">

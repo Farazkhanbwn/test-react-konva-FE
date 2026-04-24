@@ -71,6 +71,8 @@ export interface WallSeg {
   color?: number | string | null
   /** Optional bezier curve: the user-dragged midpoint that defines the curve. */
   curveMidPt?: { x: number; y: number }
+  isHatchLine?: boolean   // ← ADD: HL* hatch strokes — excluded from room detection only
+  isDimLine?: boolean   
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -562,16 +564,22 @@ export function wallsFromDxfJson(doc: DxfJsonDocument): WallSeg[] {
   const ws: WallSeg[] = []
 
   /* ── LINE entities ── */
-  for (const ln of doc.lines) {
-    if (ln.handle.startsWith('dfl-') || ln.handle.startsWith('win-')) continue
+ 
+ for (const ln of doc.lines) {
+    if (ln.handle.startsWith('dfl-')) continue
+    if (ln.handle.startsWith('win-')) continue
     const len = Math.hypot(ln.end.x - ln.start.x, ln.end.y - ln.start.y)
     if (len < 0.01) continue
+    const isHL = ln.handle.startsWith('HL')
+    const isDM = ln.handle.startsWith('DM')
     ws.push({
       id: `ln-${ln.handle}`,
       start: { x: ln.start.x, y: ln.start.y },
       end:   { x: ln.end.x,   y: ln.end.y   },
       isOuter: false,
       isDetail: len < DETAIL_LEN_M,
+      ...(isHL ? { isHatchLine: true } : {}),
+      ...(isDM ? { isDimLine: true }   : {}),
       layer: ln.layer,
       color: ln.color,
     })
@@ -603,6 +611,7 @@ export function wallsFromDxfJson(doc: DxfJsonDocument): WallSeg[] {
  */
 export function renderItemsFromDxfJson(doc: DxfJsonDocument): RenderItem[] {
   const items: RenderItem[] = []
+
 
   /* ── CIRCLE ── */
   for (const c of doc.circles ?? []) {
@@ -721,6 +730,7 @@ export function renderItemsFromDxfJson(doc: DxfJsonDocument): RenderItem[] {
       invisibleEdges: f.invisible_edges,
     })
   }
+
 
   /* ── MESH ── */
   for (const m of doc.meshes ?? []) {
