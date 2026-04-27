@@ -16,7 +16,7 @@ import {
   type DxfPolyline,
   type DxfPolylineVertex,
 } from '@/constants/dxfJsonData'
-import type { CanvasGroup } from '@/utils/wallsFromDxfJson'
+import type { CanvasGroup, RenderCircle } from '@/utils/wallsFromDxfJson'
 import { FurnitureLibraryPanel, FURNITURE_DXF_DRAG_MIME } from '@/components/FurnitureLibraryPanel'
 import {
   buildFurnitureLinesFromLibraryId,
@@ -440,7 +440,7 @@ type T = ReturnType<typeof buildT>
 
 /* ─── Polar Tracking ─────────────────────────────────────────────────────────── */
 const POLAR_ANGLES_DEG = [0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240, 255, 270, 285, 300, 315, 330, 345]
-const POLAR_TH_DEG = 8
+const POLAR_TH_DEG = 4
 
 function applyPolar(wx: number, wy: number, ax: number, ay: number): { x: number; y: number; angle: number | null } {
   const dx = wx - ax, dy = wy - ay
@@ -559,7 +559,7 @@ function DxfJsonViewPageInner() {
   const snapLineWallRef = useRef<{ wallId: string; t: number } | null>(null)
   const [isDraggingEp, setIsDraggingEp] = useState(false)
   const [spaceHeld, setSpaceHeld] = useState(false)
-  const [polarTrackingEnabled, setPolarTrackingEnabled] = useState(true)
+  const [polarTrackingEnabled, setPolarTrackingEnabled] = useState(false)
   const tRef = useRef(t)
   const stageSizeRef = useRef(stageSize)
   const activeToolRef = useRef<string>(activeTool)
@@ -578,20 +578,65 @@ function DxfJsonViewPageInner() {
   )
  
   const ANNOTATION_LAYER_PATTERNS = ['A-Anno', 'A-Flor-LVL', 'A-Flor-Levl', 'Defpoints', 'A-Anno-Text', 'A-Anno-Dims', 'A-Anno-Iden']
- 
-  const toggleAnnotationLayers = useCallback(() => {
-    const annotationLayers = (planDoc.layers ?? [])
+
+  // Maps DXF layer name fragments to readable display names
+  const LAYER_FRIENDLY_NAMES: Array<[string, string]> = [
+    ['A-Anno-Dims', 'Dimensions'],
+    ['A-Anno-Text', 'Annotations (Text)'],
+    ['A-Anno-Iden', 'Annotations (ID)'],
+    ['A-Anno',      'Annotations'],
+    ['A-Flor-LVL',  'Floor Levels'],
+    ['A-Flor-Levl', 'Floor Levels'],
+    ['A-Flor-Hral', 'Floor Rails'],
+    ['A-Flor',      'Floor'],
+    ['A-Wall',      'Walls'],
+    ['A-Door',      'Doors'],
+    ['A-Glaz',      'Windows / Glazing'],
+    ['A-Furn',      'Furniture'],
+    ['A-Clng',      'Ceiling'],
+    ['A-Elev',      'Elevations'],
+    ['Defpoints',   'Reference Points'],
+  ]
+  const getFriendlyLayerName = (name: string): string => {
+    for (const [pat, label] of LAYER_FRIENDLY_NAMES) {
+      if (name.includes(pat)) return label
+    }
+    return name
+  }
+
+  const getAnnotationLayers = useCallback(
+    () => (planDoc.layers ?? [])
       .filter(l => ANNOTATION_LAYER_PATTERNS.some(p => l.name.includes(p)))
-      .map(l => l.name)
-    if (annotationLayers.length === 0) return
-    const allLocked = annotationLayers.every(l => lockedLayers.has(l))
-    setLockedLayers(prev => {
+      .map(l => l.name),
+    [planDoc.layers],
+  )
+
+  const toggleAnnotationVisibility = useCallback(() => {
+    const annoLayers = getAnnotationLayers()
+    if (annoLayers.length === 0) return
+    const allHidden = annoLayers.every(l => hiddenLayers.has(l))
+    setHiddenLayers(prev => {
       const next = new Set(prev)
-      if (allLocked) annotationLayers.forEach(l => next.delete(l))
-      else annotationLayers.forEach(l => next.add(l))
+      if (allHidden) annoLayers.forEach(l => next.delete(l))
+      else annoLayers.forEach(l => next.add(l))
       return next
     })
-  }, [planDoc.layers, lockedLayers])
+  }, [getAnnotationLayers, hiddenLayers])
+
+  const toggleAnnotationLock = useCallback(() => {
+    const annoLayers = getAnnotationLayers()
+    if (annoLayers.length === 0) return
+    const allLocked = annoLayers.every(l => lockedLayers.has(l))
+    setLockedLayers(prev => {
+      const next = new Set(prev)
+      if (allLocked) annoLayers.forEach(l => next.delete(l))
+      else annoLayers.forEach(l => next.add(l))
+      return next
+    })
+  }, [getAnnotationLayers, lockedLayers])
+
+  // Keep old name as alias for backward compat with any callers
+  const toggleAnnotationLayers = toggleAnnotationLock
 
   const layerColorMap = useMemo(() => {
     const m = new Map<string, string>()
@@ -610,6 +655,15 @@ function DxfJsonViewPageInner() {
   const renderItems = useMemo(
     () => renderItemsFromDxfJson(planDoc),
     [planDoc],
+  )
+
+  const circleRenderItems = useMemo(
+    () => renderItems.filter(i => i.kind === 'circle') as RenderCircle[],
+    [renderItems],
+  )
+  const nonCircleRenderItems = useMemo(
+    () => renderItems.filter(i => i.kind !== 'circle'),
+    [renderItems],
   )
 
   const HP_SCR = 4
@@ -711,7 +765,7 @@ function DxfJsonViewPageInner() {
     let texts = planDoc.texts
     if (activeDrag) {
       const { toMoveTextIds } = activeDrag
-      const { dx, dy } = dragDelta
+      const { dx, dy } = liveDragDelta
       const tSet = new Set(toMoveTextIds)
       texts = texts.map(tx => tSet.has(tx.handle) ? { ...tx, position: { x: tx.position.x + dx, y: tx.position.y + dy, z: 0 } } : tx)
     }
@@ -740,7 +794,7 @@ function DxfJsonViewPageInner() {
       })
     }
     return texts
-  }, [planDoc.texts, activeDrag, dragDelta, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
+  }, [planDoc.texts, activeDrag, liveDragDelta, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
 
   const effectiveArcs = useMemo(() => {
     let arcs = planDoc.arcs
@@ -903,10 +957,17 @@ const roomDetectionWalls = useMemo(
       return { x, y }
     }
 
+    // Screen-pixel-based thresholds so snap works at any plan scale or zoom level
+    const pxToW = 1 / (tRef.current.sc * (zoomRef.current > 0 ? zoomRef.current : 1))
+    const dynSnapTh = 12 * pxToW
+    const dynSnapLineTh = 20 * pxToW
+
     type SP = { x: number; y: number; type: 'endpoint' | 'midpoint' | 'arcCenter' | 'arcQuadrant' }
     const snapPts: SP[] = []
     for (const w of walls) {
       if (excl.includes(w.id)) continue
+      if (!isLayerVisible(w.layer ?? '0')) continue
+      if (isLayerLocked(w.layer ?? '0')) continue
       snapPts.push({ ...w.start, type: 'endpoint' })
       snapPts.push({ ...w.end, type: 'endpoint' })
       snapPts.push({ x: (w.start.x + w.end.x) / 2, y: (w.start.y + w.end.y) / 2, type: 'midpoint' })
@@ -920,7 +981,7 @@ const roomDetectionWalls = useMemo(
     }
 
     // 1. Point snaps: endpoint / midpoint / arcCenter / arcQuadrant
-    let best: SP | null = null, bestD = SNAP_TH
+    let best: SP | null = null, bestD = dynSnapTh
     for (const sp of snapPts) {
       const d = Math.hypot(sp.x - x, sp.y - y)
       if (d < bestD) { bestD = d; best = sp }
@@ -934,13 +995,13 @@ const roomDetectionWalls = useMemo(
 
     // 2. Intersection snap: only when not skipped (e.g. during endpoint drag) and spatially filtered
     if (!skipIntersection) {
-      let bestIntPt: Pt | null = null, bestIntD = SNAP_TH
-      // Only consider walls whose bounding box is within SNAP_TH of the cursor — avoids O(n²) on whole drawing
+      let bestIntPt: Pt | null = null, bestIntD = dynSnapTh
+      // Only consider walls whose bounding box is within dynSnapTh of the cursor — avoids O(n²) on whole drawing
       const near = walls.filter(w => {
         if (excl.includes(w.id)) return false
         return (
-          Math.min(w.start.x, w.end.x) - SNAP_TH <= x && x <= Math.max(w.start.x, w.end.x) + SNAP_TH &&
-          Math.min(w.start.y, w.end.y) - SNAP_TH <= y && y <= Math.max(w.start.y, w.end.y) + SNAP_TH
+          Math.min(w.start.x, w.end.x) - dynSnapTh <= x && x <= Math.max(w.start.x, w.end.x) + dynSnapTh &&
+          Math.min(w.start.y, w.end.y) - dynSnapTh <= y && y <= Math.max(w.start.y, w.end.y) + dynSnapTh
         )
       })
       for (let i = 0; i < near.length; i++) {
@@ -961,7 +1022,7 @@ const roomDetectionWalls = useMemo(
 
     // 3. Perpendicular snap (requires anchor): foot of perpendicular from anchor onto wall
     if (anchor) {
-      let bestPerpPt: Pt | null = null, bestPerpD = SNAP_TH * 1.5
+      let bestPerpPt: Pt | null = null, bestPerpD = dynSnapTh * 1.5
       for (const w of walls) {
         if (excl.includes(w.id)) continue
         const wdx = w.end.x - w.start.x, wdy = w.end.y - w.start.y
@@ -982,9 +1043,11 @@ const roomDetectionWalls = useMemo(
     }
 
     // 4. On-segment (nearest point) snap
-    let bestSeg: { wallId: string; t: number; pt: Pt } | null = null, bestSegD = SNAP_LINE_TH
+    let bestSeg: { wallId: string; t: number; pt: Pt } | null = null, bestSegD = dynSnapLineTh
     for (const w of walls) {
       if (excl.includes(w.id)) continue
+      if (!isLayerVisible(w.layer ?? '0')) continue
+      if (isLayerLocked(w.layer ?? '0')) continue
       const { pt, t, dist } = closestPointOnSegment(x, y, w.start.x, w.start.y, w.end.x, w.end.y)
       if (t > 0.01 && t < 0.99 && dist < bestSegD) { bestSegD = dist; bestSeg = { wallId: w.id, t, pt } }
     }
@@ -996,28 +1059,10 @@ const roomDetectionWalls = useMemo(
     }
     snapLineWallRef.current = null
 
-    // 5. Alignment guides (object snap tracking)
-    const ALIGN_TH = SNAP_LINE_TH * 1.8
-    const guides: Array<{ type: 'h' | 'v', coord: number }> = []
-    let agx = x, agy = y
-    for (const sp of snapPts) {
-      if (Math.abs(sp.x - x) < ALIGN_TH && !guides.some(g => g.type === 'v')) {
-        guides.push({ type: 'v', coord: sp.x }); agx = sp.x
-      }
-      if (Math.abs(sp.y - y) < ALIGN_TH && !guides.some(g => g.type === 'h')) {
-        guides.push({ type: 'h', coord: sp.y }); agy = sp.y
-      }
-    }
-    if (guides.length > 0) {
-      lastSnapTypeRef.current = null
-      alignGuidesRef.current = guides
-      return { x: agx, y: agy }
-    }
-
     lastSnapTypeRef.current = null
     alignGuidesRef.current = []
     return { x, y }
-  }, [walls, planDoc.arcs, snapEnabled])
+  }, [walls, planDoc.arcs, snapEnabled, isLayerVisible, isLayerLocked])
 
   useEffect(() => { tRef.current = t }, [t])
   useEffect(() => { stageSizeRef.current = stageSize }, [stageSize])
@@ -1277,6 +1322,13 @@ const roomDetectionWalls = useMemo(
         if (grp) { grp.x(dx * t.sc); grp.y(-dy * t.sc) }
       }
       dragGroupRef.current?.getLayer()?.batchDraw()
+      // Pump liveDragDelta via RAF so arcs/door-lines (which have no imperative group) follow along
+      if (!liveDragRafRef.current) {
+        liveDragRafRef.current = requestAnimationFrame(() => {
+          liveDragRafRef.current = 0
+          setLiveDragDelta({ ...dragDeltaRef.current })
+        })
+      }
     } else if (rotationDragRef.current) {
       const rd = rotationDragRef.current
       const [ccx, ccy] = toC(rd.centerWX, rd.centerWY, t)
@@ -1366,6 +1418,8 @@ const roomDetectionWalls = useMemo(
     const newlySelected = new Set<string>()
     for (const w of walls) {
       if (w.fromArc) continue
+      if (!isLayerVisible(w.layer ?? '0')) continue
+      if (isLayerLocked(w.layer ?? '0')) continue
       if (isWindow) {
         const sIn = w.start.x >= x1 && w.start.x <= x2 && w.start.y >= y1 && w.start.y <= y2
         const eIn = w.end.x >= x1 && w.end.x <= x2 && w.end.y >= y1 && w.end.y <= y2
@@ -1374,30 +1428,32 @@ const roomDetectionWalls = useMemo(
         if (lineIntersectsRect(w.start, w.end, x1, y1, x2, y2)) newlySelected.add(w.id)
       }
     }
-    
+
     // For text annotations - only select if fully inside for window selection
     for (const tx of planDoc.texts) {
       if (!isLayerVisible(tx.layer)) continue
+      if (isLayerLocked(tx.layer)) continue
       const fs = Math.max(5, tx.height * t.sc)
       const estW = tx.text.length * fs * 0.55
       const estH = fs * 1.35
       if (isWindow) {
         // Window selection: must be fully inside
-        const fullyInside = 
+        const fullyInside =
           tx.position.x >= x1 && tx.position.x <= x2 &&
           tx.position.y >= y1 && tx.position.y <= y2
         if (fullyInside) newlySelected.add(tx.handle)
       } else {
         // Crossing selection: any intersection
-        const intersects = 
+        const intersects =
           (tx.position.x + estW/2) >= x1 && (tx.position.x - estW/2) <= x2 &&
           (tx.position.y + estH/2) >= y1 && (tx.position.y - estH/2) <= y2
         if (intersects) newlySelected.add(tx.handle)
       }
     }
-    
+
     // For arcs - if crossing selection, select if center is in box
     for (const a of planDoc.arcs) {
+      if (isLayerLocked(a.layer)) continue
       if (isWindow) {
         if (a.center.x >= x1 && a.center.x <= x2 && a.center.y >= y1 && a.center.y <= y2) {
           newlySelected.add(a.handle)
@@ -1464,15 +1520,15 @@ const roomDetectionWalls = useMemo(
     const pos = stageRef.current?.getRelativePointerPosition()
     if (!pos) return
     const [wx, wy] = toW(pos.x, pos.y, t)
-    const toMoveW = walls.filter(w => currentSel.has(w.id)).map(w => w.id)
-    const toMoveT = planDoc.texts.filter(t => currentSel.has(t.handle)).map(t => t.handle)
-    const toMoveA = planDoc.arcs.filter(a => currentSel.has(a.handle)).map(a => a.handle)
+    const toMoveW = walls.filter(w => currentSel.has(w.id) && !isLayerLocked(w.layer ?? '0')).map(w => w.id)
+    const toMoveT = planDoc.texts.filter(t => currentSel.has(t.handle) && !isLayerLocked(t.layer)).map(t => t.handle)
+    const toMoveA = planDoc.arcs.filter(a => currentSel.has(a.handle) && !isLayerLocked(a.layer)).map(a => a.handle)
     const drag: ActiveDrag = { wallId: targetId, toMoveWallIds: toMoveW, toMoveTextIds: toMoveT, toMoveArcHandles: toMoveA, initWX: wx, initWY: wy }
     activeDragRef.current = drag
     setActiveDrag(drag)
     dragDeltaRef.current = { dx: 0, dy: 0 }
     setDragDelta({ dx: 0, dy: 0 })
-  }, [snapshot, walls, planDoc.texts, t])
+  }, [snapshot, walls, planDoc.texts, t, isLayerLocked])
 
   const onMidDragEnd = useCallback(() => {
     const pDrag = activePolyDragRef.current
@@ -1513,7 +1569,7 @@ const roomDetectionWalls = useMemo(
     }
     activeDragRef.current = null; setActiveDrag(null)
     dragDeltaRef.current = { dx: 0, dy: 0 }; setDragDelta({ dx: 0, dy: 0 })
-    liveDragRafRef.current = 0; setLiveDragDelta({ dx: 0, dy: 0 })
+    cancelAnimationFrame(liveDragRafRef.current); liveDragRafRef.current = 0; setLiveDragDelta({ dx: 0, dy: 0 })
   }, [applyDrag, applyPolylineDrag])
 
   const moveWindowLines = useCallback((winKey: string, dx: number, dy: number) => {
@@ -1713,7 +1769,16 @@ const roomDetectionWalls = useMemo(
             setSelectedIds(new Set())
           }
         } else if (selectedIds.size > 0) {
-          snapshot(); setWalls(p => p.filter(w => !selectedIds.has(w.id))); setSelectedIds(new Set())
+          snapshot()
+          setWalls(p => p.filter(w => !selectedIds.has(w.id)))
+          // Also delete selected DXF circles
+          if ([...selectedIds].some(id => id.startsWith('ci-'))) {
+            setPlanDoc(prev => ({
+              ...prev,
+              circles: (prev.circles ?? []).filter(c => !selectedIds.has(`ci-${c.handle}`)),
+            }))
+          }
+          setSelectedIds(new Set())
         }
       }
       if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); undo() }
@@ -1829,7 +1894,7 @@ const visWalls = useMemo(
     if (selectedIds.size === 0 && !selectedWinKey && !selectedFurnKey) return null
     let minCX = Infinity, minCY = Infinity, maxCX = -Infinity, maxCY = -Infinity
     let hasAny = false
-    for (const w of walls.filter(w => selectedIds.has(w.id))) {
+    for (const w of effectiveWalls.filter(w => selectedIds.has(w.id))) {
       for (const p of [w.start, w.end]) {
         const [cx, cy] = toC(p.x, p.y, t)
         minCX = Math.min(minCX, cx); maxCX = Math.max(maxCX, cx)
@@ -1887,9 +1952,19 @@ const visWalls = useMemo(
         }
       }
     }
+    // Include selected DXF circles
+    for (const ci of circleRenderItems.filter(c => selectedIds.has(c.id))) {
+      if (!isLayerVisible(ci.layer)) continue
+      if (ci.visible === false) continue
+      const [ccx, ccy] = toC(ci.cx, ci.cy, t)
+      const r = ci.r * t.sc
+      minCX = Math.min(minCX, ccx - r); maxCX = Math.max(maxCX, ccx + r)
+      minCY = Math.min(minCY, ccy - r); maxCY = Math.max(maxCY, ccy + r)
+      hasAny = true
+    }
     if (!hasAny) return null
     return { minCX, minCY, maxCX, maxCY }
-  }, [effectiveWalls, effectiveTexts, effectiveArcs, effectiveLines, effectiveFurnitureLines, selectedIds, selectedWinKey, selectedFurnKey, t])
+  }, [effectiveWalls, effectiveTexts, effectiveArcs, effectiveLines, effectiveFurnitureLines, circleRenderItems, selectedIds, selectedWinKey, selectedFurnKey, t, isLayerVisible])
 
   const worldSelBounds = useMemo(() => {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -2081,7 +2156,7 @@ const visWalls = useMemo(
     const [wx, wy] = toW(p.x, p.y, t)
 
     if (activeTool === 'drawLine') {
-      const snapped = getSnap(wx, wy, [])
+      const snapped = snapTargetRef.current ?? { x: wx, y: wy }
       if (!drawLineAnchorRef.current) {
         drawLineAnchorRef.current = snapped; setDrawLineAnchor(snapped); drawLinePointerRef.current = snapped; snapLayerRef.current?.batchDraw(); return
       }
@@ -2100,7 +2175,7 @@ const visWalls = useMemo(
     }
 
     if (activeTool === 'drawPolyline') {
-      const snapped = getSnap(wx, wy, [])
+      const snapped = snapTargetRef.current ?? { x: wx, y: wy }
       const nextDraft = [...polylineDraftRef.current, snapped]
       polylineDraftRef.current = nextDraft; setPolylineDraft(nextDraft); return
     }
@@ -2113,8 +2188,9 @@ const visWalls = useMemo(
     }
 
     if (activeTool === 'drawArc') {
-      if (!arcDraftCenter) { setArcDraftCenter({ x: wx, y: wy }); setArcDraftRadius(null); setArcDraftStartAngle(null); return }
-      const dx = wx - arcDraftCenter.x, dy = wy - arcDraftCenter.y
+      const arcPt = snapTargetRef.current ?? { x: wx, y: wy }
+      if (!arcDraftCenter) { setArcDraftCenter(arcPt); setArcDraftRadius(null); setArcDraftStartAngle(null); return }
+      const dx = arcPt.x - arcDraftCenter.x, dy = arcPt.y - arcDraftCenter.y
       const angle = Math.atan2(dy, dx) * (180 / Math.PI)
       const radius = Math.hypot(dx, dy)
       if (arcDraftRadius === null) {
@@ -2131,8 +2207,9 @@ const visWalls = useMemo(
     }
 
     if (activeTool === 'drawCircle') {
-      if (!circleDraftCenter) { setCircleDraftCenter({ x: wx, y: wy }); return }
-      const radius = Math.hypot(wx - circleDraftCenter.x, wy - circleDraftCenter.y)
+      const cirPt = snapTargetRef.current ?? { x: wx, y: wy }
+      if (!circleDraftCenter) { setCircleDraftCenter(cirPt); return }
+      const radius = Math.hypot(cirPt.x - circleDraftCenter.x, cirPt.y - circleDraftCenter.y)
       if (radius < 0.01) return
       snapshot()
       const { next, arc } = appendUserArc(planDoc, circleDraftCenter, radius, 0, 360)
@@ -2268,38 +2345,16 @@ const visWalls = useMemo(
     const c2d = (ctx as any)._context as CanvasRenderingContext2D
     c2d.save()
 
-    // Alignment guides
-    const guides = alignGuidesRef.current
-    if (guides.length > 0) {
-      c2d.strokeStyle = '#06b6d4'
-      c2d.lineWidth = 0.8 / z
-      c2d.globalAlpha = 0.85
-      c2d.setLineDash([6 / z, 4 / z])
-      for (const g of guides) {
-        c2d.beginPath()
-        if (g.type === 'h') {
-          const [, cy] = toC(0, g.coord, tt)
-          c2d.moveTo(0, cy); c2d.lineTo(sw.w / z, cy)
-        } else {
-          const [cx] = toC(g.coord, 0, tt)
-          c2d.moveTo(cx, 0); c2d.lineTo(cx, sw.h / z)
-        }
-        c2d.stroke()
-      }
-      c2d.setLineDash([])
-    }
-
-    // Draw line preview (anchor → cursor)
+    // Draw line preview — solid thin line from anchor to current cursor
     const dlAnchor = drawLineAnchorRef.current
     const dlPointer = drawLinePointerRef.current
     if (tool === 'drawLine' && dlAnchor && dlPointer) {
       const [ax, ay] = toC(dlAnchor.x, dlAnchor.y, tt)
       const [px, py] = toC(dlPointer.x, dlPointer.y, tt)
-      c2d.strokeStyle = '#3b82f6'; c2d.lineWidth = 1.5 / z
-      c2d.lineCap = 'round'; c2d.globalAlpha = 1
-      c2d.setLineDash([8 / z, 6 / z])
-      c2d.beginPath(); c2d.moveTo(ax, ay); c2d.lineTo(px, py); c2d.stroke()
+      c2d.strokeStyle = '#334155'; c2d.lineWidth = 1.5 / z
+      c2d.lineCap = 'round'; c2d.globalAlpha = 0.75
       c2d.setLineDash([])
+      c2d.beginPath(); c2d.moveTo(ax, ay); c2d.lineTo(px, py); c2d.stroke()
     }
 
     // Draw polyline preview
@@ -2588,25 +2643,12 @@ useEffect(() => {
                 <Layer listening={false}>
                   <Rect name="background-rect" x={0} y={0} width={stageSize.w} height={stageSize.h} fill="#ffffff" />
                   {gridLines}
-                  {renderItems.map(item => {
+                  {nonCircleRenderItems.map(item => {
                     if (!isLayerVisible(item.layer)) return null
                     if (item.visible === false) return null
                     const col = resolveEntityColor(item.color, item.layer, layerColorMap, strokeHex)
                     // strokeScaleEnabled={false} keeps widths in screen-pixels regardless of zoom level
                     const sw = strokeScale
-                    if (item.kind === 'circle') {
-                      const [cx, cy] = toC(item.cx, item.cy, t)
-                      return (
-                        <Circle key={item.id}
-                          x={cx} y={cy}
-                          radius={Math.max(0, item.r * t.sc)}
-                          stroke={col} strokeWidth={sw}
-                          strokeScaleEnabled={false}
-                          perfectDrawEnabled={false}
-                          fill="transparent"
-                        />
-                      )
-                    }
 
                     // ── ELLIPSE ────────────────────────────────────────────
                     if (item.kind === 'ellipse') {
@@ -3077,6 +3119,44 @@ useEffect(() => {
                   })}
                 </Layer>
 
+                {/* Selectable DXF circles — separate interactive layer */}
+                <Layer listening={activeTool === 'select' && !spaceHeld}>
+                  {circleRenderItems.map(ci => {
+                    if (!isLayerVisible(ci.layer)) return null
+                    if (ci.visible === false) return null
+                    const isSelCi = selectedIds.has(ci.id)
+                    const [ccx, ccy] = toC(ci.cx, ci.cy, t)
+                    const rCanvas = Math.max(0, ci.r * t.sc)
+                    const ciColor = isSelCi ? '#3b82f6' : resolveExplicitColor(ci.color, ci.layer, layerColorMap, strokeHex)
+                    return (
+                      <Circle key={ci.id}
+                        x={ccx} y={ccy}
+                        radius={rCanvas}
+                        stroke={ciColor}
+                        strokeWidth={isSelCi ? 2 * strokeScale : strokeScale}
+                        strokeScaleEnabled={false}
+                        perfectDrawEnabled={false}
+                        fill={isSelCi ? 'rgba(59,130,246,0.08)' : 'transparent'}
+                        hitStrokeWidth={Math.max(8 / (zoomRef.current ?? 1), 6)}
+                        onClick={e => {
+                          e.cancelBubble = true
+                          const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                          setSelectedGroupId(null); setSelectedId(null); setSelectedArcHandle(null)
+                          setSelectedTextHandle(null); setSelectedRoomIndex(null); setSelectedWinKey(null); setSelectedFurnKey(null)
+                          setSelectedIds(prev => {
+                            const next = new Set(isCtrl ? prev : new Set<string>())
+                            if (isSelCi && isCtrl) next.delete(ci.id)
+                            else next.add(ci.id)
+                            return next
+                          })
+                        }}
+                        onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'pointer' }}
+                        onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+                      />
+                    )
+                  })}
+                </Layer>
+
                 <Layer listening={activeTool === 'select' && !spaceHeld}>
                   {(roomsWithWalls ?? []).map((r, i) => {
                     const isHovered = hoveredRoomIdx === i
@@ -3354,6 +3434,7 @@ onClick={e => { if (isLayerLocked(lines[0]?.layer ?? '0')) return; e.cancelBubbl
                 <Layer>{(() => {
                   const renderWall = (wall: WallSeg) => {
                     if (wall.fromArc) return null
+                    if (!isLayerVisible(wall.layer ?? '0')) return null
                     const [sx, sy] = toC(wall.start.x, wall.start.y, t)
                     const [ex, ey] = toC(wall.end.x, wall.end.y, t)
                     const isSel = selectedIds.has(wall.id)
@@ -4153,54 +4234,31 @@ onClick={e => { if (isLayerLocked(lines[0]?.layer ?? '0')) return; e.cancelBubbl
             <label className="dxf-toggle"><input type="checkbox" checked={orthoEnabled} onChange={e => setOrthoEnabled(e.target.checked)} /> Ortho Mode (O)</label>
             <label className="dxf-toggle"><input type="checkbox" checked={showDetail} onChange={e => setShowDetail(e.target.checked)} /> Detail lines (stairs)</label>
             
-            {/* New annotation management buttons */}
-            <div className="dxf-export-btns" style={{ gap: '4px', marginTop: '8px' }}>
-              <button 
-                className="dxf-action-btn" 
-                onClick={() => {
-                  const annoLayers = (planDoc.layers ?? [])
-                    .filter(l => ANNOTATION_LAYER_PATTERNS.some(p => l.name.includes(p)))
-                    .map(l => l.name)
-                  if (annoLayers.length === 0) return
-                  const allHidden = annoLayers.every(l => hiddenLayers.has(l))
-                  setHiddenLayers(prev => {
-                    const next = new Set(prev)
-                    if (allHidden) annoLayers.forEach(l => next.delete(l))
-                    else annoLayers.forEach(l => next.add(l))
-                    return next
-                  })
-                }}
-                style={{ fontSize: '11px', flex: 1 }}
-              >
-                {(planDoc.layers ?? [])
-                  .filter(l => ANNOTATION_LAYER_PATTERNS.some(p => l.name.includes(p)))
-                  .every(l => hiddenLayers.has(l)) ? '👁️ Show Annotations' : '👁️‍🗨️ Hide Annotations'}
-              </button>
-              <button 
-                className="dxf-action-btn" 
-                onClick={() => {
-                  const dimLayers = (planDoc.layers ?? [])
-                    .filter(l => l.name.includes('Dim') || l.name.includes('A-Anno-Dims'))
-                    .map(l => l.name)
-                  if (dimLayers.length === 0) return
-                  const allLocked = dimLayers.every(l => lockedLayers.has(l))
-                  setLockedLayers(prev => {
-                    const next = new Set(prev)
-                    if (allLocked) dimLayers.forEach(l => next.delete(l))
-                    else dimLayers.forEach(l => next.add(l))
-                    return next
-                  })
-                }}
-                style={{ fontSize: '11px', flex: 1 }}
-              >
-                {(planDoc.layers ?? [])
-                  .filter(l => l.name.includes('Dim'))
-                  .every(l => lockedLayers.has(l)) ? '🔓 Unlock Dims' : '🔒 Lock Dims'}
-              </button>
-            </div>
-            <p className="dxf-prop-hint" style={{ fontSize: '11px', marginTop: '6px' }}>
-              💡 Lock annotation layers before editing walls to prevent accidental selection.
-            </p>
+            {/* Annotation / Dimension quick controls */}
+            {(() => {
+              const annoLayers = getAnnotationLayers()
+              if (annoLayers.length === 0) return null
+              const annoHidden = annoLayers.every(l => hiddenLayers.has(l))
+              const annoLocked = annoLayers.every(l => lockedLayers.has(l))
+              return (
+                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600, marginBottom: 2 }}>Dimensions &amp; Annotations</div>
+                  <div className="dxf-export-btns" style={{ gap: 4 }}>
+                    <button className="dxf-action-btn" onClick={toggleAnnotationVisibility} style={{ fontSize: 11, flex: 1 }}>
+                      {annoHidden ? 'Show' : 'Hide'}
+                    </button>
+                    <button className="dxf-action-btn" onClick={toggleAnnotationLock} style={{ fontSize: 11, flex: 1 }}>
+                      {annoLocked ? 'Unlock' : 'Lock'}
+                    </button>
+                  </div>
+                  {annoLocked && (
+                    <p className="dxf-prop-hint" style={{ fontSize: 10, marginTop: 2 }}>
+                      Locked — dimensions won't move or be selected during drag.
+                    </p>
+                  )}
+                </div>
+              )
+            })()}
             
             <button className="dxf-action-btn" onClick={undo} disabled={!history.length}>Undo</button>
             <button
@@ -4316,21 +4374,7 @@ onClick={e => { if (isLayerLocked(lines[0]?.layer ?? '0')) return; e.cancelBubbl
           {(planDoc.layers ?? []).length > 0 && (
             <div className="dxf-prop-panel">
               <div className="dxf-prop-label">Layers</div>
-              <p className="dxf-prop-hint">Toggle visibility (checkbox) or lock (🔒) to prevent editing.</p>
-              <button
-                type="button"
-                className="dxf-action-btn"
-                style={{ marginBottom: 8, width: '100%' }}
-                onClick={toggleAnnotationLayers}
-              >
-                {(() => {
-                  const annoLayers = (planDoc.layers ?? [])
-                    .filter(l => ANNOTATION_LAYER_PATTERNS.some(p => l.name.includes(p)))
-                    .map(l => l.name)
-                  const allLocked = annoLayers.length > 0 && annoLayers.every(l => lockedLayers.has(l))
-                  return allLocked ? '🔓 Unlock Annotation Layers' : '🔒 Lock Annotation Layers'
-                })()}
-              </button>
+              <p className="dxf-prop-hint">Checkbox = visible. 🔒 = locked (won't move or be selected). Hover layer name to see DXF name.</p>
               {(planDoc.layers ?? []).map(lyr => {
                 const isHidden = hiddenLayers.has(lyr.name)
                 const isLocked = lockedLayers.has(lyr.name)
@@ -4368,12 +4412,14 @@ onClick={e => { if (isLayerLocked(lines[0]?.layer ?? '0')) return; e.cancelBubbl
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
                       flex: 1,
-                      textDecoration: isLocked ? 'line-through' : 'none',
                       color: isLocked ? '#94a3b8' : undefined,
-                    }}>
-                      {lyr.name}
+                    }}
+                      title={lyr.name}
+                    >
+                      {getFriendlyLayerName(lyr.name)}
                     </span>
                     {lyr.is_frozen && <span style={{ fontSize: 10, opacity: 0.5 }}>❄</span>}
+                    {isLocked && <span style={{ fontSize: 9, color: '#f59e0b', flexShrink: 0 }}>locked</span>}
                     <button
                       type="button"
                       title={isLocked ? 'Unlock layer' : 'Lock layer'}
