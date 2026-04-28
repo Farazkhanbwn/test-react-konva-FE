@@ -14,6 +14,7 @@ import {
   type DxfLine,
   type DxfPolyline,
   type DxfPolylineVertex,
+  _convertCompact,
 } from '@/constants/dxfJsonData'
 import type { CanvasGroup, RenderCircle } from '@/utils/wallsFromDxfJson'
 import { FurnitureLibraryPanel, FURNITURE_DXF_DRAG_MIME } from '@/components/FurnitureLibraryPanel'
@@ -476,7 +477,22 @@ function DxfJsonViewPageInner() {
   const canvasHostRef = useRef<HTMLDivElement>(null)
   const [stageSize, setStageSize] = useState({ w: 900, h: 620 })
 
-  const [planDoc, setPlanDoc] = useState<DxfJsonDocument>(() => ({ ...DXF_JSON_DATA }))
+ const [planDoc, setPlanDoc] = useState<DxfJsonDocument>(() => DXF_JSON_DATA)
+const [walls, setWalls] = useState<WallSeg[]>(() => wallsFromDxfJson(DXF_JSON_DATA))
+const [isReady, setIsReady] = useState(false)
+
+useEffect(() => {
+  setTimeout(() => {
+    const raw = (window as any).__DXF_RAW__
+    if (raw) {
+      const doc = _convertCompact(raw)
+      const ws = wallsFromDxfJson(doc)
+      setPlanDoc(doc)
+      setWalls(ws)
+    }
+    setIsReady(true)
+  }, 0)
+}, [])
 
   const displayDoc = planDoc
 
@@ -495,7 +511,6 @@ function DxfJsonViewPageInner() {
     return () => ro.disconnect()
   }, [])
 
-  const [walls, setWalls] = useState<WallSeg[]>(() => wallsFromDxfJson(DXF_JSON_DATA))
 
   // Spatial index: uniform grid for O(k) nearest-wall queries instead of O(n) brute-force.
   const SPATIAL_CELL = 2.0
@@ -701,9 +716,15 @@ function DxfJsonViewPageInner() {
   }, [planDoc.layers])
 
   const renderItems = useMemo(
-    () => renderItemsFromDxfJson(planDoc),
-    [planDoc],
-  )
+  () => renderItemsFromDxfJson(planDoc),
+  [
+    planDoc.lines, planDoc.arcs, planDoc.circles, planDoc.ellipses,
+    planDoc.splines, planDoc.hatches, planDoc.dimensions, planDoc.leaders,
+    planDoc.mleaders, planDoc.solids, planDoc.images, planDoc.wipeouts,
+    planDoc.inserts, planDoc.door_inserts, planDoc.window_inserts,
+    planDoc.furniture_inserts, planDoc.stair_inserts,
+  ]
+)
 
   const circleRenderItems = useMemo(
     () => renderItems.filter(i => i.kind === 'circle') as RenderCircle[],
@@ -1037,9 +1058,9 @@ function DxfJsonViewPageInner() {
   const HR = HP_SCR / zoomRef.current
 
   const canvasGroups = useMemo<CanvasGroup[]>(
-    () => canvasGroupsFromDxfJson(planDoc, walls),
-    [planDoc, walls],
-  )
+  () => canvasGroupsFromDxfJson(planDoc, walls),
+  [planDoc.groups, walls]
+)
 
   const wallIdToGroupId = useMemo(() => {
     const m = new Map<string, number>()
@@ -1277,7 +1298,7 @@ function DxfJsonViewPageInner() {
 
 const roomDetectionWalls = useMemo(
   () => walls.filter(w => !wallIdToGroupId.has(w.id) && !w.isHatchLine && !w.isDimLine),
-  [walls, wallIdToGroupId],
+  [walls, wallIdToGroupId]
 )
 
   // Debounce room detection: defer the expensive DCEL algorithm 250ms after rapid edits.
@@ -1642,246 +1663,130 @@ const roomDetectionWalls = useMemo(
     })
   }, [canvasGroups])
 
-  const onStageMouseDown = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
-    const isStage = e.target === stageRef.current || e.target.name() === 'background-rect'
-    if (!isStage || activeTool !== 'select' || spaceHeld) return
-    const pos = stageRef.current?.getRelativePointerPosition()
-    if (!pos) return
-    const [wx, wy] = toW(pos.x, pos.y, t)
-    selectionBoxRef.current = { start: { x: wx, y: wy }, current: { x: wx, y: wy } }
-    setIsRubberBanding(true)
-    // Do NOT clear selectedIds here — clear happens in onStageMouseUp only after
-    // we know if this was a rubber-band drag vs a background click. This preserves
-    // selection when the user accidentally misses a wall while trying to drag.
-  }, [activeTool, spaceHeld, t])
+const onStageMouseUp = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+  if (rotationDragRef.current) { commitRotation(); return }
+  if (resizeDragRef.current) { commitResize(); return }
+  if (!selectionBoxRef.current) { setIsRubberBanding(false); return }
 
-  const onStageMouseMove = useCallback((_e: Konva.KonvaEventObject<MouseEvent>) => {
-    _e.evt.preventDefault()
-    const pos = stageRef.current?.getRelativePointerPosition()
-    if (!pos) return
-    const [wx, wy] = toW(pos.x, pos.y, t)
-    if (selectionBoxRef.current) {
-      selectionBoxRef.current = { ...selectionBoxRef.current, current: { x: wx, y: wy } }
-      // Imperatively update the rubber-band rect — zero React re-renders during drag
-      const rr = rubberBandRectRef.current
-      if (rr) {
-        const { start, current } = selectionBoxRef.current
-        const [sx, sy] = toC(start.x, start.y, t)
-        const [cx, cy] = toC(current.x, current.y, t)
-        const isWindow = start.x < current.x
-        rr.x(Math.min(sx, cx)); rr.y(Math.min(sy, cy))
-        rr.width(Math.abs(cx - sx)); rr.height(Math.abs(cy - sy))
-        rr.fill(isWindow ? 'rgba(59,130,246,0.2)' : 'rgba(34,197,94,0.2)')
-        rr.stroke(isWindow ? '#3b82f6' : '#22c55e')
-        rr.getLayer()?.batchDraw()
-      }
-    } else if (activeDragRef.current) {
-      // Use ref (synchronously set) rather than activeDrag state (async) so we
-      // never miss the first mousemove frame after onMidDragStart fires.
-      const drag = activeDragRef.current
-      let dx = wx - drag.initWX
-      let dy = wy - drag.initWY
-      if (orthoEnabled) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0 }
-      dragDeltaRef.current = { dx, dy }
-      // Only mark as drag if movement exceeds 4 screen pixels — prevents tiny mouse
-      // tremor from suppressing the onClick selection handler.
-      const screenScale = t.sc * (stageRef.current?.scaleX() ?? 1)
-      if (Math.hypot(dx * screenScale, dy * screenScale) > 4) {
-        didDragRef.current = true
-      }
-      // Move walls imperatively
-      if (dragGroupRef.current) {
-        dragGroupRef.current.x(dx * t.sc)
-        dragGroupRef.current.y(-dy * t.sc)
-      }
-      // Move arc Groups (door swings + jamb stubs) imperatively — same offset, same frame
-      for (const h of drag.toMoveArcHandles) {
-        const grp = arcGroupRefs.current.get(h)
-        if (grp) { grp.x(dx * t.sc); grp.y(-dy * t.sc) }
-      }
-      dragGroupRef.current?.getLayer()?.batchDraw()
-      // Pump liveDragDelta via RAF so arcs/door-lines (which have no imperative group) follow along
-      if (!liveDragRafRef.current) {
-        liveDragRafRef.current = requestAnimationFrame(() => {
-          liveDragRafRef.current = 0
-          setLiveDragDelta({ ...dragDeltaRef.current })
-        })
-      }
-    } else if (rotationDragRef.current) {
-      const rd = rotationDragRef.current
-      const [ccx, ccy] = toC(rd.centerWX, rd.centerWY, t)
-      const currentAngle = Math.atan2(pos.y - ccy, pos.x - ccx)
-      const delta = currentAngle - rd.startMouseAngle
-      rotationAngleDeltaRef.current = delta
-      setRotationAngleDelta(delta)
-    } else if (resizeDragRef.current) {
-      const rd = resizeDragRef.current
-      const dWX = wx - rd.initMouseWX
-      const dWY = wy - rd.initMouseWY
-      const h = rd.handle
-      const nb = { ...rd.initBBox }
-      if (h.includes('e')) nb.maxWX = Math.max(rd.initBBox.minWX + 0.1, rd.initBBox.maxWX + dWX)
-      if (h.includes('w')) nb.minWX = Math.min(rd.initBBox.maxWX - 0.1, rd.initBBox.minWX + dWX)
-      if (h.includes('n')) nb.maxWY = Math.max(rd.initBBox.minWY + 0.1, rd.initBBox.maxWY + dWY)
-      if (h.includes('s')) nb.minWY = Math.min(rd.initBBox.maxWY - 0.1, rd.initBBox.minWY + dWY)
-      resizePreviewRef.current = nb
-      setResizePreview(nb)
-    } else if (activeTool === 'drawLine') {
-      const anchor = drawLineAnchorRef.current
-      let fx = wx, fy = wy
-      if (anchor && polarTrackingEnabled && !orthoEnabled) {
-        const p = applyPolar(wx, wy, anchor.x, anchor.y)
-        if (p.angle !== null) { fx = p.x; fy = p.y }
-      }
-      const snapped = getSnap(fx, fy, '', anchor ?? undefined)
-      if (anchor) drawLinePointerRef.current = snapped
-      snapTargetRef.current = snapped
-      snapLayerRef.current?.batchDraw()
-    } else if (activeTool === 'drawPolyline') {
-      const draft = polylineDraftRef.current
-      const anchor = draft.length > 0 ? draft[draft.length - 1] : null
-      let fx = wx, fy = wy
-      if (anchor && polarTrackingEnabled && !orthoEnabled) {
-        const p = applyPolar(wx, wy, anchor.x, anchor.y)
-        if (p.angle !== null) { fx = p.x; fy = p.y }
-      }
-      const snapped = getSnap(fx, fy, '', anchor ?? undefined)
-      polylineHoverRef.current = draft.length > 0 ? snapped : null
-      snapTargetRef.current = snapped
-      snapLayerRef.current?.batchDraw()
-    } else if (activeTool === 'drawArc' || activeTool === 'drawCircle') {
-      const anchor = activeTool === 'drawArc' ? arcDraftCenter : circleDraftCenter
-      let fx = wx, fy = wy
-      if (anchor && polarTrackingEnabled && !orthoEnabled) {
-        const p = applyPolar(wx, wy, anchor.x, anchor.y)
-        if (p.angle !== null) { fx = p.x; fy = p.y }
-      }
-      const snapped = getSnap(fx, fy, '', anchor ?? undefined)
-      setShapePointer(snapped)
-      snapTargetRef.current = snapped
-      snapLayerRef.current?.batchDraw()
-    } else {
-      snapTargetRef.current = null
-      alignGuidesRef.current = []
-      lastSnapTypeRef.current = null
-      snapLayerRef.current?.batchDraw()
-    }
-  }, [t, orthoEnabled, activeTool, getSnap, polarTrackingEnabled, arcDraftCenter, circleDraftCenter])
+  const { start, current } = selectionBoxRef.current
+  selectionBoxRef.current = null
+  setIsRubberBanding(false)
+  const rr0 = rubberBandRectRef.current
+  if (rr0) { rr0.width(0); rr0.height(0); rr0.getLayer()?.batchDraw() }
 
-  const onStageMouseUp = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (rotationDragRef.current) { commitRotation(); return }
-    if (resizeDragRef.current) { commitResize(); return }
-    if (!selectionBoxRef.current) { setIsRubberBanding(false); return }
-    const { start, current } = selectionBoxRef.current
-    selectionBoxRef.current = null
-    setIsRubberBanding(false)
-    const rr0 = rubberBandRectRef.current
-    if (rr0) { rr0.width(0); rr0.height(0); rr0.getLayer()?.batchDraw() }
-    const x1 = Math.min(start.x, current.x), x2 = Math.max(start.x, current.x)
-    const y1 = Math.min(start.y, current.y), y2 = Math.max(start.y, current.y)
-    const isWindow = start.x < current.x
-    // Tiny rubber-band = background click (not a real drag-select). Deselect here
-    // instead of in onStageMouseDown so the selection survives if the user later
-    // decides to drag a wall (the mousedown lands on canvas, not on a wall shape).
-    const rubberW = x2 - x1, rubberH = y2 - y1
-    if (rubberW < 0.5 && rubberH < 0.5) {
-      if (!(e.evt.ctrlKey || e.evt.metaKey)) {
-        setSelectedIds(new Set())
-        setSelectedGroupId(null)
-        setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
-        setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
-      }
-      return
-    }
-    const newlySelected = new Set<string>()
-    for (const w of walls) {
-      if (w.fromArc) continue
-      if (!isLayerVisible(w.layer ?? '0')) continue
-      if (isLayerLocked(w.layer ?? '0')) continue
-      if (isWindow) {
-        const sIn = w.start.x >= x1 && w.start.x <= x2 && w.start.y >= y1 && w.start.y <= y2
-        const eIn = w.end.x >= x1 && w.end.x <= x2 && w.end.y >= y1 && w.end.y <= y2
-        if (sIn && eIn) newlySelected.add(w.id)
-      } else {
-        if (lineIntersectsRect(w.start, w.end, x1, y1, x2, y2)) newlySelected.add(w.id)
-      }
-    }
+  const x1 = Math.min(start.x, current.x), x2 = Math.max(start.x, current.x)
+  const y1 = Math.min(start.y, current.y), y2 = Math.max(start.y, current.y)
+  const isWindow = start.x < current.x
+  const rubberW = x2 - x1, rubberH = y2 - y1
 
-    // For text annotations - only select if fully inside for window selection
-    for (const tx of planDoc.texts) {
-      if (!isLayerVisible(tx.layer)) continue
-      if (isLayerLocked(tx.layer)) continue
-      const fs = Math.max(5, tx.height * t.sc)
-      const estW = tx.text.length * fs * 0.55
-      const estH = fs * 1.35
-      if (isWindow) {
-        // Window selection: must be fully inside
-        const fullyInside =
-          tx.position.x >= x1 && tx.position.x <= x2 &&
-          tx.position.y >= y1 && tx.position.y <= y2
-        if (fullyInside) newlySelected.add(tx.handle)
-      } else {
-        // Crossing selection: any intersection
-        const intersects =
-          (tx.position.x + estW/2) >= x1 && (tx.position.x - estW/2) <= x2 &&
-          (tx.position.y + estH/2) >= y1 && (tx.position.y - estH/2) <= y2
-        if (intersects) newlySelected.add(tx.handle)
-      }
-    }
-
-    // For arcs - if crossing selection, select if center is in box
-    for (const a of planDoc.arcs) {
-      if (isLayerLocked(a.layer)) continue
-      if (isWindow) {
-        if (a.center.x >= x1 && a.center.x <= x2 && a.center.y >= y1 && a.center.y <= y2) {
-          newlySelected.add(a.handle)
-        }
-      } else {
-        if (a.center.x >= x1 - a.radius && a.center.x <= x2 + a.radius &&
-            a.center.y >= y1 - a.radius && a.center.y <= y2 + a.radius) {
-          newlySelected.add(a.handle)
-        }
-      }
-    }
-    
-    const expandedIds = new Set(newlySelected)
-    const touchedGroupIds = new Set<number>()
-
-    // 1. Expand DXF block groups (furniture, doors, etc.)
-    for (const id of newlySelected) {
-      const gid = wallIdToGroupId.get(id)
-      if (gid !== undefined) {
-        touchedGroupIds.add(gid)
-        const grp = canvasGroups.find(g => g.id === gid)
-        if (grp) grp.wallIds.forEach(wid => expandedIds.add(wid))
-      }
-    }
-
-    // 2. Expand polyline groups — selecting one segment selects all segments of
-    //    the same polyline (walls sharing a groupId like "pl-P3")
-    const touchedPolyGroups = new Set<string>()
-    for (const id of newlySelected) {
-      const w = walls.find(seg => seg.id === id)
-      if (w?.groupId) touchedPolyGroups.add(w.groupId)
-    }
-    for (const gid of touchedPolyGroups) {
-      walls.filter(w => w.groupId === gid).forEach(w => expandedIds.add(w.id))
-    }
-    // If exactly one group was touched, also set selectedGroupId
-    if (touchedGroupIds.size === 1) {
-      const gid = [...touchedGroupIds][0]
-      setSelectedGroupId(gid)
-      setSelectedId(null); setSelectedRoomIndex(null)
-      setSelectedTextHandle(null); setSelectedArcHandle(null)
-      setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
-    } else if (touchedGroupIds.size > 1) {
+  // Tiny box = background click → deselect
+  if (rubberW < 0.5 && rubberH < 0.5) {
+    if (!(e.evt.ctrlKey || e.evt.metaKey)) {
+      setSelectedIds(new Set())
       setSelectedGroupId(null)
+      setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
+      setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
     }
-    setSelectedIds(prev => {
-      if (e.evt.ctrlKey || e.evt.metaKey) { const next = new Set(prev); expandedIds.forEach(id => next.add(id)); return next }
-      return expandedIds
-    })
-  }, [walls, commitRotation, commitResize])
+    return
+  }
+
+  const newlySelected = new Set<string>()
+
+  // Walls
+  for (const w of walls) {
+    if (w.fromArc) continue
+    if (!isLayerVisible(w.layer ?? '0')) continue
+    if (isLayerLocked(w.layer ?? '0')) continue
+    if (isWindow) {
+      const sIn = w.start.x >= x1 && w.start.x <= x2 && w.start.y >= y1 && w.start.y <= y2
+      const eIn = w.end.x >= x1 && w.end.x <= x2 && w.end.y >= y1 && w.end.y <= y2
+      if (sIn && eIn) newlySelected.add(w.id)
+    } else {
+      if (lineIntersectsRect(w.start, w.end, x1, y1, x2, y2)) newlySelected.add(w.id)
+    }
+  }
+
+  // Texts
+  for (const tx of planDoc.texts) {
+    if (!isLayerVisible(tx.layer)) continue
+    if (isLayerLocked(tx.layer)) continue
+    const fs = Math.max(5, tx.height * t.sc)
+    const estW = tx.text.length * fs * 0.55
+    const estH = fs * 1.35
+    if (isWindow) {
+      const fullyInside =
+        tx.position.x >= x1 && tx.position.x <= x2 &&
+        tx.position.y >= y1 && tx.position.y <= y2
+      if (fullyInside) newlySelected.add(tx.handle)
+    } else {
+      const intersects =
+        (tx.position.x + estW / 2) >= x1 && (tx.position.x - estW / 2) <= x2 &&
+        (tx.position.y + estH / 2) >= y1 && (tx.position.y - estH / 2) <= y2
+      if (intersects) newlySelected.add(tx.handle)
+    }
+  }
+
+  // Arcs
+  for (const a of planDoc.arcs) {
+    if (isLayerLocked(a.layer)) continue
+    if (isWindow) {
+      if (a.center.x >= x1 && a.center.x <= x2 && a.center.y >= y1 && a.center.y <= y2)
+        newlySelected.add(a.handle)
+    } else {
+      if (
+        a.center.x >= x1 - a.radius && a.center.x <= x2 + a.radius &&
+        a.center.y >= y1 - a.radius && a.center.y <= y2 + a.radius
+      ) newlySelected.add(a.handle)
+    }
+  }
+
+  // Expand groups
+  const expandedIds = new Set(newlySelected)
+  const touchedGroupIds = new Set<number>()
+
+  for (const id of newlySelected) {
+    const gid = wallIdToGroupId.get(id)
+    if (gid !== undefined) {
+      touchedGroupIds.add(gid)
+      const grp = canvasGroups.find(g => g.id === gid)
+      if (grp) grp.wallIds.forEach(wid => expandedIds.add(wid))
+    }
+  }
+
+  // Expand polyline groups
+  const touchedPolyGroups = new Set<string>()
+  for (const id of newlySelected) {
+    const w = walls.find(seg => seg.id === id)
+    if (w?.groupId) touchedPolyGroups.add(w.groupId)
+  }
+  for (const gid of touchedPolyGroups) {
+    walls.filter(w => w.groupId === gid).forEach(w => expandedIds.add(w.id))
+  }
+
+  if (touchedGroupIds.size === 1) {
+    const gid = [...touchedGroupIds][0]
+    setSelectedGroupId(gid)
+    setSelectedId(null); setSelectedRoomIndex(null)
+    setSelectedTextHandle(null); setSelectedArcHandle(null)
+    setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
+  } else if (touchedGroupIds.size > 1) {
+    setSelectedGroupId(null)
+  }
+
+  setSelectedIds(prev => {
+    if (e.evt.ctrlKey || e.evt.metaKey) {
+      const next = new Set(prev)
+      expandedIds.forEach(id => next.add(id))
+      return next
+    }
+    return expandedIds
+  })
+}, [
+  walls, planDoc.texts, planDoc.arcs,
+  t, isLayerVisible, isLayerLocked,
+  wallIdToGroupId, canvasGroups,
+  commitRotation, commitResize,
+])
 
   const onMidDragStart = useCallback((_e: Konva.KonvaEventObject<MouseEvent>, targetId: string, currentSel: Set<string>) => {
     const targetWall = walls.find(w => w.id === targetId)
@@ -2040,6 +1945,8 @@ const roomDetectionWalls = useMemo(
       }
     })
   }, [])
+
+  
 
   const onRoomMoveDragStart = useCallback((e: Konva.KonvaEventObject<DragEvent>) => {
     if (selectedRoomIndex === null || activeDragRef.current) return
@@ -2248,11 +2155,17 @@ const roomDetectionWalls = useMemo(
     wallsSceneShapeRef.current?.getLayer()?.batchDraw()
   }, [selectedIds, selectedGroupId, toMoveSet])
 
+const groupWallIdSet = useMemo(() => {
+  const s = new Set<string>()
+  for (const g of canvasGroups) g.wallIds.forEach(id => s.add(id))
+  return s
+}, [canvasGroups])
+
 const visWalls = useMemo(
   () => showDetail
     ? walls
-    : walls.filter(w => !w.isDetail || w.isHatchLine || w.isDimLine || wallIdToGroupId.has(w.id)),
-  [walls, showDetail, wallIdToGroupId]
+    : walls.filter(w => !w.isDetail || w.isHatchLine || w.isDimLine || groupWallIdSet.has(w.id)),
+  [walls, showDetail, groupWallIdSet]
 )
 
   const gridLines = useMemo(() => {
@@ -2383,6 +2296,11 @@ const visWalls = useMemo(
     return m
   }, [effectiveWalls])
 
+  const selectedIdsKey = useMemo(
+  () => [...selectedIds].sort().join(','),
+  [selectedIds]
+)
+
   const effectiveSelBBox = useMemo(() => {
     if (selectedIds.size === 0 && !selectedWinKey && !selectedFurnKey) return null
     let minCX = Infinity, minCY = Infinity, maxCX = -Infinity, maxCY = -Infinity
@@ -2459,7 +2377,9 @@ const visWalls = useMemo(
     }
     if (!hasAny) return null
     return { minCX, minCY, maxCX, maxCY }
-  }, [wallById, effectiveTexts, effectiveArcs, effectiveLines, effectiveFurnitureLines, circleRenderItems, selectedIds, selectedWinKey, selectedFurnKey, t])
+  },  [wallById, effectiveTexts, effectiveArcs, effectiveLines,
+   effectiveFurnitureLines, circleRenderItems,
+   selectedIdsKey, selectedWinKey, selectedFurnKey, t])
 
   const worldSelBounds = useMemo(() => {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -2499,7 +2419,8 @@ const visWalls = useMemo(
     }
     if (!hasAny) return null
     return { minX, minY, maxX, maxY }
-  }, [walls, planDoc.texts, planDoc.arcs, planDoc.window_lines, planDoc.furniture_lines, selectedIds, selectedWinKey, selectedFurnKey])
+  },  [walls, planDoc.texts, planDoc.arcs, planDoc.window_lines,
+   planDoc.furniture_lines, selectedIdsKey, selectedWinKey, selectedFurnKey])
 
   const baseSelCenter = useMemo(() => {
     if (!worldSelBounds) return null
@@ -2636,91 +2557,8 @@ const visWalls = useMemo(
   const stageDraggable = (activeTool === 'hand' || spaceHeld) && !isDraggingEp && !isDraggingRoom
   const isDrawingTool = ['drawPolyline', 'drawLine', 'drawArc', 'drawCircle', 'text'].includes(activeTool)
 
+  
 
-  const handleStageClick = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (!isDrawingTool && e.target !== stageRef.current) return
-    const stage = stageRef.current
-    if (!stage) return
-    const p = getStageCanvasPointer(stage)
-    if (!p) return
-    const [wx, wy] = toW(p.x, p.y, t)
-
-    if (activeTool === 'drawLine') {
-      const snapped = snapTargetRef.current ?? { x: wx, y: wy }
-      if (!drawLineAnchorRef.current) {
-        drawLineAnchorRef.current = snapped; setDrawLineAnchor(snapped); drawLinePointerRef.current = snapped; snapLayerRef.current?.batchDraw(); return
-      }
-      const start = drawLineAnchorRef.current, end = snapped
-      if (Math.hypot(end.x - start.x, end.y - start.y) < 0.02) return
-      snapshot()
-      const { next, handle } = appendUserLine(planDoc, start, end)
-      const newId = `ln-${handle}`
-      setPlanDoc(next)
-      setWalls(w => [...w, { id: newId, start: { ...start }, end: { ...end }, isOuter: false, isDetail: false }])
-      setSelectedIds(new Set([newId])); setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
-      // Keep drawing mode — new anchor is last end point so user can chain segments.
-      // Press Esc or switch tool to stop.
-      drawLineAnchorRef.current = end; setDrawLineAnchor(end); drawLinePointerRef.current = end
-      return
-    }
-
-    if (activeTool === 'drawPolyline') {
-      const snapped = snapTargetRef.current ?? { x: wx, y: wy }
-      const nextDraft = [...polylineDraftRef.current, snapped]
-      polylineDraftRef.current = nextDraft; setPolylineDraft(nextDraft); return
-    }
-
-    if (activeTool === 'text') {
-      snapshot()
-      const { next, handle } = appendUserText(planDoc, { x: wx, y: wy })
-      setPlanDoc(next); setShowLabels(true)
-      setSelectedIds(new Set([handle])); setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(handle); return
-    }
-
-    if (activeTool === 'drawArc') {
-      const arcPt = snapTargetRef.current ?? { x: wx, y: wy }
-      if (!arcDraftCenter) { setArcDraftCenter(arcPt); setArcDraftRadius(null); setArcDraftStartAngle(null); return }
-      const dx = arcPt.x - arcDraftCenter.x, dy = arcPt.y - arcDraftCenter.y
-      const angle = Math.atan2(dy, dx) * (180 / Math.PI)
-      const radius = Math.hypot(dx, dy)
-      if (arcDraftRadius === null) {
-        if (radius < 0.01) return; setArcDraftRadius(radius); setArcDraftStartAngle(angle); return
-      }
-      let endAngle = angle
-      if (endAngle <= arcDraftStartAngle!) endAngle += 360
-      snapshot()
-      const { next, arc } = appendUserArc(planDoc, arcDraftCenter, arcDraftRadius, arcDraftStartAngle!, endAngle)
-      setPlanDoc(next); setWalls(w => [...w, ...wallSegsFromArc(arc, false)])
-      setArcDraftCenter(null); setArcDraftRadius(null); setArcDraftStartAngle(null); setShapePointer(null)
-      setSelectedArcHandle(arc.handle); setSelectedIds(new Set([arc.handle])); setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
-      setActiveTool('select'); return
-    }
-
-    if (activeTool === 'drawCircle') {
-      const cirPt = snapTargetRef.current ?? { x: wx, y: wy }
-      if (!circleDraftCenter) { setCircleDraftCenter(cirPt); return }
-      const radius = Math.hypot(cirPt.x - circleDraftCenter.x, cirPt.y - circleDraftCenter.y)
-      if (radius < 0.01) return
-      snapshot()
-      const { next, arc } = appendUserArc(planDoc, circleDraftCenter, radius, 0, 360)
-      setPlanDoc(next); setWalls(w => [...w, ...wallSegsFromArc(arc, false)])
-      setCircleDraftCenter(null); setShapePointer(null)
-      setSelectedArcHandle(arc.handle); setSelectedIds(new Set([arc.handle])); setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
-      setActiveTool('select'); return
-    }
-
-    // Check if the click falls inside a DXF group bounding box (world coords).
-    for (const grp of canvasGroups) {
-      const { minX, minY, maxX, maxY } = grp.bounds
-      if (wx >= minX && wx <= maxX && wy >= minY && wy <= maxY) {
-        selectDxfGroup(grp.id)
-        return
-      }
-    }
-
-    setSelectedGroupId(null)
-    setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null); setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
-  }, [activeTool, t, getSnap, planDoc, snapshot, setActiveTool, arcDraftCenter, arcDraftRadius, arcDraftStartAngle, circleDraftCenter, canvasGroups, selectDxfGroup])
 
   const finishPolyline = useCallback(() => {
     const pts = polylineDraftRef.current
@@ -2929,119 +2767,294 @@ const visWalls = useMemo(
   // Deps exclude selectedIds/selectedGroupId/hoveredGroupId — handlers read from refs.
   // Only rebuilds when wall geometry, transform, or document structure changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const wallHitAreaLines = useMemo(() => {
-    return effectiveWalls
-      .filter(w => !w.fromArc && !toMoveSet.has(w.id) && isLayerVisible(w.layer ?? '0'))
-      .map(w => {
-        const [sx, sy] = toC(w.start.x, w.start.y, t)
-        const [ex, ey] = toC(w.end.x, w.end.y, t)
-        const curvePts: number[] | null = w.curveMidPt ? (() => {
-          const mx = w.curveMidPt!.x, my = w.curveMidPt!.y
-          const cpWX = 2 * mx - (w.start.x + w.end.x) / 2
-          const cpWY = 2 * my - (w.start.y + w.end.y) / 2
-          const [cpX, cpY] = toC(cpWX, cpWY, t)
-          return [sx, sy, cpX, cpY, cpX, cpY, ex, ey]
-        })() : null
-        return (
-          <Group key={w.id}>
-            <Line
-              points={curvePts ?? [sx, sy, ex, ey]}
-              bezier={!!curvePts}
-              stroke="transparent"
-              strokeWidth={16}
-              strokeScaleEnabled={false}
-              onMouseDown={(e: Konva.KonvaEventObject<MouseEvent>) => {
-                if (['drawPolyline', 'drawLine', 'drawArc', 'drawCircle', 'text'].includes(activeToolRef.current)) return
-                if (isLayerLocked(w.layer ?? '0')) return
-                e.cancelBubble = true
-                didDragRef.current = false
-                selBeforeMouseDown.current = new Set(selectedIdsRef.current)
-                const isCtrl = e.evt.ctrlKey || e.evt.metaKey
-                const dxfGid = wallIdToGroupId.get(w.id)
-                if (dxfGid !== undefined) {
-                  const grp = canvasGroups.find(g => g.id === dxfGid)
-                  if (grp) {
-                    setSelectedGroupId(dxfGid)
-                    setSelectedId(null); setSelectedRoomIndex(null)
-                    setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
-                    const persistedSel = new Set<string>(isCtrl ? selectedIdsRef.current : [])
-                    grp.wallIds.forEach(id => persistedSel.add(id))
-                    setSelectedIds(persistedSel)
-                    const selForDrag = new Set(persistedSel)
-                    grp.arcHandles.forEach(h => selForDrag.add(h))
-                    onMidDragStart(e as any, w.id, selForDrag)
-                    return
-                  }
-                }
-                const groupIds = getGroupWallIds(w.id, walls)
-                if (w.groupId?.startsWith('pl-')) {
-                  const lbl = roomLabelHandle(w.groupId.slice(3))
-                  if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
-                }
-                let currentSel: Set<string>
-                if (selectedIdsRef.current.has(w.id)) {
-                  currentSel = selectedIdsRef.current
-                } else {
-                  const groupFullySelected = groupIds.every(id => selectedIdsRef.current.has(id))
-                  if (groupFullySelected) {
-                    currentSel = selectedIdsRef.current
-                  } else {
-                    currentSel = new Set(isCtrl ? selectedIdsRef.current : [])
-                    groupIds.forEach(id => currentSel.add(id))
-                    setSelectedIds(currentSel)
-                  }
-                }
-                if (selectedGroupIdRef.current !== null) setSelectedGroupId(null)
-                onMidDragStart(e as any, w.id, currentSel)
-              }}
-              onMouseUp={(e: Konva.KonvaEventObject<MouseEvent>) => { e.cancelBubble = true; onMidDragEnd() }}
-              onClick={(e: Konva.KonvaEventObject<MouseEvent>) => {
-                if (['drawPolyline', 'drawLine', 'drawArc', 'drawCircle', 'text'].includes(activeToolRef.current)) return
-                if (isLayerLocked(w.layer ?? '0')) return
-                e.cancelBubble = true
-                if (didDragRef.current) { didDragRef.current = false; return }
-                const isCtrl = e.evt.ctrlKey || e.evt.metaKey
-                const dxfGid = wallIdToGroupId.get(w.id)
-                if (dxfGid !== undefined) {
-                  const grp = canvasGroups.find(g => g.id === dxfGid)
-                  if (grp) {
-                    if (isCtrl && selBeforeMouseDown.current.has(w.id)) {
-                      setSelectedIds(prev => { const next = new Set(prev); grp.wallIds.forEach(id => next.delete(id)); return next })
-                      if (selectedGroupIdRef.current === dxfGid) setSelectedGroupId(null)
-                    } else {
-                      selectDxfGroup(dxfGid, isCtrl)
-                    }
-                    return
-                  }
-                }
-                const groupIds = getGroupWallIds(w.id, walls)
-                if (w.groupId?.startsWith('pl-')) {
-                  const lbl = roomLabelHandle(w.groupId.slice(3))
-                  if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
-                }
-                setSelectedGroupId(null)
-                setSelectedIds(prev => {
-                  if (!isCtrl) return new Set(groupIds)
-                  if (selBeforeMouseDown.current.has(w.id)) { const next = new Set(prev); groupIds.forEach(id => next.delete(id)); return next }
-                  return prev
-                })
-              }}
-              onMouseEnter={(ev: Konva.KonvaEventObject<MouseEvent>) => {
-                ev.target.getStage()!.container().style.cursor = 'move'
-                hoveredGroupIdRef.current = w.groupId ?? null
-                wallsSceneShapeRef.current?.getLayer()?.batchDraw()
-              }}
-              onMouseLeave={(ev: Konva.KonvaEventObject<MouseEvent>) => {
-                ev.target.getStage()!.container().style.cursor = 'default'
-                hoveredGroupIdRef.current = null
-                wallsSceneShapeRef.current?.getLayer()?.batchDraw()
-              }}
-            />
-          </Group>
-        )
-      })
-  // selectedIds/selectedGroupId/hoveredGroupId intentionally omitted — handlers read from refs
-  }, [effectiveWalls, toMoveSet, t, isLayerVisible, isLayerLocked, wallIdToGroupId, canvasGroups, planDoc, walls, onMidDragStart, onMidDragEnd, selectDxfGroup])
+  // const wallHitAreaLines = useMemo(() => {
+  //   return effectiveWalls
+  //     .filter(w => !w.fromArc && !toMoveSet.has(w.id) && isLayerVisible(w.layer ?? '0'))
+  //     .map(w => {
+  //       const [sx, sy] = toC(w.start.x, w.start.y, t)
+  //       const [ex, ey] = toC(w.end.x, w.end.y, t)
+  //       const curvePts: number[] | null = w.curveMidPt ? (() => {
+  //         const mx = w.curveMidPt!.x, my = w.curveMidPt!.y
+  //         const cpWX = 2 * mx - (w.start.x + w.end.x) / 2
+  //         const cpWY = 2 * my - (w.start.y + w.end.y) / 2
+  //         const [cpX, cpY] = toC(cpWX, cpWY, t)
+  //         return [sx, sy, cpX, cpY, cpX, cpY, ex, ey]
+  //       })() : null
+  //       return (
+  //         <Group key={w.id}>
+  //           <Line
+  //             points={curvePts ?? [sx, sy, ex, ey]}
+  //             bezier={!!curvePts}
+  //             stroke="transparent"
+  //             strokeWidth={16}
+  //             strokeScaleEnabled={false}
+  //             onMouseDown={(e: Konva.KonvaEventObject<MouseEvent>) => {
+  //               if (['drawPolyline', 'drawLine', 'drawArc', 'drawCircle', 'text'].includes(activeToolRef.current)) return
+  //               if (isLayerLocked(w.layer ?? '0')) return
+  //               e.cancelBubble = true
+  //               didDragRef.current = false
+  //               selBeforeMouseDown.current = new Set(selectedIdsRef.current)
+  //               const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+  //               const dxfGid = wallIdToGroupId.get(w.id)
+  //               if (dxfGid !== undefined) {
+  //                 const grp = canvasGroups.find(g => g.id === dxfGid)
+  //                 if (grp) {
+  //                   setSelectedGroupId(dxfGid)
+  //                   setSelectedId(null); setSelectedRoomIndex(null)
+  //                   setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
+  //                   const persistedSel = new Set<string>(isCtrl ? selectedIdsRef.current : [])
+  //                   grp.wallIds.forEach(id => persistedSel.add(id))
+  //                   setSelectedIds(persistedSel)
+  //                   const selForDrag = new Set(persistedSel)
+  //                   grp.arcHandles.forEach(h => selForDrag.add(h))
+  //                   onMidDragStart(e as any, w.id, selForDrag)
+  //                   return
+  //                 }
+  //               }
+  //               const groupIds = getGroupWallIds(w.id, walls)
+  //               if (w.groupId?.startsWith('pl-')) {
+  //                 const lbl = roomLabelHandle(w.groupId.slice(3))
+  //                 if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
+  //               }
+  //               let currentSel: Set<string>
+  //               if (selectedIdsRef.current.has(w.id)) {
+  //                 currentSel = selectedIdsRef.current
+  //               } else {
+  //                 const groupFullySelected = groupIds.every(id => selectedIdsRef.current.has(id))
+  //                 if (groupFullySelected) {
+  //                   currentSel = selectedIdsRef.current
+  //                 } else {
+  //                   currentSel = new Set(isCtrl ? selectedIdsRef.current : [])
+  //                   groupIds.forEach(id => currentSel.add(id))
+  //                   setSelectedIds(currentSel)
+  //                 }
+  //               }
+  //               if (selectedGroupIdRef.current !== null) setSelectedGroupId(null)
+  //               onMidDragStart(e as any, w.id, currentSel)
+  //             }}
+  //             onMouseUp={(e: Konva.KonvaEventObject<MouseEvent>) => { e.cancelBubble = true; onMidDragEnd() }}
+  //             onClick={(e: Konva.KonvaEventObject<MouseEvent>) => {
+  //               if (['drawPolyline', 'drawLine', 'drawArc', 'drawCircle', 'text'].includes(activeToolRef.current)) return
+  //               if (isLayerLocked(w.layer ?? '0')) return
+  //               e.cancelBubble = true
+  //               if (didDragRef.current) { didDragRef.current = false; return }
+  //               const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+  //               const dxfGid = wallIdToGroupId.get(w.id)
+  //               if (dxfGid !== undefined) {
+  //                 const grp = canvasGroups.find(g => g.id === dxfGid)
+  //                 if (grp) {
+  //                   if (isCtrl && selBeforeMouseDown.current.has(w.id)) {
+  //                     setSelectedIds(prev => { const next = new Set(prev); grp.wallIds.forEach(id => next.delete(id)); return next })
+  //                     if (selectedGroupIdRef.current === dxfGid) setSelectedGroupId(null)
+  //                   } else {
+  //                     selectDxfGroup(dxfGid, isCtrl)
+  //                   }
+  //                   return
+  //                 }
+  //               }
+  //               const groupIds = getGroupWallIds(w.id, walls)
+  //               if (w.groupId?.startsWith('pl-')) {
+  //                 const lbl = roomLabelHandle(w.groupId.slice(3))
+  //                 if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
+  //               }
+  //               setSelectedGroupId(null)
+  //               setSelectedIds(prev => {
+  //                 if (!isCtrl) return new Set(groupIds)
+  //                 if (selBeforeMouseDown.current.has(w.id)) { const next = new Set(prev); groupIds.forEach(id => next.delete(id)); return next }
+  //                 return prev
+  //               })
+  //             }}
+  //             onMouseEnter={(ev: Konva.KonvaEventObject<MouseEvent>) => {
+  //               ev.target.getStage()!.container().style.cursor = 'move'
+  //               hoveredGroupIdRef.current = w.groupId ?? null
+  //               wallsSceneShapeRef.current?.getLayer()?.batchDraw()
+  //             }}
+  //             onMouseLeave={(ev: Konva.KonvaEventObject<MouseEvent>) => {
+  //               ev.target.getStage()!.container().style.cursor = 'default'
+  //               hoveredGroupIdRef.current = null
+  //               wallsSceneShapeRef.current?.getLayer()?.batchDraw()
+  //             }}
+  //           />
+  //         </Group>
+  //       )
+  //     })
+  // // selectedIds/selectedGroupId/hoveredGroupId intentionally omitted — handlers read from refs
+  // }, [effectiveWalls, toMoveSet, t, isLayerVisible, isLayerLocked, wallIdToGroupId, canvasGroups, planDoc, walls, onMidDragStart, onMidDragEnd, selectDxfGroup])
+
+  const findWallAtPointer = useCallback((wx: number, wy: number): WallSeg | null => {
+  const pxToW = 1 / (t.sc * (zoomRef.current || 1))
+  const thresh = 12 * pxToW
+  const nearby = queryNearbyWalls(wx, wy, thresh * 2)
+  let best: WallSeg | null = null
+  let bestDist = thresh
+  for (const w of nearby) {
+    if (w.fromArc || toMoveSet.has(w.id)) continue
+    if (!isLayerVisible(w.layer ?? '0') || isLayerLocked(w.layer ?? '0')) continue
+    const { dist } = closestPointOnSegment(wx, wy, w.start.x, w.start.y, w.end.x, w.end.y)
+    if (dist < bestDist) { bestDist = dist; best = w }
+  }
+  return best
+}, [t, queryNearbyWalls, toMoveSet, isLayerVisible, isLayerLocked])
+
+
+  const onWallHitPointer = useCallback((
+  e: Konva.KonvaEventObject<MouseEvent>,
+  mode: 'down' | 'click' | 'up'
+) => {
+  if (['drawPolyline','drawLine','drawArc','drawCircle','text'].includes(activeToolRef.current)) return
+  const pos = e.target.getStage()?.getRelativePointerPosition()
+  if (!pos) return
+  const [wx, wy] = toW(pos.x, pos.y, t)
+  const thresh = 10 / (zoomRef.current * t.sc)
+  const nearby = queryNearbyWalls(wx, wy, thresh * 2)
+  let bestWall: WallSeg | null = null
+  let bestDist = thresh
+  for (const w of nearby) {
+    if (w.fromArc || toMoveSet.has(w.id)) continue
+    if (!isLayerVisible(w.layer ?? '0') || isLayerLocked(w.layer ?? '0')) continue
+    const { dist } = closestPointOnSegment(wx, wy, w.start.x, w.start.y, w.end.x, w.end.y)
+    if (dist < bestDist) { bestDist = dist; bestWall = w }
+  }
+  if (!bestWall) return
+
+  const w = bestWall
+  e.cancelBubble = true
+  const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+
+  if (mode === 'up') { onMidDragEnd(); return }
+
+  if (mode === 'down') {
+    didDragRef.current = false
+    selBeforeMouseDown.current = new Set(selectedIdsRef.current)
+    const dxfGid = wallIdToGroupId.get(w.id)
+    if (dxfGid !== undefined) {
+      const grp = canvasGroups.find(g => g.id === dxfGid)
+      if (grp) {
+        setSelectedGroupId(dxfGid)
+        setSelectedId(null); setSelectedRoomIndex(null)
+        setSelectedArcHandle(null); setSelectedWinKey(null)
+        setSelectedFurnKey(null); setSelectedDimKey(null)
+        const sel = new Set<string>(isCtrl ? selectedIdsRef.current : [])
+        grp.wallIds.forEach(id => sel.add(id))
+        setSelectedIds(sel)
+        const selForDrag = new Set(sel)
+        grp.arcHandles.forEach(h => selForDrag.add(h))
+        onMidDragStart(e as any, w.id, selForDrag)
+        return
+      }
+    }
+    const groupIds = getGroupWallIds(w.id, walls)
+    if (w.groupId?.startsWith('pl-')) {
+      const lbl = roomLabelHandle(w.groupId.slice(3))
+      if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
+    }
+    let currentSel: Set<string>
+    if (selectedIdsRef.current.has(w.id)) {
+      currentSel = selectedIdsRef.current
+    } else {
+      const fullySelected = groupIds.every(id => selectedIdsRef.current.has(id))
+      currentSel = fullySelected ? selectedIdsRef.current : new Set(isCtrl ? selectedIdsRef.current : [])
+      groupIds.forEach(id => currentSel.add(id))
+      setSelectedIds(currentSel)
+    }
+    if (selectedGroupIdRef.current !== null) setSelectedGroupId(null)
+    onMidDragStart(e as any, w.id, currentSel)
+    return
+  }
+
+  if (mode === 'click') {
+    if (didDragRef.current) { didDragRef.current = false; return }
+    const dxfGid = wallIdToGroupId.get(w.id)
+    if (dxfGid !== undefined) {
+      const grp = canvasGroups.find(g => g.id === dxfGid)
+      if (grp) {
+        if (isCtrl && selBeforeMouseDown.current.has(w.id)) {
+          setSelectedIds(prev => { const next = new Set(prev); grp.wallIds.forEach(id => next.delete(id)); return next })
+          if (selectedGroupIdRef.current === dxfGid) setSelectedGroupId(null)
+        } else {
+          selectDxfGroup(dxfGid, isCtrl)
+        }
+        return
+      }
+    }
+    const groupIds = getGroupWallIds(w.id, walls)
+    if (w.groupId?.startsWith('pl-')) {
+      const lbl = roomLabelHandle(w.groupId.slice(3))
+      if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
+    }
+    setSelectedGroupId(null)
+    setSelectedIds(prev => {
+      if (!isCtrl) return new Set(groupIds)
+      if (selBeforeMouseDown.current.has(w.id)) {
+        const next = new Set(prev); groupIds.forEach(id => next.delete(id)); return next
+      }
+      return prev
+    })
+  }
+}, [effectiveWalls, toMoveSet, t, isLayerVisible, isLayerLocked, wallIdToGroupId,
+    canvasGroups, planDoc, walls, onMidDragStart, onMidDragEnd,
+    queryNearbyWalls, selectDxfGroup])
+
+     const onStageMouseDown = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+  const isStage = e.target === stageRef.current || e.target.name() === 'background-rect'
+  const pos = stageRef.current?.getRelativePointerPosition()
+  if (!pos) return
+  const [wx, wy] = toW(pos.x, pos.y, t)
+
+  // ── Wall hit test (select tool only, not drawing tools, not space-pan)
+  if (activeTool === 'select' && !spaceHeld && !isDrawingTool) {
+    const w = findWallAtPointer(wx, wy)
+    if (w) {
+      // Synthetic event — reuse your existing onWallHitPointer logic
+      e.cancelBubble = true
+      didDragRef.current = false
+      selBeforeMouseDown.current = new Set(selectedIdsRef.current)
+      const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+      const dxfGid = wallIdToGroupId.get(w.id)
+      if (dxfGid !== undefined) {
+        const grp = canvasGroups.find(g => g.id === dxfGid)
+        if (grp) {
+          setSelectedGroupId(dxfGid)
+          setSelectedId(null); setSelectedRoomIndex(null)
+          setSelectedArcHandle(null); setSelectedWinKey(null)
+          setSelectedFurnKey(null); setSelectedDimKey(null)
+          const persistedSel = new Set<string>(isCtrl ? selectedIdsRef.current : [])
+          grp.wallIds.forEach(id => persistedSel.add(id))
+          setSelectedIds(persistedSel)
+          const selForDrag = new Set(persistedSel)
+          grp.arcHandles.forEach(h => selForDrag.add(h))
+          onMidDragStart(e as any, w.id, selForDrag)
+          return
+        }
+      }
+      const groupIds = getGroupWallIds(w.id, walls)
+      if (w.groupId?.startsWith('pl-')) {
+        const lbl = roomLabelHandle(w.groupId.slice(3))
+        if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
+      }
+      let currentSel: Set<string>
+      if (selectedIdsRef.current.has(w.id)) {
+        currentSel = selectedIdsRef.current
+      } else {
+        const fullySelected = groupIds.every(id => selectedIdsRef.current.has(id))
+        currentSel = fullySelected
+          ? selectedIdsRef.current
+          : new Set(isCtrl ? selectedIdsRef.current : [])
+        groupIds.forEach(id => currentSel.add(id))
+        setSelectedIds(currentSel)
+      }
+      if (selectedGroupIdRef.current !== null) setSelectedGroupId(null)
+      onMidDragStart(e as any, w.id, currentSel)
+      return
+    }
+  }
+
+  // ── Original rubber-band logic (unchanged)
+  if (!isStage || activeTool !== 'select' || spaceHeld) return
+  selectionBoxRef.current = { start: { x: wx, y: wy }, current: { x: wx, y: wy } }
+  setIsRubberBanding(true)
+}, [activeTool, spaceHeld, t, findWallAtPointer, wallIdToGroupId, canvasGroups,
+    walls, planDoc.texts, onMidDragStart, isDrawingTool])
 
   // Endpoint grips for the single selected non-dragged wall.
   // This is the only JSX that re-renders when selectedIds changes — just 3 Circles.
@@ -3103,6 +3116,327 @@ const visWalls = useMemo(
       </Group>
     )
   }, [selectedIds, toMoveSet, effectiveWalls, wallIdToGroupId, t, snapshot, setIsDraggingEp, draggingEpInfo, onEpDragMove, onEpDragEnd, setWalls])
+
+  const handleStageClick = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+  const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+  const stage = stageRef.current
+  if (!stage) return
+  const p = getStageCanvasPointer(stage)
+  if (!p) return
+  const [wx, wy] = toW(p.x, p.y, t)
+
+  // ── Wall hit (select tool, not drawing, not a drag) ──────────────────
+  if (activeTool === 'select' && !isDrawingTool && !didDragRef.current) {
+    const w = findWallAtPointer(wx, wy)
+    if (w) {
+      e.cancelBubble = true
+      const dxfGid = wallIdToGroupId.get(w.id)
+      if (dxfGid !== undefined) {
+        const grp = canvasGroups.find(g => g.id === dxfGid)
+        if (grp) {
+          if (isCtrl && selBeforeMouseDown.current.has(w.id)) {
+            setSelectedIds(prev => {
+              const next = new Set(prev)
+              grp.wallIds.forEach(id => next.delete(id))
+              return next
+            })
+            if (selectedGroupIdRef.current === dxfGid) setSelectedGroupId(null)
+          } else {
+            selectDxfGroup(dxfGid, isCtrl)
+          }
+          return
+        }
+      }
+      const groupIds = getGroupWallIds(w.id, walls)
+      if (w.groupId?.startsWith('pl-')) {
+        const lbl = roomLabelHandle(w.groupId.slice(3))
+        if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
+      }
+      setSelectedGroupId(null)
+      setSelectedIds(prev => {
+        if (!isCtrl) return new Set(groupIds)
+        if (selBeforeMouseDown.current.has(w.id)) {
+          const next = new Set(prev)
+          groupIds.forEach(id => next.delete(id))
+          return next
+        }
+        return prev
+      })
+      return
+    }
+  }
+
+  // ── Drawing tools ────────────────────────────────────────────────────
+  if (activeTool === 'drawLine') {
+    const snapped = snapTargetRef.current ?? { x: wx, y: wy }
+    if (!drawLineAnchorRef.current) {
+      drawLineAnchorRef.current = snapped
+      setDrawLineAnchor(snapped)
+      drawLinePointerRef.current = snapped
+      snapLayerRef.current?.batchDraw()
+      return
+    }
+    const start = drawLineAnchorRef.current, end = snapped
+    if (Math.hypot(end.x - start.x, end.y - start.y) < 0.02) return
+    snapshot()
+    const { next, handle } = appendUserLine(planDoc, start, end)
+    const newId = `ln-${handle}`
+    setPlanDoc(next)
+    setWalls(w => [...w, { id: newId, start: { ...start }, end: { ...end }, isOuter: false, isDetail: false }])
+    setSelectedIds(new Set([newId]))
+    setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
+    drawLineAnchorRef.current = end
+    setDrawLineAnchor(end)
+    drawLinePointerRef.current = end
+    return
+  }
+
+  if (activeTool === 'drawPolyline') {
+    const snapped = snapTargetRef.current ?? { x: wx, y: wy }
+    const nextDraft = [...polylineDraftRef.current, snapped]
+    polylineDraftRef.current = nextDraft
+    setPolylineDraft(nextDraft)
+    return
+  }
+
+  if (activeTool === 'text') {
+    snapshot()
+    const { next, handle } = appendUserText(planDoc, { x: wx, y: wy })
+    setPlanDoc(next)
+    setShowLabels(true)
+    setSelectedIds(new Set([handle]))
+    setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(handle)
+    return
+  }
+
+  if (activeTool === 'drawArc') {
+    const arcPt = snapTargetRef.current ?? { x: wx, y: wy }
+    if (!arcDraftCenter) {
+      setArcDraftCenter(arcPt)
+      setArcDraftRadius(null)
+      setArcDraftStartAngle(null)
+      return
+    }
+    const dx = arcPt.x - arcDraftCenter.x, dy = arcPt.y - arcDraftCenter.y
+    const angle = Math.atan2(dy, dx) * (180 / Math.PI)
+    const radius = Math.hypot(dx, dy)
+    if (arcDraftRadius === null) {
+      if (radius < 0.01) return
+      setArcDraftRadius(radius)
+      setArcDraftStartAngle(angle)
+      return
+    }
+    let endAngle = angle
+    if (endAngle <= arcDraftStartAngle!) endAngle += 360
+    snapshot()
+    const { next, arc } = appendUserArc(planDoc, arcDraftCenter, arcDraftRadius, arcDraftStartAngle!, endAngle)
+    setPlanDoc(next)
+    setWalls(w => [...w, ...wallSegsFromArc(arc, false)])
+    setArcDraftCenter(null); setArcDraftRadius(null); setArcDraftStartAngle(null); setShapePointer(null)
+    setSelectedArcHandle(arc.handle)
+    setSelectedIds(new Set([arc.handle]))
+    setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
+    setActiveTool('select')
+    return
+  }
+
+  if (activeTool === 'drawCircle') {
+    const cirPt = snapTargetRef.current ?? { x: wx, y: wy }
+    if (!circleDraftCenter) {
+      setCircleDraftCenter(cirPt)
+      return
+    }
+    const radius = Math.hypot(cirPt.x - circleDraftCenter.x, cirPt.y - circleDraftCenter.y)
+    if (radius < 0.01) return
+    snapshot()
+    const { next, arc } = appendUserArc(planDoc, circleDraftCenter, radius, 0, 360)
+    setPlanDoc(next)
+    setWalls(w => [...w, ...wallSegsFromArc(arc, false)])
+    setCircleDraftCenter(null); setShapePointer(null)
+    setSelectedArcHandle(arc.handle)
+    setSelectedIds(new Set([arc.handle]))
+    setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
+    setActiveTool('select')
+    return
+  }
+
+  // ── Background click — check DXF groups then deselect ───────────────
+  if (!isDrawingTool) {
+    for (const grp of canvasGroups) {
+      const { minX, minY, maxX, maxY } = grp.bounds
+      if (wx >= minX && wx <= maxX && wy >= minY && wy <= maxY) {
+        selectDxfGroup(grp.id)
+        return
+      }
+    }
+    setSelectedGroupId(null)
+    setSelectedId(null); setSelectedRoomIndex(null); setSelectedTextHandle(null)
+    setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
+  }
+}, [
+  activeTool, t, isDrawingTool, findWallAtPointer,
+  wallIdToGroupId, canvasGroups, walls, planDoc,
+  snapshot, selectDxfGroup,
+  arcDraftCenter, arcDraftRadius, arcDraftStartAngle, circleDraftCenter,
+])
+
+const onStageMouseMove = useCallback((_e: Konva.KonvaEventObject<MouseEvent>) => {
+  _e.evt.preventDefault()
+  const pos = stageRef.current?.getRelativePointerPosition()
+  if (!pos) return
+  const [wx, wy] = toW(pos.x, pos.y, t)
+
+  // ── Hover hit-test for walls (select tool, idle) ─────────────────────
+  if (
+    activeTool === 'select' && !spaceHeld &&
+    !activeDragRef.current && !rotationDragRef.current &&
+    !resizeDragRef.current && !selectionBoxRef.current &&
+    !isDraggingEp
+  ) {
+    const hit = findWallAtPointer(wx, wy)
+    const stage = stageRef.current
+    if (stage) {
+      stage.container().style.cursor = hit ? 'move' : 'default'
+    }
+    const newHover = hit?.groupId ?? null
+    if (newHover !== hoveredGroupIdRef.current) {
+      hoveredGroupIdRef.current = newHover
+      wallsSceneShapeRef.current?.getLayer()?.batchDraw()
+    }
+  }
+
+  // ── Rubber-band update ───────────────────────────────────────────────
+  if (selectionBoxRef.current) {
+    selectionBoxRef.current = { ...selectionBoxRef.current, current: { x: wx, y: wy } }
+    const rr = rubberBandRectRef.current
+    if (rr) {
+      const { start, current } = selectionBoxRef.current
+      const [sx, sy] = toC(start.x, start.y, t)
+      const [cx, cy] = toC(current.x, current.y, t)
+      const isWindow = start.x < current.x
+      rr.x(Math.min(sx, cx)); rr.y(Math.min(sy, cy))
+      rr.width(Math.abs(cx - sx)); rr.height(Math.abs(cy - sy))
+      rr.fill(isWindow ? 'rgba(59,130,246,0.2)' : 'rgba(34,197,94,0.2)')
+      rr.stroke(isWindow ? '#3b82f6' : '#22c55e')
+      rr.getLayer()?.batchDraw()
+    }
+    return
+  }
+
+  // ── Wall drag ────────────────────────────────────────────────────────
+  if (activeDragRef.current) {
+    const drag = activeDragRef.current
+    let dx = wx - drag.initWX
+    let dy = wy - drag.initWY
+    if (orthoEnabled) {
+      if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0
+    }
+    dragDeltaRef.current = { dx, dy }
+    const screenScale = t.sc * (stageRef.current?.scaleX() ?? 1)
+    if (Math.hypot(dx * screenScale, dy * screenScale) > 4) {
+      didDragRef.current = true
+    }
+    if (dragGroupRef.current) {
+      dragGroupRef.current.x(dx * t.sc)
+      dragGroupRef.current.y(-dy * t.sc)
+    }
+    for (const h of drag.toMoveArcHandles) {
+      const grp = arcGroupRefs.current.get(h)
+      if (grp) { grp.x(dx * t.sc); grp.y(-dy * t.sc) }
+    }
+    dragGroupRef.current?.getLayer()?.batchDraw()
+    if (!liveDragRafRef.current) {
+      liveDragRafRef.current = requestAnimationFrame(() => {
+        liveDragRafRef.current = 0
+        setLiveDragDelta({ ...dragDeltaRef.current })
+      })
+    }
+    return
+  }
+
+  // ── Rotation drag ────────────────────────────────────────────────────
+  if (rotationDragRef.current) {
+    const rd = rotationDragRef.current
+    const [ccx, ccy] = toC(rd.centerWX, rd.centerWY, t)
+    const currentAngle = Math.atan2(pos.y - ccy, pos.x - ccx)
+    const delta = currentAngle - rd.startMouseAngle
+    rotationAngleDeltaRef.current = delta
+    setRotationAngleDelta(delta)
+    return
+  }
+
+  // ── Resize drag ──────────────────────────────────────────────────────
+  if (resizeDragRef.current) {
+    const rd = resizeDragRef.current
+    const dWX = wx - rd.initMouseWX
+    const dWY = wy - rd.initMouseWY
+    const h = rd.handle
+    const nb = { ...rd.initBBox }
+    if (h.includes('e')) nb.maxWX = Math.max(rd.initBBox.minWX + 0.1, rd.initBBox.maxWX + dWX)
+    if (h.includes('w')) nb.minWX = Math.min(rd.initBBox.maxWX - 0.1, rd.initBBox.minWX + dWX)
+    if (h.includes('n')) nb.maxWY = Math.max(rd.initBBox.minWY + 0.1, rd.initBBox.maxWY + dWY)
+    if (h.includes('s')) nb.minWY = Math.min(rd.initBBox.maxWY - 0.1, rd.initBBox.minWY + dWY)
+    resizePreviewRef.current = nb
+    setResizePreview(nb)
+    return
+  }
+
+  // ── Draw line preview ────────────────────────────────────────────────
+  if (activeTool === 'drawLine') {
+    const anchor = drawLineAnchorRef.current
+    let fx = wx, fy = wy
+    if (anchor && polarTrackingEnabled && !orthoEnabled) {
+      const p2 = applyPolar(wx, wy, anchor.x, anchor.y)
+      if (p2.angle !== null) { fx = p2.x; fy = p2.y }
+    }
+    const snapped = getSnap(fx, fy, '', anchor ?? undefined)
+    if (anchor) drawLinePointerRef.current = snapped
+    snapTargetRef.current = snapped
+    snapLayerRef.current?.batchDraw()
+    return
+  }
+
+  // ── Draw polyline preview ────────────────────────────────────────────
+  if (activeTool === 'drawPolyline') {
+    const draft = polylineDraftRef.current
+    const anchor = draft.length > 0 ? draft[draft.length - 1] : null
+    let fx = wx, fy = wy
+    if (anchor && polarTrackingEnabled && !orthoEnabled) {
+      const p2 = applyPolar(wx, wy, anchor.x, anchor.y)
+      if (p2.angle !== null) { fx = p2.x; fy = p2.y }
+    }
+    const snapped = getSnap(fx, fy, '', anchor ?? undefined)
+    polylineHoverRef.current = draft.length > 0 ? snapped : null
+    snapTargetRef.current = snapped
+    snapLayerRef.current?.batchDraw()
+    return
+  }
+
+  // ── Draw arc / circle preview ────────────────────────────────────────
+  if (activeTool === 'drawArc' || activeTool === 'drawCircle') {
+    const anchor = activeTool === 'drawArc' ? arcDraftCenter : circleDraftCenter
+    let fx = wx, fy = wy
+    if (anchor && polarTrackingEnabled && !orthoEnabled) {
+      const p2 = applyPolar(wx, wy, anchor.x, anchor.y)
+      if (p2.angle !== null) { fx = p2.x; fy = p2.y }
+    }
+    const snapped = getSnap(fx, fy, '', anchor ?? undefined)
+    setShapePointer(snapped)
+    snapTargetRef.current = snapped
+    snapLayerRef.current?.batchDraw()
+    return
+  }
+
+  // ── Idle / other tools — clear snap ─────────────────────────────────
+  snapTargetRef.current = null
+  alignGuidesRef.current = []
+  lastSnapTypeRef.current = null
+  snapLayerRef.current?.batchDraw()
+}, [
+  t, orthoEnabled, activeTool, spaceHeld, isDraggingEp,
+  findWallAtPointer, getSnap, polarTrackingEnabled,
+  arcDraftCenter, circleDraftCenter,
+])
 
   return (
     <div className="dxf-editor">
@@ -3826,10 +4160,89 @@ onClick={e => { if (isLayerLocked(lines[0]?.layer ?? '0')) return; e.cancelBubbl
                     <>
                       {/* All static wall visuals in one Canvas 2D pass (no per-wall Konva Line nodes) */}
                       <Shape ref={wallsSceneShapeRef} sceneFunc={drawWallsStatic} perfectDrawEnabled={false} listening={false} />
-                      {/* Memoized hit-area Lines — only rebuilt when walls/transform change, not on selection/hover */}
-                      {wallHitAreaLines}
-                      {/* Endpoint grips for single selected non-dragged wall — tiny re-render on selection */}
-                      {selectedWallEndpoints}
+<Shape
+  sceneFunc={() => {}}
+  hitFunc={(ctx) => {
+    const c = ctx as unknown as CanvasRenderingContext2D
+    c.beginPath()
+    for (const w of effectiveWalls) {
+      if (w.fromArc || toMoveSet.has(w.id) || !isLayerVisible(w.layer ?? '0')) continue
+      const [sx, sy] = toC(w.start.x, w.start.y, t)
+      const [ex, ey] = toC(w.end.x, w.end.y, t)
+      c.moveTo(sx, sy)
+      c.lineTo(ex, ey)
+    }
+    c.lineWidth = 16
+    c.stroke()
+  }}
+  onMouseDown={e => {
+    const pos = e.target.getStage()?.getRelativePointerPosition()
+    if (!pos) return
+    const [wx, wy] = toW(pos.x, pos.y, t)
+    const thresh = 10 / (zoomRef.current * t.sc)
+    const nearby = queryNearbyWalls(wx, wy, thresh * 2)
+    const hit = nearby.find(w => {
+      if (w.fromArc || toMoveSet.has(w.id)) return false
+      if (!isLayerVisible(w.layer ?? '0') || isLayerLocked(w.layer ?? '0')) return false
+      const { dist } = closestPointOnSegment(wx, wy, w.start.x, w.start.y, w.end.x, w.end.y)
+      return dist < thresh
+    })
+    if (!hit) return  // ← don't cancelBubble, let event fall through
+    onWallHitPointer(e, 'down')
+  }}
+  onMouseUp={e => {
+    const pos = e.target.getStage()?.getRelativePointerPosition()
+    if (!pos) return
+    const [wx, wy] = toW(pos.x, pos.y, t)
+    const thresh = 10 / (zoomRef.current * t.sc)
+    const nearby = queryNearbyWalls(wx, wy, thresh * 2)
+    const hit = nearby.find(w => {
+      if (w.fromArc || toMoveSet.has(w.id)) return false
+      const { dist } = closestPointOnSegment(wx, wy, w.start.x, w.start.y, w.end.x, w.end.y)
+      return dist < thresh
+    })
+    if (!hit) return
+    onWallHitPointer(e, 'up')
+  }}
+  onClick={e => {
+    const pos = e.target.getStage()?.getRelativePointerPosition()
+    if (!pos) return
+    const [wx, wy] = toW(pos.x, pos.y, t)
+    const thresh = 10 / (zoomRef.current * t.sc)
+    const nearby = queryNearbyWalls(wx, wy, thresh * 2)
+    const hit = nearby.find(w => {
+      if (w.fromArc || toMoveSet.has(w.id)) return false
+      if (!isLayerVisible(w.layer ?? '0') || isLayerLocked(w.layer ?? '0')) return false
+      const { dist } = closestPointOnSegment(wx, wy, w.start.x, w.start.y, w.end.x, w.end.y)
+      return dist < thresh
+    })
+    if (!hit) return  // ← don't cancelBubble, let click fall through to rooms/arcs/etc
+    onWallHitPointer(e, 'click')
+  }}
+  onMouseEnter={e => {
+    const pos = e.target.getStage()?.getRelativePointerPosition()
+    if (!pos) return
+    const [wx, wy] = toW(pos.x, pos.y, t)
+    const thresh = 10 / (zoomRef.current * t.sc)
+    const nearby = queryNearbyWalls(wx, wy, thresh * 2)
+    const hit = nearby.find(w => {
+      const { dist } = closestPointOnSegment(wx, wy, w.start.x, w.start.y, w.end.x, w.end.y)
+      return dist < thresh
+    })
+    e.target.getStage()!.container().style.cursor = hit ? 'move' : 'default'
+    hoveredGroupIdRef.current = hit?.groupId ?? null
+    wallsSceneShapeRef.current?.getLayer()?.batchDraw()
+  }}
+  onMouseLeave={e => {
+    e.target.getStage()!.container().style.cursor = 'default'
+    hoveredGroupIdRef.current = null
+    wallsSceneShapeRef.current?.getLayer()?.batchDraw()
+  }}
+  listening={activeTool === 'select' && !spaceHeld}
+  perfectDrawEnabled={false}
+/>
+{selectedWallEndpoints}
+                     
                       {/* Dragged walls live in their own Group — moved via Konva x/y, not React state */}
                       <Group ref={dragGroupRef}>
                         {effectiveWalls.filter(w => toMoveSet.has(w.id)).map(w => renderWall(w, true))}
