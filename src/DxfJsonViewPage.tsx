@@ -1,10 +1,9 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
+﻿/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable react-hooks/exhaustive-deps */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent as ReactDragEvent } from 'react'
 import { Stage, Layer, Line, Text, Group, Rect, Circle, Shape } from 'react-konva'
-import { Arc as KonvaArc } from 'react-konva'
 import type Konva from 'konva'
 import { Link } from 'react-router-dom'
 import {
@@ -498,6 +497,44 @@ function DxfJsonViewPageInner() {
 
   const [walls, setWalls] = useState<WallSeg[]>(() => wallsFromDxfJson(DXF_JSON_DATA))
 
+  // Spatial index: uniform grid for O(k) nearest-wall queries instead of O(n) brute-force.
+  const SPATIAL_CELL = 2.0
+  const spatialIndexRef = useRef<Map<number, WallSeg[]>>(new Map())
+  useEffect(() => {
+    const grid = new Map<number, WallSeg[]>()
+    const cellKey = (cx: number, cy: number) => (Math.floor(cx) + 65536) * 131073 + (Math.floor(cy) + 65536)
+    const wc = (v: number) => Math.floor(v / SPATIAL_CELL)
+    for (const wall of walls) {
+      const x0 = Math.min(wall.start.x, wall.end.x), x1 = Math.max(wall.start.x, wall.end.x)
+      const y0 = Math.min(wall.start.y, wall.end.y), y1 = Math.max(wall.start.y, wall.end.y)
+      for (let cx = wc(x0); cx <= wc(x1); cx++) {
+        for (let cy = wc(y0); cy <= wc(y1); cy++) {
+          const k = cellKey(cx, cy)
+          if (!grid.has(k)) grid.set(k, [])
+          grid.get(k)!.push(wall)
+        }
+      }
+    }
+    spatialIndexRef.current = grid
+  }, [walls])
+  const queryNearbyWalls = useCallback((wx: number, wy: number, radius: number): WallSeg[] => {
+    const grid = spatialIndexRef.current
+    const wc = (v: number) => Math.floor(v / SPATIAL_CELL)
+    const cellKey = (cx: number, cy: number) => (Math.floor(cx) + 65536) * 131073 + (Math.floor(cy) + 65536)
+    const seen = new Set<string>()
+    const result: WallSeg[] = []
+    for (let cx = wc(wx - radius); cx <= wc(wx + radius); cx++) {
+      for (let cy = wc(wy - radius); cy <= wc(wy + radius); cy++) {
+        const cell = grid.get(cellKey(cx, cy))
+        if (!cell) continue
+        for (const w of cell) {
+          if (!seen.has(w.id)) { seen.add(w.id); result.push(w) }
+        }
+      }
+    }
+    return result
+  }, [])
+
   const t = useMemo(
     () => buildTransform(displayDoc.meta.extmin, displayDoc.meta.extmax, stageSize.w, stageSize.h, 10),
     [displayDoc.meta.extmin, displayDoc.meta.extmax, stageSize.w, stageSize.h],
@@ -543,8 +580,14 @@ function DxfJsonViewPageInner() {
   const [circleDraftCenter, setCircleDraftCenter] = useState<Pt | null>(null)
   const [shapePointer, setShapePointer] = useState<Pt | null>(null)
 
-  const [hoveredGroupId, setHoveredGroupId] = useState<string | null>(null)
   const [hoveredRoomIdx, setHoveredRoomIdx] = useState<number | null>(null)
+  // Refs mirror hot state for use inside sceneFunc — prevents callback recreation on every hover/click.
+  // hoveredGroupId is ref-only (no useState) — hover never triggers a React re-render.
+  const selectedIdsRef = useRef<Set<string>>(new Set())
+  const hoveredGroupIdRef = useRef<string | null>(null)
+  const selectedGroupIdRef = useRef<number | null>(null)
+  const toMoveSetRef = useRef<Set<string>>(new Set())
+  const wallsSceneShapeRef = useRef<Konva.Shape | null>(null)
 
   const [activeTool, setActiveTool] = useState<
     'select' | 'hand' | 'frame' | 'drawLine' | 'drawPolyline' | 'text' | 'drawArc' | 'drawCircle'
@@ -566,6 +609,11 @@ function DxfJsonViewPageInner() {
 
   const [hiddenLayers, setHiddenLayers] = useState<Set<string>>(new Set())
   const [lockedLayers, setLockedLayers] = useState<Set<string>>(new Set())
+  // Refs mirror layer state so sceneFunc callbacks read the latest value without being recreated.
+  const hiddenLayersRef = useRef<Set<string>>(new Set())
+  const lockedLayersRef = useRef<Set<string>>(new Set())
+  useEffect(() => { hiddenLayersRef.current = hiddenLayers }, [hiddenLayers])
+  useEffect(() => { lockedLayersRef.current = lockedLayers }, [lockedLayers])
 
   const isLayerVisible = useCallback(
     (layer: string) => !hiddenLayers.has(layer),
@@ -665,6 +713,325 @@ function DxfJsonViewPageInner() {
     () => renderItems.filter(i => i.kind !== 'circle'),
     [renderItems],
   )
+
+  // Batch-draw all non-circle floor plan items via a single Canvas 2D pass —
+  // replaces thousands of individual Konva Line/Arc/Group nodes with one Shape.
+  const drawFloorPlanItems = useCallback((ctx: Konva.Context) => {
+    const c = ctx as unknown as CanvasRenderingContext2D
+    const scale = zoomRef.current || 1
+    const baseSW = strokeScale / scale
+    c.lineCap = 'round'
+    c.lineJoin = 'round'
+
+    // Viewport bounds in canvas-coord space for culling off-screen items
+    const zoom = scale
+    const panX = posRef.current.x
+    const panY = posRef.current.y
+    const fpvw = stageSizeRef.current.w
+    const fpvh = stageSizeRef.current.h
+    const fpMargin = 120
+    const fpVx0 = (-panX - fpMargin) / zoom
+    const fpVx1 = (fpvw - panX + fpMargin) / zoom
+    const fpVy0 = (-panY - fpMargin) / zoom
+    const fpVy1 = (fpvh - panY + fpMargin) / zoom
+    const inView = (cx: number, cy: number, r = 0) =>
+      cx + r >= fpVx0 && cx - r <= fpVx1 && cy + r >= fpVy0 && cy - r <= fpVy1
+
+    for (const item of nonCircleRenderItems) {
+      if (hiddenLayersRef.current.has(item.layer)) continue
+      if (item.visible === false) continue
+      const col = resolveEntityColor(item.color, item.layer, layerColorMap, strokeHex)
+
+      // Viewport cull for expensive/numerous item kinds.
+      // insert_geometry covers all furniture, doors, windows blocks.
+      if (item.kind === 'insert_geometry') {
+        const ig = item
+        let wx = NaN, wy = NaN, wr = 0
+        if (ig.lines.length > 0) { wx = ig.lines[0].start.x; wy = ig.lines[0].start.y }
+        else if (ig.arcs.length > 0) { wx = ig.arcs[0].cx; wy = ig.arcs[0].cy; wr = ig.arcs[0].r }
+        else if (ig.circles.length > 0) { wx = ig.circles[0].cx; wy = ig.circles[0].cy; wr = ig.circles[0].r }
+        else if (ig.polylines.length > 0 && ig.polylines[0].points.length > 0) {
+          wx = ig.polylines[0].points[0].x; wy = ig.polylines[0].points[0].y
+        }
+        if (!isNaN(wx)) {
+          const [rcx, rcy] = toC(wx, wy, t)
+          if (!inView(rcx, rcy, wr * t.sc + 50)) continue
+        }
+      } else if (item.kind === 'ellipse') {
+        const [rcx, rcy] = toC(item.cx, item.cy, t)
+        if (!inView(rcx, rcy, Math.max(item.rx, item.ry) * t.sc)) continue
+      } else if (item.kind === 'spline' || item.kind === 'helix') {
+        if (item.points.length > 0) {
+          const [rcx, rcy] = toC(item.points[0].x, item.points[0].y, t)
+          if (!inView(rcx, rcy, 0)) continue
+        }
+      } else if (item.kind === 'hatch') {
+        if (item.outerBoundary.length > 0) {
+          const [rcx, rcy] = toC(item.outerBoundary[0].x, item.outerBoundary[0].y, t)
+          if (!inView(rcx, rcy, 0)) continue
+        }
+      } else if (item.kind === 'dimension') {
+        if (item.lines.length > 0) {
+          const [rcx, rcy] = toC(item.lines[0].start.x, item.lines[0].start.y, t)
+          if (!inView(rcx, rcy, 0)) continue
+        } else if (item.textPos) {
+          const [rcx, rcy] = toC(item.textPos.x, item.textPos.y, t)
+          if (!inView(rcx, rcy, 0)) continue
+        }
+      }
+
+      if (item.kind === 'ellipse') {
+        const STEPS = 64
+        const rotRad = item.rotation * (Math.PI / 180)
+        c.beginPath()
+        for (let i = 0; i <= STEPS; i++) {
+          const param = item.startParam + (item.endParam - item.startParam) * i / STEPS
+          const lx = item.rx * Math.cos(param)
+          const ly = item.ry * Math.sin(param)
+          const wx = item.cx + lx * Math.cos(rotRad) - ly * Math.sin(rotRad)
+          const wy = item.cy + lx * Math.sin(rotRad) + ly * Math.cos(rotRad)
+          const [cx2, cy2] = toC(wx, wy, t)
+          if (i === 0) c.moveTo(cx2, cy2); else c.lineTo(cx2, cy2)
+        }
+        if (Math.abs(item.endParam - item.startParam - Math.PI * 2) < 0.01) c.closePath()
+        c.strokeStyle = col; c.lineWidth = baseSW; c.stroke()
+
+      } else if (item.kind === 'spline') {
+        if (item.points.length < 2) continue
+        c.beginPath()
+        const [sp0x, sp0y] = toC(item.points[0].x, item.points[0].y, t)
+        c.moveTo(sp0x, sp0y)
+        for (let i = 1; i < item.points.length; i++) {
+          const [xi, yi] = toC(item.points[i].x, item.points[i].y, t)
+          c.lineTo(xi, yi)
+        }
+        if (item.closed) c.closePath()
+        c.strokeStyle = col; c.lineWidth = baseSW; c.stroke()
+
+      } else if (item.kind === 'hatch') {
+        if (item.outerBoundary.length < 3) continue
+        if (item.solidFill || item.patternName === 'SOLID') {
+          c.beginPath()
+          const [hb0x, hb0y] = toC(item.outerBoundary[0].x, item.outerBoundary[0].y, t)
+          c.moveTo(hb0x, hb0y)
+          for (let i = 1; i < item.outerBoundary.length; i++) {
+            const [xi, yi] = toC(item.outerBoundary[i].x, item.outerBoundary[i].y, t)
+            c.lineTo(xi, yi)
+          }
+          c.closePath()
+          c.fillStyle = col; c.globalAlpha = 0.30; c.fill(); c.globalAlpha = 1
+        } else {
+          c.setLineDash([4, 4])
+          c.beginPath()
+          const [hb0x, hb0y] = toC(item.outerBoundary[0].x, item.outerBoundary[0].y, t)
+          c.moveTo(hb0x, hb0y)
+          for (let i = 1; i < item.outerBoundary.length; i++) {
+            const [xi, yi] = toC(item.outerBoundary[i].x, item.outerBoundary[i].y, t)
+            c.lineTo(xi, yi)
+          }
+          c.closePath(); c.strokeStyle = col; c.lineWidth = baseSW; c.stroke()
+          c.setLineDash([])
+        }
+
+      } else if (item.kind === 'solid') {
+        if (item.points.length < 3) continue
+        c.beginPath()
+        const [sl0x, sl0y] = toC(item.points[0].x, item.points[0].y, t)
+        c.moveTo(sl0x, sl0y)
+        for (let i = 1; i < item.points.length; i++) {
+          const [xi, yi] = toC(item.points[i].x, item.points[i].y, t)
+          c.lineTo(xi, yi)
+        }
+        c.closePath()
+        c.fillStyle = col; c.strokeStyle = col; c.lineWidth = baseSW
+        c.globalAlpha = 0.75; c.fill(); c.globalAlpha = 1; c.stroke()
+
+      } else if (item.kind === 'face3d') {
+        if (item.points.length < 3) continue
+        c.beginPath()
+        const [f0x, f0y] = toC(item.points[0].x, item.points[0].y, t)
+        c.moveTo(f0x, f0y)
+        for (let i = 1; i < item.points.length; i++) {
+          const [xi, yi] = toC(item.points[i].x, item.points[i].y, t)
+          c.lineTo(xi, yi)
+        }
+        c.closePath(); c.strokeStyle = col; c.lineWidth = baseSW; c.stroke()
+
+      } else if (item.kind === 'mesh') {
+        c.strokeStyle = col; c.lineWidth = baseSW
+        for (const edge of item.edges) {
+          const [x1, y1] = toC(edge.start.x, edge.start.y, t)
+          const [x2, y2] = toC(edge.end.x, edge.end.y, t)
+          c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke()
+        }
+
+      } else if (item.kind === 'helix') {
+        if (item.points.length < 2) continue
+        c.beginPath()
+        const [hl0x, hl0y] = toC(item.points[0].x, item.points[0].y, t)
+        c.moveTo(hl0x, hl0y)
+        for (let i = 1; i < item.points.length; i++) {
+          const [xi, yi] = toC(item.points[i].x, item.points[i].y, t)
+          c.lineTo(xi, yi)
+        }
+        c.strokeStyle = col; c.lineWidth = baseSW; c.stroke()
+
+      } else if (item.kind === 'wipeout') {
+        if (item.boundary.length < 3) continue
+        c.beginPath()
+        const [wo0x, wo0y] = toC(item.boundary[0].x, item.boundary[0].y, t)
+        c.moveTo(wo0x, wo0y)
+        for (let i = 1; i < item.boundary.length; i++) {
+          const [xi, yi] = toC(item.boundary[i].x, item.boundary[i].y, t)
+          c.lineTo(xi, yi)
+        }
+        c.closePath(); c.fillStyle = '#ffffff'; c.fill()
+        if (item.showFrame) { c.strokeStyle = col; c.lineWidth = baseSW; c.stroke() }
+
+      } else if (item.kind === 'image') {
+        const [ix, iy] = toC(item.x, item.y + item.h, t)
+        const wCanvas = item.w * t.sc; const hCanvas = item.h * t.sc
+        c.globalAlpha = 0.5; c.fillStyle = '#2a2a2a'; c.fillRect(ix, iy, wCanvas, hCanvas); c.globalAlpha = 1
+        c.strokeStyle = '#666666'; c.lineWidth = 0.8 / scale; c.strokeRect(ix, iy, wCanvas, hCanvas)
+        const fname = item.imagePath.split(/[/\\]/).pop() ?? item.imagePath
+        c.fillStyle = '#aaaaaa'; c.font = '11px Arial'; c.fillText(`IMG: ${fname}`, ix + 4, iy + 15)
+
+      } else if (item.kind === 'leader') {
+        if (item.vertices.length < 2) continue
+        c.strokeStyle = col; c.lineWidth = baseSW
+        c.beginPath()
+        const [ld0x, ld0y] = toC(item.vertices[0].x, item.vertices[0].y, t)
+        c.moveTo(ld0x, ld0y)
+        for (let i = 1; i < item.vertices.length; i++) {
+          const [xi, yi] = toC(item.vertices[i].x, item.vertices[i].y, t)
+          c.lineTo(xi, yi)
+        }
+        c.stroke()
+        if (item.hasArrowhead && item.vertices.length >= 2) {
+          const [tipX, tipY] = toC(item.vertices[0].x, item.vertices[0].y, t)
+          const [nxtX, nxtY] = toC(item.vertices[1].x, item.vertices[1].y, t)
+          const ang = Math.atan2(tipY - nxtY, tipX - nxtX)
+          const AL = 8 / scale; const ha = 0.38
+          c.beginPath(); c.moveTo(tipX, tipY)
+          c.lineTo(tipX - AL * Math.cos(ang - ha), tipY - AL * Math.sin(ang - ha))
+          c.lineTo(tipX - AL * Math.cos(ang + ha), tipY - AL * Math.sin(ang + ha))
+          c.closePath(); c.fillStyle = col; c.fill()
+        }
+        if (item.annotationText) {
+          const last = item.vertices[item.vertices.length - 1]
+          const [lax, lay] = toC(last.x, last.y, t)
+          c.fillStyle = col; c.font = '11px Arial'; c.fillText(item.annotationText, lax + 4, lay - 4)
+        }
+
+      } else if (item.kind === 'mleader') {
+        c.strokeStyle = col; c.lineWidth = baseSW
+        for (const line of item.lines) {
+          if (line.length < 2) continue
+          c.beginPath()
+          const [ml0x, ml0y] = toC(line[0].x, line[0].y, t)
+          c.moveTo(ml0x, ml0y)
+          for (let i = 1; i < line.length; i++) {
+            const [xi, yi] = toC(line[i].x, line[i].y, t)
+            c.lineTo(xi, yi)
+          }
+          c.stroke()
+        }
+        if (item.text && item.textPos) {
+          const [mtx, mty] = toC(item.textPos.x, item.textPos.y, t)
+          c.fillStyle = col; c.font = '11px Arial'; c.fillText(item.text, mtx, mty + 11)
+        }
+
+      } else if (item.kind === 'tolerance') {
+        const [tolPx, tolPy] = toC(item.position.x, item.position.y, t)
+        const boxW = item.text.length * 11 * 0.62; const boxH = 11 * 1.6
+        c.strokeStyle = col; c.lineWidth = 0.6 / scale
+        c.strokeRect(tolPx, tolPy - boxH * 0.5, boxW, boxH)
+        c.fillStyle = col; c.font = '11px Arial'
+        c.fillText(item.text, tolPx + 3, tolPy + boxH * 0.15)
+
+      } else if (item.kind === 'dimension') {
+        const dimColor = resolveEntityColor(item.color, item.layer, layerColorMap, '#00BFFF')
+        const dsw = 0.8 / scale
+        const mainLines: Array<{x1:number;y1:number;x2:number;y2:number}> = []
+        const witnessLines: Array<{x1:number;y1:number;x2:number;y2:number}> = []
+        for (const l of item.lines) {
+          const [x1, y1] = toC(l.start.x, l.start.y, t)
+          const [x2, y2] = toC(l.end.x, l.end.y, t)
+          const len = Math.hypot(x2 - x1, y2 - y1)
+          if (len > 20 && Math.abs(y2 - y1) < Math.abs(x2 - x1) * 0.15) mainLines.push({x1,y1,x2,y2})
+          else witnessLines.push({x1,y1,x2,y2})
+        }
+        c.strokeStyle = dimColor; c.lineWidth = dsw
+        for (const l of witnessLines) { c.beginPath(); c.moveTo(l.x1, l.y1); c.lineTo(l.x2, l.y2); c.stroke() }
+        c.fillStyle = dimColor
+        for (const l of mainLines) {
+          c.beginPath(); c.moveTo(l.x1, l.y1); c.lineTo(l.x2, l.y2); c.stroke()
+          const ang = Math.atan2(l.y2 - l.y1, l.x2 - l.x1)
+          const perp = ang + Math.PI / 2
+          const AL = 8 / scale; const AW = 2.5 / scale
+          c.beginPath(); c.moveTo(l.x1, l.y1)
+          c.lineTo(l.x1 + AW * Math.cos(perp), l.y1 + AW * Math.sin(perp))
+          c.lineTo(l.x1 + AL * Math.cos(ang), l.y1 + AL * Math.sin(ang))
+          c.closePath(); c.fill()
+          c.beginPath(); c.moveTo(l.x2, l.y2)
+          c.lineTo(l.x2 + AW * Math.cos(perp), l.y2 + AW * Math.sin(perp))
+          c.lineTo(l.x2 - AL * Math.cos(ang), l.y2 - AL * Math.sin(ang))
+          c.closePath(); c.fill()
+        }
+        if (item.text && item.textPos) {
+          const [dtx, dty] = toC(item.textPos.x, item.textPos.y, t)
+          c.fillStyle = dimColor; c.font = '11px Arial'
+          c.textAlign = 'center'; c.fillText(item.text, dtx, dty + 11); c.textAlign = 'start'
+        }
+
+      } else if (item.kind === 'insert_geometry') {
+        // Batch same-color sub-entities to minimise stroke() calls
+        const igCol = col
+        for (const l of item.lines) {
+          const lc = resolveEntityColor(l.color, item.layer, layerColorMap, igCol)
+          const [x1, y1] = toC(l.start.x, l.start.y, t)
+          const [x2, y2] = toC(l.end.x, l.end.y, t)
+          c.strokeStyle = lc; c.lineWidth = baseSW
+          c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke()
+        }
+        for (const ci of item.circles) {
+          const cc = resolveEntityColor(ci.color, item.layer, layerColorMap, igCol)
+          const [ccx, ccy] = toC(ci.cx, ci.cy, t)
+          const r = Math.max(0, ci.r * t.sc)
+          c.strokeStyle = cc; c.lineWidth = baseSW
+          c.beginPath(); c.arc(ccx, ccy, r, 0, Math.PI * 2); c.stroke()
+        }
+        for (const a of item.arcs) {
+          const ac = resolveEntityColor(a.color, item.layer, layerColorMap, igCol)
+          const spanDeg = a.endAngle > a.startAngle ? a.endAngle - a.startAngle : a.endAngle + 360 - a.startAngle
+          c.strokeStyle = ac; c.lineWidth = baseSW
+          c.beginPath()
+          const AS = 16
+          for (let i = 0; i <= AS; i++) {
+            const deg = a.startAngle + spanDeg * i / AS
+            const rad = deg * Math.PI / 180
+            const [px, py] = toC(a.cx + a.r * Math.cos(rad), a.cy + a.r * Math.sin(rad), t)
+            if (i === 0) c.moveTo(px, py); else c.lineTo(px, py)
+          }
+          c.stroke()
+        }
+        for (const pl of item.polylines) {
+          if (pl.points.length < 2) continue
+          const pc = resolveEntityColor(pl.color, item.layer, layerColorMap, igCol)
+          c.strokeStyle = pc; c.lineWidth = baseSW
+          c.beginPath()
+          const [plx0, ply0] = toC(pl.points[0].x, pl.points[0].y, t)
+          c.moveTo(plx0, ply0)
+          for (let i = 1; i < pl.points.length; i++) {
+            const [xi, yi] = toC(pl.points[i].x, pl.points[i].y, t)
+            c.lineTo(xi, yi)
+          }
+          if (pl.closed) c.closePath()
+          c.stroke()
+        }
+      }
+    }
+  }, [nonCircleRenderItems, t, layerColorMap, strokeHex, strokeScale])
 
   const HP_SCR = 4
   const HR = HP_SCR / zoomRef.current
@@ -913,11 +1280,21 @@ const roomDetectionWalls = useMemo(
   [walls, wallIdToGroupId],
 )
 
+  // Debounce room detection: defer the expensive DCEL algorithm 250ms after rapid edits.
+  // The stale polygon set is fine for display; rooms snap into place on drag-end anyway.
+  const roomDetectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [debouncedRoomWalls, setDebouncedRoomWalls] = useState<WallSeg[]>(() => roomDetectionWalls)
+  useEffect(() => {
+    if (roomDetectionTimerRef.current) clearTimeout(roomDetectionTimerRef.current)
+    roomDetectionTimerRef.current = setTimeout(() => setDebouncedRoomWalls(roomDetectionWalls), 250)
+    return () => { if (roomDetectionTimerRef.current) clearTimeout(roomDetectionTimerRef.current) }
+  }, [roomDetectionWalls])
+
   const roomsWithWalls = useMemo(() => {
     // Skip expensive DCEL during drag — stale result is fine, rooms update on drag-end
     if (activeDrag || rotationDrag || resizeDrag) return null
-    return detectRoomsWithWalls(roomDetectionWalls)
-  }, [roomDetectionWalls, activeDrag, rotationDrag, resizeDrag])
+    return detectRoomsWithWalls(debouncedRoomWalls)
+  }, [debouncedRoomWalls, activeDrag, rotationDrag, resizeDrag])
 
   const wallsBase = useMemo(() => {
     if (activePolyDrag) return applyPolylineDrag(walls, activePolyDrag, polyDragDelta)
@@ -927,9 +1304,14 @@ const roomDetectionWalls = useMemo(
 
   const rooms = useMemo(() => {
     if (activeDrag || rotationDrag || resizeDrag) return []
-    const g = roomDrag ? translateWallsByIds(roomDetectionWalls, roomDrag.wallIds, roomDragDelta.dx, roomDragDelta.dy) : roomDetectionWalls
-    return detectRooms(g)
-  }, [roomDetectionWalls, roomDrag, roomDragDelta, activeDrag, rotationDrag, resizeDrag])
+    if (roomDrag) {
+      // During room drag: translate walls and re-run DCEL for live preview
+      const g = translateWallsByIds(roomDetectionWalls, roomDrag.wallIds, roomDragDelta.dx, roomDragDelta.dy)
+      return detectRooms(g)
+    }
+    // Static case: extract polygons from roomsWithWalls (avoids a second DCEL run)
+    return (roomsWithWalls ?? []).map(r => r.polygon)
+  }, [roomsWithWalls, roomDetectionWalls, roomDrag, roomDragDelta, activeDrag, rotationDrag, resizeDrag])
 
   const snapshot = useCallback(() => {
     setHistory(h => [...h.slice(-20), {
@@ -962,12 +1344,15 @@ const roomDetectionWalls = useMemo(
     const dynSnapTh = 12 * pxToW
     const dynSnapLineTh = 20 * pxToW
 
+    // Use spatial index for all O(k) nearest-wall queries
+    const nearbyWalls = queryNearbyWalls(x, y, Math.max(dynSnapTh, dynSnapLineTh) * 1.5)
+
     type SP = { x: number; y: number; type: 'endpoint' | 'midpoint' | 'arcCenter' | 'arcQuadrant' }
     const snapPts: SP[] = []
-    for (const w of walls) {
+    for (const w of nearbyWalls) {
       if (excl.includes(w.id)) continue
-      if (!isLayerVisible(w.layer ?? '0')) continue
-      if (isLayerLocked(w.layer ?? '0')) continue
+      if (hiddenLayersRef.current.has(w.layer ?? '0')) continue
+      if (lockedLayersRef.current.has(w.layer ?? '0')) continue
       snapPts.push({ ...w.start, type: 'endpoint' })
       snapPts.push({ ...w.end, type: 'endpoint' })
       snapPts.push({ x: (w.start.x + w.end.x) / 2, y: (w.start.y + w.end.y) / 2, type: 'midpoint' })
@@ -993,17 +1378,10 @@ const roomDetectionWalls = useMemo(
       return { x: best.x, y: best.y }
     }
 
-    // 2. Intersection snap: only when not skipped (e.g. during endpoint drag) and spatially filtered
+    // 2. Intersection snap: use spatial index results (already nearby)
     if (!skipIntersection) {
       let bestIntPt: Pt | null = null, bestIntD = dynSnapTh
-      // Only consider walls whose bounding box is within dynSnapTh of the cursor — avoids O(n²) on whole drawing
-      const near = walls.filter(w => {
-        if (excl.includes(w.id)) return false
-        return (
-          Math.min(w.start.x, w.end.x) - dynSnapTh <= x && x <= Math.max(w.start.x, w.end.x) + dynSnapTh &&
-          Math.min(w.start.y, w.end.y) - dynSnapTh <= y && y <= Math.max(w.start.y, w.end.y) + dynSnapTh
-        )
-      })
+      const near = nearbyWalls.filter(w => !excl.includes(w.id))
       for (let i = 0; i < near.length; i++) {
         for (let j = i + 1; j < near.length; j++) {
           const ip = segIntersect(near[i].start.x, near[i].start.y, near[i].end.x, near[i].end.y, near[j].start.x, near[j].start.y, near[j].end.x, near[j].end.y)
@@ -1023,7 +1401,7 @@ const roomDetectionWalls = useMemo(
     // 3. Perpendicular snap (requires anchor): foot of perpendicular from anchor onto wall
     if (anchor) {
       let bestPerpPt: Pt | null = null, bestPerpD = dynSnapTh * 1.5
-      for (const w of walls) {
+      for (const w of nearbyWalls) {
         if (excl.includes(w.id)) continue
         const wdx = w.end.x - w.start.x, wdy = w.end.y - w.start.y
         const wlen2 = wdx * wdx + wdy * wdy
@@ -1044,10 +1422,10 @@ const roomDetectionWalls = useMemo(
 
     // 4. On-segment (nearest point) snap
     let bestSeg: { wallId: string; t: number; pt: Pt } | null = null, bestSegD = dynSnapLineTh
-    for (const w of walls) {
+    for (const w of nearbyWalls) {
       if (excl.includes(w.id)) continue
-      if (!isLayerVisible(w.layer ?? '0')) continue
-      if (isLayerLocked(w.layer ?? '0')) continue
+      if (hiddenLayersRef.current.has(w.layer ?? '0')) continue
+      if (lockedLayersRef.current.has(w.layer ?? '0')) continue
       const { pt, t, dist } = closestPointOnSegment(x, y, w.start.x, w.start.y, w.end.x, w.end.y)
       if (t > 0.01 && t < 0.99 && dist < bestSegD) { bestSegD = dist; bestSeg = { wallId: w.id, t, pt } }
     }
@@ -1062,7 +1440,7 @@ const roomDetectionWalls = useMemo(
     lastSnapTypeRef.current = null
     alignGuidesRef.current = []
     return { x, y }
-  }, [walls, planDoc.arcs, snapEnabled, isLayerVisible, isLayerLocked])
+  }, [queryNearbyWalls, planDoc.arcs, snapEnabled])
 
   useEffect(() => { tRef.current = t }, [t])
   useEffect(() => { stageSizeRef.current = stageSize }, [stageSize])
@@ -1860,6 +2238,16 @@ const roomDetectionWalls = useMemo(
     () => activeDrag ? new Set(activeDrag.toMoveWallIds) : new Set<string>(),
     [activeDrag],
   )
+
+  // Sync hot-state refs then imperatively redraw the walls sceneFunc.
+  // hoveredGroupId is already a ref-only value (updated imperatively in onMouseEnter/Leave).
+  useEffect(() => {
+    selectedIdsRef.current = selectedIds
+    selectedGroupIdRef.current = selectedGroupId
+    toMoveSetRef.current = toMoveSet
+    wallsSceneShapeRef.current?.getLayer()?.batchDraw()
+  }, [selectedIds, selectedGroupId, toMoveSet])
+
 const visWalls = useMemo(
   () => showDetail
     ? walls
@@ -1890,11 +2278,118 @@ const visWalls = useMemo(
     return ws
   }, [visWalls, rotationDrag, rotationAngleDelta, resizeDrag, resizePreview])
 
+  // Batch-draw all static (non-dragged) wall lines in one Canvas 2D pass.
+  // Hot state (selectedIds, hoveredGroupId, selectedGroupId, toMoveSet) is read
+  // from refs so this callback is not recreated on every hover/click — Konva
+  // redraws are triggered imperatively via batchDraw() in the sync useEffect above.
+  const drawWallsStatic = useCallback((ctx: Konva.Context) => {
+    const c = ctx as unknown as CanvasRenderingContext2D
+    const scale = zoomRef.current || 1
+    c.lineCap = 'round'
+    c.lineJoin = 'round'
+
+    // Read hot state from refs — stable callback, no re-render on hover/selection
+    const selIds = selectedIdsRef.current
+    const hovGid = hoveredGroupIdRef.current
+    const selGid = selectedGroupIdRef.current
+    const moveSet = toMoveSetRef.current
+
+    // Viewport culling: compute visible bounds in canvas-coord space (pre-stage-zoom).
+    const zoom = scale
+    const panX = posRef.current.x
+    const panY = posRef.current.y
+    const svw = stageSizeRef.current.w
+    const svh = stageSizeRef.current.h
+    const margin = 80
+    const vx0 = (-panX - margin) / zoom
+    const vx1 = (svw - panX + margin) / zoom
+    const vy0 = (-panY - margin) / zoom
+    const vy1 = (svh - panY + margin) / zoom
+
+    // Collect paths grouped by color+strokeWidth to minimise stroke() calls
+    type Seg = [number, number, number, number]
+    const batches = new Map<string, { color: string; sw: number; segs: Seg[] }>()
+    const addSeg = (color: string, sw: number, seg: Seg) => {
+      const k = `${color}/${sw.toFixed(4)}`
+      if (!batches.has(k)) batches.set(k, { color, sw, segs: [] })
+      batches.get(k)!.segs.push(seg)
+    }
+
+    for (const wall of effectiveWalls) {
+      if (wall.fromArc) continue
+      if (moveSet.has(wall.id)) continue
+      if (hiddenLayersRef.current.has(wall.layer ?? '0')) continue
+
+      const [sx, sy] = toC(wall.start.x, wall.start.y, t)
+      const [ex, ey] = toC(wall.end.x, wall.end.y, t)
+
+      // Skip walls entirely outside the visible viewport
+      if (Math.max(sx, ex) < vx0 || Math.min(sx, ex) > vx1) continue
+      if (Math.max(sy, ey) < vy0 || Math.min(sy, ey) > vy1) continue
+
+      const isSel = selIds.has(wall.id)
+      const wallGid = wallIdToGroupId.get(wall.id)
+      const isGroupSel = isSel && selGid !== null && wallGid === selGid
+      const isHover = !isSel && !!wall.groupId && wall.groupId === hovGid
+
+      let wallGroupColor: string | null = null
+      if (wallGid !== undefined) {
+        const grp = canvasGroups.find(g => g.id === wallGid)
+        if (grp?.insertLayer && grp.insertLayer !== '0')
+          wallGroupColor = layerColorMap.get(grp.insertLayer) ?? null
+      }
+
+      let color: string
+      const isActive = isSel || isGroupSel
+      if (isActive) color = '#0073cf'
+      else if (isHover) color = '#60a5fa'
+      else if (wallGroupColor && wallGroupColor.toUpperCase() !== '#FFFFFF') color = wallGroupColor
+      else if (wall.isHatchLine) color = resolveExplicitColor(wall.color, wall.layer ?? '0', layerColorMap, '#808080')
+      else if (wall.isDimLine) color = '#00BFFF'
+      else color = wall.isDetail
+        ? '#60a5fa'
+        : resolveExplicitColor(wall.color, wall.layer ?? '0', layerColorMap, strokeHex)
+
+      const baseSW = (wall.isHatchLine
+        ? 0.5 * strokeScale
+        : wall.isDimLine ? 0.8 * strokeScale
+          : (wall.isOuter ? 2.8 : wall.isDetail ? 0.65 : 1.15) * strokeScale) / scale
+      const sw = (isActive || isHover) ? 2.0 / scale : baseSW
+
+      if (wall.curveMidPt) {
+        const mx = wall.curveMidPt.x, my = wall.curveMidPt.y
+        const cpWX = 2 * mx - (wall.start.x + wall.end.x) / 2
+        const cpWY = 2 * my - (wall.start.y + wall.end.y) / 2
+        const [cpX, cpY] = toC(cpWX, cpWY, t)
+        c.strokeStyle = color; c.lineWidth = sw
+        c.beginPath(); c.moveTo(sx, sy); c.bezierCurveTo(cpX, cpY, cpX, cpY, ex, ey); c.stroke()
+      } else {
+        addSeg(color, sw, [sx, sy, ex, ey])
+      }
+    }
+
+    for (const { color, sw, segs } of batches.values()) {
+      c.strokeStyle = color; c.lineWidth = sw
+      c.beginPath()
+      for (const [sx, sy, ex, ey] of segs) { c.moveTo(sx, sy); c.lineTo(ex, ey) }
+      c.stroke()
+    }
+  }, [effectiveWalls, t, wallIdToGroupId, canvasGroups, layerColorMap, strokeHex, strokeScale])
+
+  // O(1) wall lookup by id — avoids O(n) filter inside effectiveSelBBox on every selection change.
+  const wallById = useMemo(() => {
+    const m = new Map<string, WallSeg>()
+    for (const w of effectiveWalls) m.set(w.id, w)
+    return m
+  }, [effectiveWalls])
+
   const effectiveSelBBox = useMemo(() => {
     if (selectedIds.size === 0 && !selectedWinKey && !selectedFurnKey) return null
     let minCX = Infinity, minCY = Infinity, maxCX = -Infinity, maxCY = -Infinity
     let hasAny = false
-    for (const w of effectiveWalls.filter(w => selectedIds.has(w.id))) {
+    for (const id of selectedIds) {
+      const w = wallById.get(id)
+      if (!w) continue
       for (const p of [w.start, w.end]) {
         const [cx, cy] = toC(p.x, p.y, t)
         minCX = Math.min(minCX, cx); maxCX = Math.max(maxCX, cx)
@@ -1964,7 +2459,7 @@ const visWalls = useMemo(
     }
     if (!hasAny) return null
     return { minCX, minCY, maxCX, maxCY }
-  }, [effectiveWalls, effectiveTexts, effectiveArcs, effectiveLines, effectiveFurnitureLines, circleRenderItems, selectedIds, selectedWinKey, selectedFurnKey, t, isLayerVisible])
+  }, [wallById, effectiveTexts, effectiveArcs, effectiveLines, effectiveFurnitureLines, circleRenderItems, selectedIds, selectedWinKey, selectedFurnKey, t])
 
   const worldSelBounds = useMemo(() => {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -2052,6 +2547,12 @@ const visWalls = useMemo(
         const scaledW = docUnitScale > 0 ? w / docUnitScale : w
         const scaledH = docUnitScale > 0 ? h / docUnitScale : h
         const hw = scaledW / 2, hh = scaledH / 2
+        // Text height: ~1% of plan diagonal so it's visible on any plan scale
+        const planDiag = Math.hypot(
+          planDoc.meta.extmax[0] - planDoc.meta.extmin[0],
+          planDoc.meta.extmax[1] - planDoc.meta.extmin[1],
+        )
+        const labelHeight = Math.max(planDiag * 0.01, scaledW * 0.05)
         snapshot()
         const { next: nextDoc, poly } = appendUserPolyline(
           planDoc,
@@ -2064,7 +2565,7 @@ const visWalls = useMemo(
           true,
         )
         const lblHandle = roomLabelHandle(poly.handle)
-        const { next: finalDoc } = appendUserText(nextDoc, { x: snapped.x, y: snapped.y }, label, 0.2, lblHandle)
+        const { next: finalDoc } = appendUserText(nextDoc, { x: snapped.x, y: snapped.y }, label, labelHeight, lblHandle)
         setPlanDoc(finalDoc)
         const newSegs = wallSegsFromPolyline(poly, false, `pl-${poly.handle}`)
         setWalls(prev => [...prev, ...newSegs])
@@ -2080,18 +2581,7 @@ const visWalls = useMemo(
       snapshot()
       const tmpl = getFurnitureDxfTemplate(id)!
 
-      // DXF units code → metres-to-world-units scale factor.
-      // Templates are defined in metres; we scale to match the document's native unit.
-      // Codes: 1=inches, 2=feet, 4=mm, 5=cm, 6=metres, 0/unset=unitless (treat as mm).
-      const dxfUnits = planDoc.meta?.units ?? 0
-      const metreToWorldUnit: Record<number, number> = {
-        0: 1000,    // unitless → assume mm
-        1: 39.3701, // inches
-        2: 3.28084, // feet
-        4: 1000,    // mm
-        5: 100,     // cm
-        6: 1,       // metres
-      }
+      // Templates are in metres; scale to match document native units (unit_scale = metres/native-unit).
       const furnitureScale = 1 / (planDoc.meta?.unit_scale ?? 1.0)
 
       const newLines = buildFurnitureLinesFromLibraryId(id, snapped.x, snapped.y, furnitureScale)
@@ -2423,24 +2913,6 @@ const visWalls = useMemo(
     c2d.restore()
   }, [])
 
-  // After loading the JSON, add this debug code
-useEffect(() => {
-  console.log('=== RENDER DEBUG ===');
-  console.log('BBox:', planDoc.meta.extmin, '→', planDoc.meta.extmax);
-  console.log('BBox width:', planDoc.meta.extmax[0] - planDoc.meta.extmin[0]);
-  console.log('BBox height:', planDoc.meta.extmax[1] - planDoc.meta.extmin[1]);
-  console.log('Walls count:', walls.length);
-  console.log('First wall:', walls[0]);
-  console.log('Transform scale:', t.sc);
-  console.log('Stage size:', stageSize);
-  
-  // Check if any wall is visible on screen
-  if (walls.length > 0) {
-    const [sx, sy] = toC(walls[0].start.x, walls[0].start.y, t);
-    const [ex, ey] = toC(walls[0].end.x, walls[0].end.y, t);
-    console.log('First wall canvas coords:', sx, sy, '→', ex, ey);
-  }
-}, [planDoc, walls, t, stageSize]);
 
   const activateTool = (id: 'select' | 'hand' | 'frame' | 'drawLine' | 'drawPolyline' | 'text' | 'drawArc' | 'drawCircle') => {
     if (id !== 'drawLine') { drawLineAnchorRef.current = null; setDrawLineAnchor(null); drawLinePointerRef.current = null }
@@ -2452,6 +2924,185 @@ useEffect(() => {
     snapLayerRef.current?.batchDraw()
     setActiveTool(id)
   }
+
+  // Memoized hit-area Lines for all static walls.
+  // Deps exclude selectedIds/selectedGroupId/hoveredGroupId — handlers read from refs.
+  // Only rebuilds when wall geometry, transform, or document structure changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const wallHitAreaLines = useMemo(() => {
+    return effectiveWalls
+      .filter(w => !w.fromArc && !toMoveSet.has(w.id) && isLayerVisible(w.layer ?? '0'))
+      .map(w => {
+        const [sx, sy] = toC(w.start.x, w.start.y, t)
+        const [ex, ey] = toC(w.end.x, w.end.y, t)
+        const curvePts: number[] | null = w.curveMidPt ? (() => {
+          const mx = w.curveMidPt!.x, my = w.curveMidPt!.y
+          const cpWX = 2 * mx - (w.start.x + w.end.x) / 2
+          const cpWY = 2 * my - (w.start.y + w.end.y) / 2
+          const [cpX, cpY] = toC(cpWX, cpWY, t)
+          return [sx, sy, cpX, cpY, cpX, cpY, ex, ey]
+        })() : null
+        return (
+          <Group key={w.id}>
+            <Line
+              points={curvePts ?? [sx, sy, ex, ey]}
+              bezier={!!curvePts}
+              stroke="transparent"
+              strokeWidth={16}
+              strokeScaleEnabled={false}
+              onMouseDown={(e: Konva.KonvaEventObject<MouseEvent>) => {
+                if (['drawPolyline', 'drawLine', 'drawArc', 'drawCircle', 'text'].includes(activeToolRef.current)) return
+                if (isLayerLocked(w.layer ?? '0')) return
+                e.cancelBubble = true
+                didDragRef.current = false
+                selBeforeMouseDown.current = new Set(selectedIdsRef.current)
+                const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                const dxfGid = wallIdToGroupId.get(w.id)
+                if (dxfGid !== undefined) {
+                  const grp = canvasGroups.find(g => g.id === dxfGid)
+                  if (grp) {
+                    setSelectedGroupId(dxfGid)
+                    setSelectedId(null); setSelectedRoomIndex(null)
+                    setSelectedArcHandle(null); setSelectedWinKey(null); setSelectedFurnKey(null); setSelectedDimKey(null)
+                    const persistedSel = new Set<string>(isCtrl ? selectedIdsRef.current : [])
+                    grp.wallIds.forEach(id => persistedSel.add(id))
+                    setSelectedIds(persistedSel)
+                    const selForDrag = new Set(persistedSel)
+                    grp.arcHandles.forEach(h => selForDrag.add(h))
+                    onMidDragStart(e as any, w.id, selForDrag)
+                    return
+                  }
+                }
+                const groupIds = getGroupWallIds(w.id, walls)
+                if (w.groupId?.startsWith('pl-')) {
+                  const lbl = roomLabelHandle(w.groupId.slice(3))
+                  if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
+                }
+                let currentSel: Set<string>
+                if (selectedIdsRef.current.has(w.id)) {
+                  currentSel = selectedIdsRef.current
+                } else {
+                  const groupFullySelected = groupIds.every(id => selectedIdsRef.current.has(id))
+                  if (groupFullySelected) {
+                    currentSel = selectedIdsRef.current
+                  } else {
+                    currentSel = new Set(isCtrl ? selectedIdsRef.current : [])
+                    groupIds.forEach(id => currentSel.add(id))
+                    setSelectedIds(currentSel)
+                  }
+                }
+                if (selectedGroupIdRef.current !== null) setSelectedGroupId(null)
+                onMidDragStart(e as any, w.id, currentSel)
+              }}
+              onMouseUp={(e: Konva.KonvaEventObject<MouseEvent>) => { e.cancelBubble = true; onMidDragEnd() }}
+              onClick={(e: Konva.KonvaEventObject<MouseEvent>) => {
+                if (['drawPolyline', 'drawLine', 'drawArc', 'drawCircle', 'text'].includes(activeToolRef.current)) return
+                if (isLayerLocked(w.layer ?? '0')) return
+                e.cancelBubble = true
+                if (didDragRef.current) { didDragRef.current = false; return }
+                const isCtrl = e.evt.ctrlKey || e.evt.metaKey
+                const dxfGid = wallIdToGroupId.get(w.id)
+                if (dxfGid !== undefined) {
+                  const grp = canvasGroups.find(g => g.id === dxfGid)
+                  if (grp) {
+                    if (isCtrl && selBeforeMouseDown.current.has(w.id)) {
+                      setSelectedIds(prev => { const next = new Set(prev); grp.wallIds.forEach(id => next.delete(id)); return next })
+                      if (selectedGroupIdRef.current === dxfGid) setSelectedGroupId(null)
+                    } else {
+                      selectDxfGroup(dxfGid, isCtrl)
+                    }
+                    return
+                  }
+                }
+                const groupIds = getGroupWallIds(w.id, walls)
+                if (w.groupId?.startsWith('pl-')) {
+                  const lbl = roomLabelHandle(w.groupId.slice(3))
+                  if (planDoc.texts.some(tx => tx.handle === lbl)) groupIds.push(lbl)
+                }
+                setSelectedGroupId(null)
+                setSelectedIds(prev => {
+                  if (!isCtrl) return new Set(groupIds)
+                  if (selBeforeMouseDown.current.has(w.id)) { const next = new Set(prev); groupIds.forEach(id => next.delete(id)); return next }
+                  return prev
+                })
+              }}
+              onMouseEnter={(ev: Konva.KonvaEventObject<MouseEvent>) => {
+                ev.target.getStage()!.container().style.cursor = 'move'
+                hoveredGroupIdRef.current = w.groupId ?? null
+                wallsSceneShapeRef.current?.getLayer()?.batchDraw()
+              }}
+              onMouseLeave={(ev: Konva.KonvaEventObject<MouseEvent>) => {
+                ev.target.getStage()!.container().style.cursor = 'default'
+                hoveredGroupIdRef.current = null
+                wallsSceneShapeRef.current?.getLayer()?.batchDraw()
+              }}
+            />
+          </Group>
+        )
+      })
+  // selectedIds/selectedGroupId/hoveredGroupId intentionally omitted — handlers read from refs
+  }, [effectiveWalls, toMoveSet, t, isLayerVisible, isLayerLocked, wallIdToGroupId, canvasGroups, planDoc, walls, onMidDragStart, onMidDragEnd, selectDxfGroup])
+
+  // Endpoint grips for the single selected non-dragged wall.
+  // This is the only JSX that re-renders when selectedIds changes — just 3 Circles.
+  const selectedWallEndpoints = useMemo(() => {
+    if (selectedIds.size !== 1) return null
+    const [selId] = [...selectedIds]
+    if (toMoveSet.has(selId)) return null
+    const wall = effectiveWalls.find(w => w.id === selId && !w.fromArc && !wallIdToGroupId.has(w.id))
+    if (!wall) return null
+    const [sx, sy] = toC(wall.start.x, wall.start.y, t)
+    const [ex, ey] = toC(wall.end.x, wall.end.y, t)
+    const midWX = (wall.start.x + wall.end.x) / 2
+    const midWY = (wall.start.y + wall.end.y) / 2
+    const [cmx, cmy] = wall.curveMidPt
+      ? toC(wall.curveMidPt.x, wall.curveMidPt.y, t)
+      : toC(midWX, midWY, t)
+    return (
+      <Group key={`ep-${wall.id}`}>
+        <Circle x={sx} y={sy} radius={HP_SCR} fill="#3b82f6" stroke="#fff"
+          strokeWidth={1.2} strokeScaleEnabled={false}
+          scale={{ x: 1 / zoomRef.current, y: 1 / zoomRef.current }}
+          draggable perfectDrawEnabled={false}
+          onDragStart={() => { snapshot(); setIsDraggingEp(true); draggingEpInfo.current = { wallId: wall.id, ep: 'start' } }}
+          onDragMove={e => onEpDragMove(e, wall.id, 'start')}
+          onDragEnd={onEpDragEnd}
+          onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'crosshair' }}
+          onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+        />
+        <Circle x={ex} y={ey} radius={HP_SCR} fill="#3b82f6" stroke="#fff"
+          strokeWidth={1.2} strokeScaleEnabled={false}
+          scale={{ x: 1 / zoomRef.current, y: 1 / zoomRef.current }}
+          draggable perfectDrawEnabled={false}
+          onDragStart={() => { snapshot(); setIsDraggingEp(true); draggingEpInfo.current = { wallId: wall.id, ep: 'end' } }}
+          onDragMove={e => onEpDragMove(e, wall.id, 'end')}
+          onDragEnd={onEpDragEnd}
+          onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'crosshair' }}
+          onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+        />
+        <Circle x={cmx} y={cmy} radius={HP_SCR}
+          fill={wall.curveMidPt ? '#3b82f6' : 'white'}
+          stroke="#3b82f6" strokeWidth={1.2}
+          strokeScaleEnabled={false}
+          scale={{ x: 1 / zoomRef.current, y: 1 / zoomRef.current }}
+          draggable perfectDrawEnabled={false}
+          onDragStart={() => { snapshot() }}
+          onDragMove={e => {
+            const node = e.target
+            const [wx2, wy2] = toW(node.x(), node.y(), t)
+            setWalls(prev => prev.map(w => w.id === wall.id ? { ...w, curveMidPt: { x: wx2, y: wy2 } } : w))
+          }}
+          onDragEnd={() => {}}
+          onDblClick={() => {
+            snapshot()
+            setWalls(prev => prev.map(w => w.id === wall.id ? { ...w, curveMidPt: undefined } : w))
+          }}
+          onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'crosshair' }}
+          onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
+        />
+      </Group>
+    )
+  }, [selectedIds, toMoveSet, effectiveWalls, wallIdToGroupId, t, snapshot, setIsDraggingEp, draggingEpInfo, onEpDragMove, onEpDragEnd, setWalls])
 
   return (
     <div className="dxf-editor">
@@ -2607,6 +3258,7 @@ useEffect(() => {
                 x={posRef.current.x}
                 y={posRef.current.y}
                 draggable={stageDraggable}
+                perfectDrawEnabled={false}
                 onDragEnd={e => { if (e.target === stageRef.current) { posRef.current = { x: e.target.x(), y: e.target.y() } } }}
                 onWheel={handleWheel}
                 onMouseDown={onStageMouseDown}
@@ -2640,483 +3292,10 @@ useEffect(() => {
                             : 'default',
                 }}
               >
-                <Layer listening={false}>
+                <Layer listening={false} hitGraphEnabled={false}>
                   <Rect name="background-rect" x={0} y={0} width={stageSize.w} height={stageSize.h} fill="#ffffff" />
                   {gridLines}
-                  {nonCircleRenderItems.map(item => {
-                    if (!isLayerVisible(item.layer)) return null
-                    if (item.visible === false) return null
-                    const col = resolveEntityColor(item.color, item.layer, layerColorMap, strokeHex)
-                    // strokeScaleEnabled={false} keeps widths in screen-pixels regardless of zoom level
-                    const sw = strokeScale
-
-                    // ── ELLIPSE ────────────────────────────────────────────
-                    if (item.kind === 'ellipse') {
-                      const STEPS = 64
-                      const rotRad = item.rotation * (Math.PI / 180)
-                      const pts: number[] = []
-                      for (let i = 0; i <= STEPS; i++) {
-                        const param = item.startParam + (item.endParam - item.startParam) * i / STEPS
-                        const lx2 = item.rx * Math.cos(param)
-                        const ly2 = item.ry * Math.sin(param)
-                        const wx = item.cx + lx2 * Math.cos(rotRad) - ly2 * Math.sin(rotRad)
-                        const wy = item.cy + lx2 * Math.sin(rotRad) + ly2 * Math.cos(rotRad)
-                        const [cx2, cy2] = toC(wx, wy, t)
-                        pts.push(cx2, cy2)
-                      }
-                      return (
-                        <Line key={item.id} points={pts}
-                          stroke={col} strokeWidth={sw}
-                          strokeScaleEnabled={false} perfectDrawEnabled={false}
-                          closed={Math.abs(item.endParam - item.startParam - Math.PI * 2) < 0.01}
-                        />
-                      )
-                    }
-
-                    // ── SPLINE ─────────────────────────────────────────────
-                    if (item.kind === 'spline') {
-                      const pts = item.points.flatMap(p => toC(p.x, p.y, t))
-                      return (
-                        <Line key={item.id} points={pts}
-                          stroke={col} strokeWidth={sw}
-                          strokeScaleEnabled={false} perfectDrawEnabled={false}
-                          closed={item.closed}
-                          tension={0}
-                        />
-                      )
-                    }
-
-                    // ── HATCH ──────────────────────────────────────────────
-                    if (item.kind === 'hatch') {
-                      if (item.outerBoundary.length < 3) return null
-                      const toCanvas = (pts2: Array<{ x: number; y: number }>) =>
-                        pts2.flatMap(p => toC(p.x, p.y, t))
-                      if (item.solidFill || item.patternName === 'SOLID') {
-                        return (
-                          <Line key={item.id}
-                            points={toCanvas(item.outerBoundary)}
-                            fill={col}
-                            opacity={0.30}
-                            stroke="transparent"
-                            strokeScaleEnabled={false} perfectDrawEnabled={false}
-                            closed
-                          />
-                        )
-                      }
-                      // Non-solid pattern: just draw boundary with dashed stroke
-                      return (
-                        <Line key={item.id}
-                          points={toCanvas(item.outerBoundary)}
-                          stroke={col}
-                          strokeWidth={0.5}
-                          strokeScaleEnabled={false} perfectDrawEnabled={false}
-                          dash={[4, 4]}
-                          closed
-                        />
-                      )
-                    }
-
-                    // ── SOLID / TRACE ──────────────────────────────────────
-                    if (item.kind === 'solid') {
-                      const pts = item.points.flatMap(p => toC(p.x, p.y, t))
-                      return (
-                        <Line key={item.id} points={pts}
-                          fill={col} opacity={0.75}
-                          stroke={col} strokeWidth={0.5}
-                          strokeScaleEnabled={false} perfectDrawEnabled={false}
-                          closed
-                        />
-                      )
-                    }
-
-                    // ── 3DFACE ─────────────────────────────────────────────
-                    if (item.kind === 'face3d') {
-                      const pts = item.points.flatMap(p => toC(p.x, p.y, t))
-                      return (
-                        <Line key={item.id} points={pts}
-                          stroke={col} strokeWidth={0.5}
-                          strokeScaleEnabled={false} perfectDrawEnabled={false}
-                          fill="transparent"
-                          closed
-                        />
-                      )
-                    }
-
-                    // ── MESH ───────────────────────────────────────────────
-                    if (item.kind === 'mesh') {
-                      return (
-                        <Group key={item.id}>
-                          {item.edges.map((edge, i) => {
-                            const [x1, y1] = toC(edge.start.x, edge.start.y, t)
-                            const [x2, y2] = toC(edge.end.x, edge.end.y, t)
-                            return (
-                              <Line key={i}
-                                points={[x1, y1, x2, y2]}
-                                stroke={col} strokeWidth={0.5}
-                                strokeScaleEnabled={false} perfectDrawEnabled={false}
-                              />
-                            )
-                          })}
-                        </Group>
-                      )
-                    }
-
-                    // ── HELIX ──────────────────────────────────────────────
-                    if (item.kind === 'helix') {
-                      const pts = item.points.flatMap(p => toC(p.x, p.y, t))
-                      return (
-                        <Line key={item.id} points={pts}
-                          stroke={col} strokeWidth={sw}
-                          strokeScaleEnabled={false} perfectDrawEnabled={false}
-                        />
-                      )
-                    }
-
-                    // ── WIPEOUT ────────────────────────────────────────────
-                    // Wipeouts mask whatever is behind them — rendered as a
-                    // filled white polygon above all previous layers.
-                    if (item.kind === 'wipeout') {
-                      const pts = item.boundary.flatMap(p => toC(p.x, p.y, t))
-                      return (
-                        <Group key={item.id}>
-                          <Line points={pts} fill="#ffffff" stroke="transparent"
-                            strokeScaleEnabled={false} perfectDrawEnabled={false} closed />
-                          {item.showFrame && (
-                            <Line points={pts}
-                              stroke={col} strokeWidth={0.5}
-                              strokeScaleEnabled={false} perfectDrawEnabled={false}
-                              fill="transparent" closed
-                            />
-                          )}
-                        </Group>
-                      )
-                    }
-
-                    // ── IMAGE placeholder ──────────────────────────────────
-                    if (item.kind === 'image') {
-                      const [ix, iy] = toC(item.x, item.y + item.h, t)   // top-left in canvas
-                      const wCanvas = item.w * t.sc
-                      const hCanvas = item.h * t.sc
-                      const fname = item.imagePath.split(/[/\\]/).pop() ?? item.imagePath
-                      return (
-                        <Group key={item.id}>
-                          <Rect x={ix} y={iy} width={wCanvas} height={hCanvas}
-                            fill="#2a2a2a" stroke="#666666"
-                            strokeWidth={0.8} strokeScaleEnabled={false} opacity={0.5}
-                          />
-                          <Text x={ix + 4} y={iy + 4}
-                            text={`IMG: ${fname}`}
-                            fontSize={11} fill="#aaaaaa"
-                            listening={false}
-                          />
-                        </Group>
-                      )
-                    }
-
-                    // ── LEADER ────────────────────────────────────────────
-                    if (item.kind === 'leader') {
-                      const pts = item.vertices.flatMap(v => toC(v.x, v.y, t))
-
-                      // Compute filled-triangle arrowhead at the tip (first vertex)
-                      let arrowTriPts: number[] = []
-                      if (item.hasArrowhead && pts.length >= 4) {
-                        const tipX = pts[0], tipY = pts[1]
-                        const nextX = pts[2], nextY = pts[3]
-                        const angle = Math.atan2(tipY - nextY, tipX - nextX)
-                        const arrowLen = 8 / zoomRef.current
-                        const halfAngle = 0.38   // ~22°
-                        arrowTriPts = [
-                          tipX, tipY,
-                          tipX - arrowLen * Math.cos(angle - halfAngle),
-                          tipY - arrowLen * Math.sin(angle - halfAngle),
-                          tipX - arrowLen * Math.cos(angle + halfAngle),
-                          tipY - arrowLen * Math.sin(angle + halfAngle),
-                        ]
-                      }
-
-                      return (
-                        <Group key={item.id}>
-                          <Line points={pts} stroke={col} strokeWidth={sw}
-                            strokeScaleEnabled={false} perfectDrawEnabled={false} />
-                          {arrowTriPts.length > 0 && (
-                            <Line
-                              points={arrowTriPts}
-                              closed
-                              fill={col}
-                              stroke="transparent"
-                              strokeScaleEnabled={false}
-                              listening={false}
-                            />
-                          )}
-                          {item.annotationText && pts.length >= 2 && (
-                            <Text
-                              x={pts[pts.length - 2] + 4}
-                              y={pts[pts.length - 1] - 4}
-                              text={item.annotationText}
-                              fontSize={11} fill={col}
-                            />
-                          )}
-                        </Group>
-                      )
-                    }
-
-                    // ── MLEADER ───────────────────────────────────────────
-                    if (item.kind === 'mleader') {
-                      return (
-                        <Group key={item.id}>
-                          {item.lines.map((line, li) => {
-                            const pts = line.flatMap(v => toC(v.x, v.y, t))
-                            return <Line key={li} points={pts} stroke={col} strokeWidth={sw}
-                              strokeScaleEnabled={false} perfectDrawEnabled={false} />
-                          })}
-                          {item.text && item.textPos && (() => {
-                            const [tx2, ty2] = toC(item.textPos.x, item.textPos.y, t)
-                            return (
-                              <Text x={tx2} y={ty2}
-                                text={item.text}
-                                fontSize={11} fill={col}
-                              />
-                            )
-                          })()}
-                        </Group>
-                      )
-                    }
-
-                    // ── TOLERANCE (GD&T frame) ─────────────────────────────
-                    if (item.kind === 'tolerance') {
-                      const [px, py] = toC(item.position.x, item.position.y, t)
-                      const boxW = item.text.length * 11 * 0.62
-                      const boxH = 11 * 1.6
-                      return (
-                        <Group key={item.id}>
-                          <Rect x={px} y={py - boxH * 0.5} width={boxW} height={boxH}
-                            stroke={col} strokeWidth={0.6}
-                            strokeScaleEnabled={false} fill="transparent"
-                          />
-                          <Text x={px + 3} y={py - boxH * 0.35}
-                            text={item.text} fontSize={11} fill={col}
-                          />
-                        </Group>
-                      )
-                    }
-
-                    // ── DIMENSION ─────────────────────────────────────────
-                    // Dimension geometry with arrowheads
-                    if (item.kind === 'dimension') {
-                      const dimColor = resolveEntityColor(item.color, item.layer, layerColorMap, '#00BFFF')
-                      const isSelected = selectedIds.has(item.id) || selectedDimKey === item.id
-                      
-                      // Group dimension lines by type
-                      const mainLines: Array<{ x1: number; y1: number; x2: number; y2: number }> = []
-                      const witnessLines: Array<{ x1: number; y1: number; x2: number; y2: number }> = []
-                      
-                      for (const l of item.lines) {
-                        const [x1, y1] = toC(l.start.x, l.start.y, t)
-                        const [x2, y2] = toC(l.end.x, l.end.y, t)
-                        const dx = x2 - x1
-                        const dy = y2 - y1
-                        const length = Math.hypot(dx, dy)
-                        
-                        // Long horizontal lines are main dimension lines
-                        if (length > 20 && Math.abs(dy) < Math.abs(dx) * 0.15) {
-                          mainLines.push({ x1, y1, x2, y2 })
-                        } else {
-                          witnessLines.push({ x1, y1, x2, y2 })
-                        }
-                      }
-                      
-                      // Calculate bounds for selection highlight
-                      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-                      for (const l of [...witnessLines, ...mainLines]) {
-                        minX = Math.min(minX, l.x1, l.x2)
-                        maxX = Math.max(maxX, l.x1, l.x2)
-                        minY = Math.min(minY, l.y1, l.y2)
-                        maxY = Math.max(maxY, l.y1, l.y2)
-                      }
-                      if (item.text) {
-                        const [tx, ty] = toC(item.textPos.x, item.textPos.y, t)
-                        minX = Math.min(minX, tx - 50)
-                        maxX = Math.max(maxX, tx + 50)
-                        minY = Math.min(minY, ty - 20)
-                        maxY = Math.max(maxY, ty + 20)
-                      }
-                      
-                      return (
-                        <Group 
-                          key={item.id}
-                          onClick={e => {
-                            e.cancelBubble = true
-                            if (isDrawingTool || activeTool !== 'select') return
-                            const isCtrl = e.evt.ctrlKey || e.evt.metaKey
-                            setSelectedIds(prev => {
-                              const next = new Set(isCtrl ? prev : [])
-                              if (isSelected && isCtrl) next.delete(item.id)
-                              else next.add(item.id)
-                              return next
-                            })
-                            setSelectedDimKey(isSelected && !e.evt.ctrlKey ? null : item.id)
-                          }}
-                          onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'pointer' }}
-                          onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default' }}
-                        >
-                          {/* Selection highlight */}
-                          {isSelected && (
-                            <Rect
-                              x={minX - 5}
-                              y={minY - 5}
-                              width={maxX - minX + 10}
-                              height={maxY - minY + 10}
-                              fill="rgba(0,115,207,0.1)"
-                              stroke="#0073cf"
-                              strokeWidth={1.2 / zoomRef.current}
-                              dash={[4 / zoomRef.current, 4 / zoomRef.current]}
-                              listening={false}
-                            />
-                          )}
-                          
-                          {/* Witness lines */}
-                          {witnessLines.map((l, i) => (
-                            <Line key={`wl${i}`}
-                              points={[l.x1, l.y1, l.x2, l.y2]}
-                              stroke={dimColor}
-                              strokeWidth={0.8}
-                              strokeScaleEnabled={false}
-                              perfectDrawEnabled={false}
-                              listening={false}
-                            />
-                          ))}
-                          
-                          {/* Main dimension lines with arrowheads */}
-                          {mainLines.map((l, i) => {
-                            const angle = Math.atan2(l.y2 - l.y1, l.x2 - l.x1)
-                            const perp = angle + Math.PI / 2
-                            const ARROW_LEN = 8 / zoomRef.current
-                            const ARROW_WIDTH = 2.5 / zoomRef.current
-                            
-                            // Left arrow (at start) - points right
-                            const lTipX = l.x1 + ARROW_LEN * Math.cos(angle)
-                            const lTipY = l.y1 + ARROW_LEN * Math.sin(angle)
-                            const lWing1X = l.x1 + ARROW_WIDTH * Math.cos(perp)
-                            const lWing1Y = l.y1 + ARROW_WIDTH * Math.sin(perp)
-                            const lWing2X = l.x1 - ARROW_WIDTH * Math.cos(perp)
-                            const lWing2Y = l.y1 - ARROW_WIDTH * Math.sin(perp)
-                            
-                            // Right arrow (at end) - points left
-                            const rTipX = l.x2 - ARROW_LEN * Math.cos(angle)
-                            const rTipY = l.y2 - ARROW_LEN * Math.sin(angle)
-                            const rWing1X = l.x2 + ARROW_WIDTH * Math.cos(perp)
-                            const rWing1Y = l.y2 + ARROW_WIDTH * Math.sin(perp)
-                            const rWing2X = l.x2 - ARROW_WIDTH * Math.cos(perp)
-                            const rWing2Y = l.y2 - ARROW_WIDTH * Math.sin(perp)
-                            
-                            return (
-                              <Group key={`dl${i}`}>
-                                {/* Dimension line */}
-                                <Line
-                                  points={[l.x1, l.y1, l.x2, l.y2]}
-                                  stroke={dimColor}
-                                  strokeWidth={0.8}
-                                  strokeScaleEnabled={false}
-                                  perfectDrawEnabled={false}
-                                  listening={false}
-                                />
-                                
-                                {/* Left arrowhead */}
-                                <Line
-                                  points={[lTipX, lTipY, lWing1X, lWing1Y, lWing2X, lWing2Y]}
-                                  closed
-                                  fill={dimColor}
-                                  stroke="transparent"
-                                  strokeScaleEnabled={false}
-                                  listening={false}
-                                />
-                                
-                                {/* Right arrowhead */}
-                                <Line
-                                  points={[rTipX, rTipY, rWing1X, rWing1Y, rWing2X, rWing2Y]}
-                                  closed
-                                  fill={dimColor}
-                                  stroke="transparent"
-                                  strokeScaleEnabled={false}
-                                  listening={false}
-                                />
-                              </Group>
-                            )
-                          })}
-                          
-                          {/* Dimension text */}
-                          {item.text && (() => {
-                            const [dtx, dty] = toC(item.textPos.x, item.textPos.y, t)
-                            return (
-                              <Text key="dt"
-                                x={dtx} y={dty}
-                                text={item.text}
-                                fontSize={11}
-                                fill={dimColor}
-                                offsetX={(item.text.length * 11 * 0.55) / 2}
-                                listening={false}
-                              />
-                            )
-                          })()}
-                        </Group>
-                      )
-                    }
-
-                    // ── INSERT GEOMETRY ───────────────────────────────────
-                    // Block reference geometry expanded by backend into
-                    // plain lines / arcs / circles / polylines in WCS.
-                    if (item.kind === 'insert_geometry') {
-                      return (
-                        <Group key={item.id}>
-                          {item.lines.map((l, i) => {
-                            const lc = resolveEntityColor(l.color, item.layer, layerColorMap, col)
-                            const [x1, y1] = toC(l.start.x, l.start.y, t)
-                            const [x2, y2] = toC(l.end.x, l.end.y, t)
-                            return <Line key={`il${i}`} points={[x1, y1, x2, y2]}
-                              stroke={lc} strokeWidth={sw} lineCap="round"
-                              strokeScaleEnabled={false} perfectDrawEnabled={false} />
-                          })}
-                          {item.circles.map((c, i) => {
-                            const cc = resolveEntityColor(c.color, item.layer, layerColorMap, col)
-                            const [cx2, cy2] = toC(c.cx, c.cy, t)
-                            return <Circle key={`ic${i}`} x={cx2} y={cy2}
-                              radius={Math.max(0, c.r * t.sc)}
-                              stroke={cc} strokeWidth={sw}
-                              strokeScaleEnabled={false} perfectDrawEnabled={false}
-                              fill="transparent" />
-                          })}
-                          {item.arcs.map((a, i) => {
-                            const ac = resolveEntityColor(a.color, item.layer, layerColorMap, col)
-                            const spanDeg = a.endAngle > a.startAngle
-                              ? a.endAngle - a.startAngle
-                              : a.endAngle + 360 - a.startAngle
-                            const [acx, acy] = toC(a.cx, a.cy, t)
-                            return (
-                              <KonvaArc key={`ia${i}`}
-                                x={acx} y={acy}
-                                innerRadius={Math.max(0, a.r * t.sc)}
-                                outerRadius={Math.max(0, a.r * t.sc)}
-                                angle={spanDeg}
-                                rotation={-(a.startAngle + spanDeg)}
-                                stroke={ac} strokeWidth={sw}
-                                strokeScaleEnabled={false}
-                                fill="transparent"
-                              />
-                            )
-                          })}
-                          {item.polylines.map((pl, i) => {
-                            const pc = resolveEntityColor(pl.color, item.layer, layerColorMap, col)
-                            const pts = pl.points.flatMap(p => toC(p.x, p.y, t))
-                            return <Line key={`ip${i}`} points={pts}
-                              stroke={pc} strokeWidth={sw} closed={pl.closed}
-                              strokeScaleEnabled={false} perfectDrawEnabled={false} />
-                          })}
-                        </Group>
-                      )
-                    }
-
-                    return null   // unknown kind — future-proof fallback
-                  })}
+                  <Shape sceneFunc={drawFloorPlanItems} perfectDrawEnabled={false} listening={false} />
                 </Layer>
 
                 {/* Selectable DXF circles — separate interactive layer */}
@@ -3432,7 +3611,7 @@ onClick={e => { if (isLayerLocked(lines[0]?.layer ?? '0')) return; e.cancelBubbl
                     Walls in toMoveSet render inside dragGroupRef which is moved imperatively
                     via Konva x/y during drag — zero React re-renders during drag movement. */}
                 <Layer>{(() => {
-                  const renderWall = (wall: WallSeg) => {
+                  const renderWall = (wall: WallSeg, includeVisual = false) => {
                     if (wall.fromArc) return null
                     if (!isLayerVisible(wall.layer ?? '0')) return null
                     const [sx, sy] = toC(wall.start.x, wall.start.y, t)
@@ -3561,11 +3740,19 @@ onClick={e => { if (isLayerLocked(lines[0]?.layer ?? '0')) return; e.cancelBubbl
                               return prev
                             })
                           }}
-                          onMouseEnter={ev => { ev.target.getStage()!.container().style.cursor = 'move'; if (wall.groupId) setHoveredGroupId(wall.groupId) }}
-                          onMouseLeave={ev => { ev.target.getStage()!.container().style.cursor = 'default'; setHoveredGroupId(null) }}
+                          onMouseEnter={ev => {
+                            ev.target.getStage()!.container().style.cursor = 'move'
+                            hoveredGroupIdRef.current = wall.groupId ?? null
+                            wallsSceneShapeRef.current?.getLayer()?.batchDraw()
+                          }}
+                          onMouseLeave={ev => {
+                            ev.target.getStage()!.container().style.cursor = 'default'
+                            hoveredGroupIdRef.current = null
+                            wallsSceneShapeRef.current?.getLayer()?.batchDraw()
+                          }}
                         />
-                        {(() => {
-                          const isHoverGroup = !isSel && !isDragging && !!wall.groupId && wall.groupId === hoveredGroupId
+                        {includeVisual && (() => {
+                          const isHoverGroup = !isSel && !isDragging && !!wall.groupId && wall.groupId === hoveredGroupIdRef.current
                           const isGroupSelected = isSel && selectedGroupId !== null && wallIdToGroupId.get(wall.id) === selectedGroupId
                           return (
                             <Line points={curvePts ?? [sx, sy, ex, ey]} bezier={!!curvePts}
@@ -3637,10 +3824,15 @@ onClick={e => { if (isLayerLocked(lines[0]?.layer ?? '0')) return; e.cancelBubbl
                   }
                   return (
                     <>
-                      {effectiveWalls.filter(w => !toMoveSet.has(w.id)).map(renderWall)}
+                      {/* All static wall visuals in one Canvas 2D pass (no per-wall Konva Line nodes) */}
+                      <Shape ref={wallsSceneShapeRef} sceneFunc={drawWallsStatic} perfectDrawEnabled={false} listening={false} />
+                      {/* Memoized hit-area Lines — only rebuilt when walls/transform change, not on selection/hover */}
+                      {wallHitAreaLines}
+                      {/* Endpoint grips for single selected non-dragged wall — tiny re-render on selection */}
+                      {selectedWallEndpoints}
                       {/* Dragged walls live in their own Group — moved via Konva x/y, not React state */}
                       <Group ref={dragGroupRef}>
-                        {effectiveWalls.filter(w => toMoveSet.has(w.id)).map(renderWall)}
+                        {effectiveWalls.filter(w => toMoveSet.has(w.id)).map(w => renderWall(w, true))}
                       </Group>
                     </>
                   )

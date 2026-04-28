@@ -14,8 +14,10 @@ const SNAP_TH = 0.15
  * Detect rooms from wall segments (returns polygons only)
  */
 export function detectRooms(walls: WallSeg[]): Pt[][] {
-  // Exclude arc chord segments (circles/arcs) — arcs form closed curves but are not rooms
-  const segs = walls.filter(w => !w.isDetail && !w.isOuter && !w.id.startsWith('pl-') && !w.fromArc)
+  // Exclude arc chord segments and original DXF polylines (large floor plan perimeters).
+  // Keep user-created polylines ('pl-user-pl-*') so drag-dropped room templates are detected.
+  const segs = walls.filter(w => !w.isDetail && !w.isOuter && !w.fromArc &&
+    (!w.id.startsWith('pl-') || w.id.startsWith('pl-user-pl-')))
   if (segs.length < 3) return []
 
   const nodes: Pt[] = []
@@ -134,7 +136,8 @@ export function detectRooms(walls: WallSeg[]): Pt[][] {
  * Detect rooms with associated wall IDs
  */
 export function detectRoomsWithWalls(walls: WallSeg[]): Array<{ polygon: Pt[]; wallIds: string[] }> {
-  const segs = walls.filter(w => !w.isDetail && !w.isOuter && !w.id.startsWith('pl-') && !w.fromArc)
+  const segs = walls.filter(w => !w.isDetail && !w.isOuter && !w.fromArc &&
+    (!w.id.startsWith('pl-') || w.id.startsWith('pl-user-pl-')))
   if (segs.length < 3) return []
 
   const nodes: Pt[] = []
